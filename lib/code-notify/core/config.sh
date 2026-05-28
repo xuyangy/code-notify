@@ -41,6 +41,7 @@ CLAUDE_EVENT_ALERT_TYPES="SubagentStart|SubagentStop|TeammateIdle|TaskCreated|Ta
 # - permission_prompt: AI needs permission to use a tool
 # - auth_success: Authentication success notifications
 # - elicitation_dialog: MCP tool input needed
+# - ask_user: AI is asking a question via AskUserQuestion (immediate PreToolUse notification)
 # - SubagentStart/SubagentStop: Claude Code subagent lifecycle events
 # - TeammateIdle: Claude Code teammate waiting for input
 # - TaskCreated/TaskCompleted: Claude Code agent-team task lifecycle events
@@ -269,6 +270,15 @@ get_project_claude_notify_command() {
 get_project_claude_stop_command() {
     local project_name="$1"
     printf '%s stop claude %s\n' "$(shell_quote "$(get_notify_script)")" "$(shell_quote "$project_name")"
+}
+
+get_global_claude_pre_tool_use_command() {
+    printf '%s PreToolUse claude\n' "$(get_notify_script)"
+}
+
+get_project_claude_pre_tool_use_command() {
+    local project_name="$1"
+    printf '%s PreToolUse claude %s\n' "$(shell_quote "$(get_notify_script)")" "$(shell_quote "$project_name")"
 }
 
 get_managed_claude_event_pattern() {
@@ -917,6 +927,188 @@ PYTHON
     fi
 }
 
+# ============================================
+# PreToolUse Hook for AskUserQuestion
+# ============================================
+
+# Register PreToolUse hook for AskUserQuestion when ask_user alert type is enabled
+register_ask_user_hook() {
+    local file="$1"
+    local pre_tool_cmd="$2"
+
+    if ! is_notify_type_enabled "ask_user"; then
+        return 0
+    fi
+
+    if has_jq; then
+        local settings="{}"
+        if [[ -f "$file" ]]; then
+            settings=$(cat "$file")
+        fi
+
+        local new_settings
+        new_settings=$(printf '%s\n' "$settings" | jq --arg cmd "$pre_tool_cmd" '
+            def array_or_empty:
+                if type == "array" then . else [] end;
+            .hooks = (if (.hooks | type) == "object" then .hooks else {} end) |
+            .hooks.PreToolUse = (
+                (.hooks.PreToolUse | array_or_empty | map(select(.matcher != "AskUserQuestion"))) + [{
+                    "matcher": "AskUserQuestion",
+                    "hooks": [{
+                        "type": "command",
+                        "command": $cmd
+                    }]
+                }]
+            )
+        ' 2>/dev/null)
+
+        if [[ -n "$new_settings" ]]; then
+            atomic_write "$file" "$new_settings"
+        fi
+    elif has_python3; then
+        local settings="{}"
+        if [[ -f "$file" ]]; then
+            settings=$(cat "$file")
+        fi
+
+        local tmp_json
+        tmp_json=$(mktemp) || return 1
+        printf '%s\n' "$settings" > "$tmp_json"
+
+        python3 - "$file" "$pre_tool_cmd" "$tmp_json" << 'PYTHON'
+import json, os, sys, tempfile
+
+file_path, pre_tool_cmd, json_file = sys.argv[1:4]
+
+try:
+    with open(json_file, "r") as fh:
+        settings = json.load(fh)
+finally:
+    try:
+        os.unlink(json_file)
+    except OSError:
+        pass
+
+hooks = settings.get("hooks")
+if not isinstance(hooks, dict):
+    hooks = {}
+else:
+    hooks = dict(hooks)
+
+pre_tool_entries = [e for e in hooks.get("PreToolUse", []) if e.get("matcher") != "AskUserQuestion"]
+pre_tool_entries.append({
+    "matcher": "AskUserQuestion",
+    "hooks": [{"type": "command", "command": pre_tool_cmd}]
+})
+hooks["PreToolUse"] = pre_tool_entries
+settings["hooks"] = hooks
+
+dir_path = os.path.dirname(file_path)
+content = json.dumps(settings, indent=2)
+fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".tmp.")
+try:
+    with os.fdopen(fd, "w") as fh:
+        fh.write(content)
+        fh.write("\n")
+    os.replace(tmp_path, file_path)
+except Exception:
+    os.unlink(tmp_path)
+    raise
+PYTHON
+        return $?
+    else
+        echo "Error: jq or python3 required for config preservation" >&2
+        echo "Install jq: brew install jq" >&2
+        return 1
+    fi
+}
+
+# Unregister PreToolUse hook for AskUserQuestion
+unregister_ask_user_hook() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        return 0
+    fi
+
+    if has_jq; then
+        local settings
+        settings=$(cat "$file")
+
+        local new_settings
+        new_settings=$(printf '%s\n' "$settings" | jq '
+            def array_or_empty:
+                if type == "array" then . else [] end;
+            if (.hooks // {}).PreToolUse then
+                .hooks.PreToolUse = (
+                    (.hooks.PreToolUse | array_or_empty) | map(
+                        select(.matcher != "AskUserQuestion")
+                    )
+                ) |
+                if (.hooks.PreToolUse | length) == 0 then del(.hooks.PreToolUse) else . end |
+                if (.hooks | length) == 0 then del(.hooks) else . end
+            else . end
+        ' 2>/dev/null)
+
+        if [[ -n "$new_settings" ]]; then
+            atomic_write "$file" "$new_settings"
+        fi
+    elif has_python3; then
+        local tmp_json
+        tmp_json=$(mktemp) || return 1
+        cat "$file" > "$tmp_json"
+
+        python3 - "$file" "$tmp_json" << 'PYTHON'
+import json, os, sys, tempfile
+
+file_path, json_file = sys.argv[1:3]
+
+try:
+    with open(json_file, "r") as fh:
+        settings = json.load(fh)
+finally:
+    try:
+        os.unlink(json_file)
+    except OSError:
+        pass
+
+hooks = settings.get("hooks", {})
+pre_tool = hooks.get("PreToolUse", [])
+hooks["PreToolUse"] = [e for e in pre_tool if e.get("matcher") != "AskUserQuestion"]
+if not hooks["PreToolUse"]:
+    del hooks["PreToolUse"]
+if hooks:
+    settings["hooks"] = hooks
+else:
+    settings.pop("hooks", None)
+
+if not settings:
+    try:
+        os.remove(file_path)
+    except FileNotFoundError:
+        pass
+    raise SystemExit(0)
+
+dir_path = os.path.dirname(file_path)
+content = json.dumps(settings, indent=2)
+fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".tmp.")
+try:
+    with os.fdopen(fd, "w") as fh:
+        fh.write(content)
+        fh.write("\n")
+    os.replace(tmp_path, file_path)
+except Exception:
+    os.unlink(tmp_path)
+    raise
+PYTHON
+        return $?
+    else
+        echo "Error: jq or python3 required for config preservation" >&2
+        echo "Install jq: brew install jq" >&2
+        return 1
+    fi
+}
+
 enable_hooks_in_settings() {
     local notify_matcher
     notify_matcher=$(get_notify_matcher)
@@ -929,6 +1121,9 @@ enable_hooks_in_settings() {
         "enable" \
         "$(get_notify_script) " \
         " claude"
+
+    # Register PreToolUse hook for AskUserQuestion if ask_user alert type is enabled
+    register_ask_user_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_pre_tool_use_command)"
 }
 
 # Disable hooks in settings.json (new format)
@@ -945,6 +1140,9 @@ disable_hooks_in_settings() {
         "disable" \
         "$(get_notify_script) " \
         " claude"
+
+    # Remove PreToolUse hook for AskUserQuestion
+    unregister_ask_user_hook "$GLOBAL_SETTINGS_FILE"
 }
 
 # Disable hooks in project settings.json
@@ -965,6 +1163,9 @@ disable_project_hooks_in_settings() {
         "disable" \
         "$(shell_quote "$(get_notify_script)") " \
         " claude $(shell_quote "$project_name")"
+
+    # Remove PreToolUse hook for AskUserQuestion
+    unregister_ask_user_hook "$project_settings"
 }
 
 # Enable hooks in project settings.json
@@ -985,6 +1186,9 @@ enable_project_hooks_in_settings() {
         "enable" \
         "$(shell_quote "$(get_notify_script)") " \
         " claude $(shell_quote "$project_name")"
+
+    # Register PreToolUse hook for AskUserQuestion if ask_user alert type is enabled
+    register_ask_user_hook "$project_settings" "$(get_project_claude_pre_tool_use_command "$project_name")"
 }
 
 # Check if project has settings.json with code-notify hooks
@@ -1333,7 +1537,7 @@ normalize_alert_type() {
     key="$(printf '%s' "$type" | tr '[:upper:]-' '[:lower:]_')"
 
     case "$key" in
-        "idle_prompt"|"permission_prompt"|"auth_success"|"elicitation_dialog")
+        "idle_prompt"|"permission_prompt"|"auth_success"|"elicitation_dialog"|"ask_user")
             printf '%s\n' "$key"
             ;;
         "subagentstart"|"subagent_start")

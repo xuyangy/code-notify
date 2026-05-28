@@ -395,7 +395,7 @@ should_suppress_notification() {
 }
 
 # Check if notification should be suppressed
-if [[ "$HOOK_TYPE" == "stop" ]] || [[ "$HOOK_TYPE" == "notification" ]] || is_claude_event_hook; then
+if [[ "$HOOK_TYPE" == "stop" ]] || [[ "$HOOK_TYPE" == "notification" ]] || [[ "$HOOK_TYPE" == "PreToolUse" ]] || is_claude_event_hook; then
     if should_suppress_notification; then
         exit 0
     fi
@@ -476,8 +476,35 @@ case "$HOOK_TYPE" in
         SOUND="Glass"
         ;;
     "PreToolUse")
-        # Silent for PreToolUse - just log, no notification
-        exit 0
+        # AskUserQuestion: extract question text and show notification
+        ASK_QUESTION_TEXT=""
+        if has_jq; then
+            ASK_QUESTION_TEXT=$(printf '%s' "$HOOK_DATA" | jq -r '.tool_input.questions[0].question // ""' 2>/dev/null)
+        elif has_python3; then
+            ASK_QUESTION_TEXT=$(printf '%s' "$HOOK_DATA" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    questions = data.get("tool_input", {}).get("questions", [])
+    print(questions[0]["question"] if questions else "", end="")
+except Exception:
+    print("", end="")
+' 2>/dev/null)
+        fi
+
+        TITLE="$TOOL_DISPLAY ❓"
+        SUBTITLE="Question"
+        if [[ -n "$ASK_QUESTION_TEXT" ]]; then
+            MESSAGE=$(printf '%s\n' "$ASK_QUESTION_TEXT" | head -c 150 | tr '\n' ' ')
+            MESSAGE="${MESSAGE% }"
+            if [[ ${#ASK_QUESTION_TEXT} -gt 150 ]]; then
+                MESSAGE="${MESSAGE}..."
+            fi
+        else
+            MESSAGE="$TOOL_DISPLAY is asking a question"
+        fi
+        VOICE_MESSAGE="$TOOL_DISPLAY is asking a question"
+        SOUND="Ping"
         ;;
     *)
         TITLE="$TOOL_DISPLAY 📢"

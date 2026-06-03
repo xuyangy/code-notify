@@ -1654,6 +1654,7 @@ $LogFile = "$ClaudeHome\logs\notifications.log"
 $HookData = ""
 try {
     if ([Console]::IsInputRedirected) {
+        [Console]::InputEncoding = [System.Text.Encoding]::UTF8
         $HookData = [Console]::In.ReadToEnd()
     }
 } catch {

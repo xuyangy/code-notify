@@ -996,6 +996,12 @@ show_alerts_status() {
         echo "    ${MUTE} ${DIM}elicitation_dialog${RESET}"
     fi
 
+    if is_notify_type_enabled "ask_user"; then
+        echo "    ${CHECK_MARK} ${GREEN}ask_user${RESET} - AI asks a question (immediate notification)"
+    else
+        echo "    ${MUTE} ${DIM}ask_user${RESET}"
+    fi
+
     echo ""
     echo "  Claude agent/team hook events:"
     if is_notify_type_enabled "SubagentStart"; then
@@ -1050,6 +1056,7 @@ show_available_alert_types() {
     echo "  ${CYAN}permission_prompt${RESET}  - AI needs tool permission (can be noisy)"
     echo "  ${CYAN}auth_success${RESET}       - Authentication success"
     echo "  ${CYAN}elicitation_dialog${RESET} - MCP tool input needed"
+    echo "  ${CYAN}ask_user${RESET}           - AI asks a question (immediate PreToolUse notification)"
     echo ""
     echo "Claude agent/team hook events:"
     echo "  ${CYAN}SubagentStart${RESET}      - A Claude subagent started"
@@ -1079,9 +1086,17 @@ add_alert_type() {
     fi
 
     add_notify_type "$type"
+
+    # For ask_user: register PreToolUse hook immediately
+    if [[ "$type" == "ask_user" ]] && is_tool_enabled "claude"; then
+        register_ask_user_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_pre_tool_use_command)"
+    fi
+
     success "Added: $type"
-    echo ""
-    info "Run ${CYAN}cn on${RESET} to apply changes"
+    if [[ "$type" != "ask_user" ]]; then
+        echo ""
+        info "Run ${CYAN}cn on${RESET} to apply changes"
+    fi
 }
 
 # Remove an alert type
@@ -1102,9 +1117,17 @@ remove_alert_type() {
     fi
 
     remove_notify_type "$type"
+
+    # For ask_user: unregister PreToolUse hook immediately
+    if [[ "$type" == "ask_user" ]] && is_tool_enabled "claude"; then
+        unregister_ask_user_hook "$GLOBAL_SETTINGS_FILE"
+    fi
+
     success "Removed: $type"
-    echo ""
-    info "Run ${CYAN}cn on${RESET} to apply changes"
+    if [[ "$type" != "ask_user" ]]; then
+        echo ""
+        info "Run ${CYAN}cn on${RESET} to apply changes"
+    fi
 }
 
 # Reset alert types to default

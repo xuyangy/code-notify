@@ -1037,6 +1037,7 @@ show_alerts_status() {
     echo ""
     info "Examples:"
     echo "  ${CYAN}cn alerts add permission_prompt${RESET}   # Also notify on tool permission requests"
+    echo "  ${CYAN}cn alerts add ask_user${RESET}            # Notify immediately when Claude asks a question"
     echo "  ${CYAN}cn alerts add SubagentStop${RESET}        # Notify when Claude subagents finish"
     echo "  ${CYAN}cn alerts add auth_success${RESET}        # Also notify on auth success"
     echo "  ${CYAN}cn alerts remove permission_prompt${RESET} # Stop permission notifications"
@@ -1120,7 +1121,7 @@ remove_alert_type() {
 
     # For ask_user: unregister PreToolUse hook immediately
     if [[ "$type" == "ask_user" ]] && is_tool_enabled "claude"; then
-        unregister_ask_user_hook "$GLOBAL_SETTINGS_FILE"
+        unregister_ask_user_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_pre_tool_use_command)"
     fi
 
     success "Removed: $type"

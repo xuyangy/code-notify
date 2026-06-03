@@ -285,6 +285,10 @@ get_managed_claude_event_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(SubagentStart|SubagentStop|TeammateIdle|TaskCreated|TaskCompleted)(?:\s|$)'
 }
 
+get_managed_claude_pre_tool_use_pattern() {
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*PreToolUse(?:\s|$)'
+}
+
 get_managed_claude_notification_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(notification|PreToolUse)(?:\s|$)'
 }
@@ -935,6 +939,8 @@ PYTHON
 register_ask_user_hook() {
     local file="$1"
     local pre_tool_cmd="$2"
+    local pre_tool_pattern
+    pre_tool_pattern="$(get_managed_claude_pre_tool_use_pattern)"
 
     if ! is_notify_type_enabled "ask_user"; then
         return 0
@@ -947,12 +953,34 @@ register_ask_user_hook() {
         fi
 
         local new_settings
-        new_settings=$(printf '%s\n' "$settings" | jq --arg cmd "$pre_tool_cmd" '
+        new_settings=$(printf '%s\n' "$settings" | jq \
+            --arg cmd "$pre_tool_cmd" \
+            --arg pattern "$pre_tool_pattern" \
+            '
             def array_or_empty:
                 if type == "array" then . else [] end;
+            def is_managed_hook($exact; $pattern):
+                ((.type // "") == "command") and
+                (
+                    ((.command // "") == $exact) or
+                    (((.command // "") | test($pattern)) // false)
+                );
+            def strip_managed_ask_user($exact; $pattern):
+                array_or_empty
+                | map(
+                    if (.matcher // "") == "AskUserQuestion" and ((.hooks | type) == "array") then
+                        .hooks = (
+                            (.hooks | array_or_empty)
+                            | map(select((is_managed_hook($exact; $pattern)) | not))
+                        )
+                    else
+                        .
+                    end
+                )
+                | map(select(((.hooks | type) != "array") or ((.hooks | length) > 0)));
             .hooks = (if (.hooks | type) == "object" then .hooks else {} end) |
             .hooks.PreToolUse = (
-                (.hooks.PreToolUse | array_or_empty | map(select(.matcher != "AskUserQuestion"))) + [{
+                (.hooks.PreToolUse | strip_managed_ask_user($cmd; $pattern)) + [{
                     "matcher": "AskUserQuestion",
                     "hooks": [{
                         "type": "command",
@@ -975,10 +1003,11 @@ register_ask_user_hook() {
         tmp_json=$(mktemp) || return 1
         printf '%s\n' "$settings" > "$tmp_json"
 
-        python3 - "$file" "$pre_tool_cmd" "$tmp_json" << 'PYTHON'
+        python3 - "$file" "$pre_tool_cmd" "$pre_tool_pattern" "$tmp_json" << 'PYTHON'
 import json, os, sys, tempfile
+import re
 
-file_path, pre_tool_cmd, json_file = sys.argv[1:4]
+file_path, pre_tool_cmd, pre_tool_pattern, json_file = sys.argv[1:5]
 
 try:
     with open(json_file, "r") as fh:
@@ -995,7 +1024,30 @@ if not isinstance(hooks, dict):
 else:
     hooks = dict(hooks)
 
-pre_tool_entries = [e for e in hooks.get("PreToolUse", []) if e.get("matcher") != "AskUserQuestion"]
+pre_tool_regex = re.compile(pre_tool_pattern)
+
+def is_managed_hook(hook):
+    if not isinstance(hook, dict) or hook.get("type") != "command":
+        return False
+    command = hook.get("command")
+    if not isinstance(command, str):
+        return False
+    return command == pre_tool_cmd or bool(pre_tool_regex.search(command))
+
+pre_tool_entries = []
+for entry in hooks.get("PreToolUse", []):
+    if not isinstance(entry, dict):
+        pre_tool_entries.append(entry)
+        continue
+    if entry.get("matcher", "") != "AskUserQuestion":
+        pre_tool_entries.append(entry)
+        continue
+    filtered_hooks = [hook for hook in entry.get("hooks", []) if not is_managed_hook(hook)]
+    if filtered_hooks:
+        new_entry = dict(entry)
+        new_entry["hooks"] = filtered_hooks
+        pre_tool_entries.append(new_entry)
+
 pre_tool_entries.append({
     "matcher": "AskUserQuestion",
     "hooks": [{"type": "command", "command": pre_tool_cmd}]
@@ -1026,6 +1078,9 @@ PYTHON
 # Unregister PreToolUse hook for AskUserQuestion
 unregister_ask_user_hook() {
     local file="$1"
+    local pre_tool_cmd="${2:-}"
+    local pre_tool_pattern
+    pre_tool_pattern="$(get_managed_claude_pre_tool_use_pattern)"
 
     if [[ ! -f "$file" ]]; then
         return 0
@@ -1036,14 +1091,32 @@ unregister_ask_user_hook() {
         settings=$(cat "$file")
 
         local new_settings
-        new_settings=$(printf '%s\n' "$settings" | jq '
+        new_settings=$(printf '%s\n' "$settings" | jq \
+            --arg cmd "$pre_tool_cmd" \
+            --arg pattern "$pre_tool_pattern" \
+            '
             def array_or_empty:
                 if type == "array" then . else [] end;
+            def is_managed_hook($exact; $pattern):
+                ((.type // "") == "command") and
+                (
+                    ((($exact != "") and ((.command // "") == $exact))) or
+                    (((.command // "") | test($pattern)) // false)
+                );
             if (.hooks // {}).PreToolUse then
                 .hooks.PreToolUse = (
-                    (.hooks.PreToolUse | array_or_empty) | map(
-                        select(.matcher != "AskUserQuestion")
+                    (.hooks.PreToolUse | array_or_empty)
+                    | map(
+                        if (.matcher // "") == "AskUserQuestion" and ((.hooks | type) == "array") then
+                            .hooks = (
+                                (.hooks | array_or_empty)
+                                | map(select((is_managed_hook($cmd; $pattern)) | not))
+                            )
+                        else
+                            .
+                        end
                     )
+                    | map(select(((.hooks | type) != "array") or ((.hooks | length) > 0)))
                 ) |
                 if (.hooks.PreToolUse | length) == 0 then del(.hooks.PreToolUse) else . end |
                 if (.hooks | length) == 0 then del(.hooks) else . end
@@ -1058,10 +1131,11 @@ unregister_ask_user_hook() {
         tmp_json=$(mktemp) || return 1
         cat "$file" > "$tmp_json"
 
-        python3 - "$file" "$tmp_json" << 'PYTHON'
+        python3 - "$file" "$pre_tool_cmd" "$pre_tool_pattern" "$tmp_json" << 'PYTHON'
 import json, os, sys, tempfile
+import re
 
-file_path, json_file = sys.argv[1:3]
+file_path, pre_tool_cmd, pre_tool_pattern, json_file = sys.argv[1:5]
 
 try:
     with open(json_file, "r") as fh:
@@ -1074,8 +1148,32 @@ finally:
 
 hooks = settings.get("hooks", {})
 pre_tool = hooks.get("PreToolUse", [])
-hooks["PreToolUse"] = [e for e in pre_tool if e.get("matcher") != "AskUserQuestion"]
-if not hooks["PreToolUse"]:
+pre_tool_regex = re.compile(pre_tool_pattern)
+
+def is_managed_hook(hook):
+    if not isinstance(hook, dict) or hook.get("type") != "command":
+        return False
+    command = hook.get("command")
+    if not isinstance(command, str):
+        return False
+    return (pre_tool_cmd and command == pre_tool_cmd) or bool(pre_tool_regex.search(command))
+
+filtered_entries = []
+for entry in pre_tool:
+    if not isinstance(entry, dict):
+        filtered_entries.append(entry)
+        continue
+    if entry.get("matcher", "") != "AskUserQuestion":
+        filtered_entries.append(entry)
+        continue
+    filtered_hooks = [hook for hook in entry.get("hooks", []) if not is_managed_hook(hook)]
+    if filtered_hooks:
+        new_entry = dict(entry)
+        new_entry["hooks"] = filtered_hooks
+        filtered_entries.append(new_entry)
+
+hooks["PreToolUse"] = filtered_entries
+if "PreToolUse" in hooks and not hooks["PreToolUse"]:
     del hooks["PreToolUse"]
 if hooks:
     settings["hooks"] = hooks
@@ -1142,7 +1240,7 @@ disable_hooks_in_settings() {
         " claude"
 
     # Remove PreToolUse hook for AskUserQuestion
-    unregister_ask_user_hook "$GLOBAL_SETTINGS_FILE"
+    unregister_ask_user_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_pre_tool_use_command)"
 }
 
 # Disable hooks in project settings.json
@@ -1165,7 +1263,7 @@ disable_project_hooks_in_settings() {
         " claude $(shell_quote "$project_name")"
 
     # Remove PreToolUse hook for AskUserQuestion
-    unregister_ask_user_hook "$project_settings"
+    unregister_ask_user_hook "$project_settings" "$(get_project_claude_pre_tool_use_command "$project_name")"
 }
 
 # Enable hooks in project settings.json

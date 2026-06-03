@@ -13,7 +13,7 @@ Desktop notifications for AI coding tools - get alerts when tasks complete or in
   <img src="assets/multi-tools-support-02.png" width="48%" alt="All tools enabled"/>
 </p>
 
-[![Version](https://img.shields.io/badge/version-1.7.4-blue.svg)](https://github.com/mylee04/code-notify/releases)
+[![Version](https://img.shields.io/badge/version-1.8.0-blue.svg)](https://github.com/mylee04/code-notify/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![macOS](https://img.shields.io/badge/macOS-supported-green.svg)](https://www.apple.com/macos)
 [![Linux](https://img.shields.io/badge/Linux-supported-green.svg)](https://www.linux.org/)
@@ -21,11 +21,11 @@ Desktop notifications for AI coding tools - get alerts when tasks complete or in
 
 ---
 
-## What's New in v1.7.4
+## What's New in v1.8.0
 
-- **Claude agent/team event alerts**: `cn alerts` can now opt into `SubagentStop`, `TeammateIdle`, `TaskCompleted`, and related Claude hook events
-- **Less noisy subagent workflows**: Claude event hooks get their own rate-limit bucket via `CODE_NOTIFY_EVENT_RATE_LIMIT_SECONDS`
-- **npm package metadata fixed**: npm global install now keeps the `cn`, `cnp`, and `code-notify` binaries when published
+- **Immediate AskUserQuestion alerts**: `cn alerts add ask_user` now enables a Claude `PreToolUse` hook for `AskUserQuestion` prompts
+- **Preserves custom PreToolUse hooks**: enabling or removing `ask_user` only manages code-notify's own hook and keeps existing user hooks intact
+- **Windows UTF-8 stdin fix**: Windows notifications now read redirected Claude hook payloads as UTF-8 before parsing question text
 
 ---
 
@@ -178,6 +178,7 @@ By default, notifications only fire when the AI is idle and waiting for input (`
 ```bash
 cn alerts                          # Show current config
 cn alerts add permission_prompt    # Also notify on tool permission requests
+cn alerts add ask_user             # Notify immediately when Claude asks a question
 cn alerts add SubagentStop         # Also notify when Claude subagents finish
 cn alerts remove permission_prompt # Remove permission notifications
 cn alerts reset                    # Back to default (idle_prompt only)
@@ -189,13 +190,14 @@ cn alerts reset                    # Back to default (idle_prompt only)
 | `permission_prompt`  | AI needs tool permission (Y/n)                 |
 | `auth_success`       | Authentication success                         |
 | `elicitation_dialog` | MCP tool input needed                          |
+| `ask_user`           | Claude asks a question via AskUserQuestion     |
 | `SubagentStart`      | Claude subagent started                        |
 | `SubagentStop`       | Claude subagent completed                      |
 | `TeammateIdle`       | Claude teammate is waiting for input           |
 | `TaskCreated`        | Claude agent-team task was created             |
 | `TaskCompleted`      | Claude agent-team task completed               |
 
-Alert-type matching applies to Claude Code notification hooks and Gemini CLI notification hooks. Claude Code agent/team events are separate hook events and are opt-in via `cn alerts add SubagentStop`, `cn alerts add TeammateIdle`, or `cn alerts add TaskCompleted`.
+Alert-type matching applies to Claude Code notification hooks and Gemini CLI notification hooks. `ask_user` is a Claude-only `PreToolUse` hook for `AskUserQuestion`; it is applied immediately when Claude notifications are already enabled. Claude Code agent/team events are separate hook events and are opt-in via `cn alerts add SubagentStop`, `cn alerts add TeammateIdle`, or `cn alerts add TaskCompleted`.
 
 Agent-team and subagent workflows can be noisy if `permission_prompt` is enabled. If you only want idle pings, run `cn alerts remove permission_prompt && cn on`. Codex currently uses completion events from `notify`, so `permission_prompt` and `idle_prompt` settings do not change Codex behavior.
 

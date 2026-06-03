@@ -230,6 +230,13 @@ else
     test_fail "Claude event alert hooks failed"
 fi
 
+test_start "ask_user alert preservation"
+if bash tests/test-ask-user-alert.sh >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "ask_user alert preservation failed"
+fi
+
 # Summary
 echo ""
 echo "Test Summary:"

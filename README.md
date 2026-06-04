@@ -19,10 +19,15 @@ Code-Notify can now watch Codex and Claude usage limits and tell you when tokens
 
 Voice samples:
 
-| Alert | Play |
-| --- | --- |
-| Codex daily limit reset | [Play sample](https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-daily-limit-reset.m4a) |
-| Codex weekly limit reset | [Play sample](https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-weekly-limit-reset.m4a) |
+**Codex daily limit reset**
+
+<video src="https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-daily-limit-reset.mp4" controls></video>
+
+**Codex weekly limit reset**
+
+<video src="https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-weekly-limit-reset.mp4" controls></video>
+
+If GitHub does not render the inline player in your browser, open the fallback audio files: [daily](https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-daily-limit-reset.m4a), [weekly](https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-weekly-limit-reset.m4a).
 
 ```bash
 cn usage on

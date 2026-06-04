@@ -21,11 +21,11 @@ Voice samples:
 
 **Codex daily limit reset**
 
-<video src="https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-daily-limit-reset.mp4" controls></video>
+<video src="https://github.com/user-attachments/assets/a7e339d5-4c57-46d3-97da-cea0bf8df593" controls></video>
 
 **Codex weekly limit reset**
 
-<video src="https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-weekly-limit-reset.mp4" controls></video>
+<video src="https://github.com/user-attachments/assets/4455612b-c714-4457-8bf9-c37787e8f8c8" controls></video>
 
 If GitHub does not render the inline player in your browser, open the fallback audio files: [daily](https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-daily-limit-reset.m4a), [weekly](https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-weekly-limit-reset.m4a).
 

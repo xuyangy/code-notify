@@ -8,6 +8,28 @@
 
 Desktop notifications for AI coding tools - get alerts when tasks complete or input is needed.
 
+## Latest: Usage Limit Reset Alerts
+
+Code-Notify can now watch Codex and Claude usage limits and tell you when tokens are back.
+
+- **Daily reset**: `Codex token daily limit reset`
+- **Weekly reset**: `Codex token weekly limit reset`
+- **Low-usage warnings**: 20% and 10% remaining
+- **Delivery options**: desktop notification, voice, sound, Slack, or Discord
+
+Voice samples:
+
+| Alert | Play |
+| --- | --- |
+| Codex daily limit reset | [Play sample](https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-daily-limit-reset.m4a) |
+| Codex weekly limit reset | [Play sample](https://github.com/mylee04/code-notify/raw/main/assets/audio/codex-token-weekly-limit-reset.m4a) |
+
+```bash
+cn usage on
+cn usage reset-alerts voice on
+cn usage reset-alerts sound default
+```
+
 <p>
   <img src="assets/multi-tools-support.png" width="48%" alt="Multi-tool support"/>
   <img src="assets/multi-tools-support-02.png" width="48%" alt="All tools enabled"/>
@@ -234,13 +256,6 @@ cn usage reset-alerts sound default
 Code-Notify checks the daily (5h) and weekly (7d) usage windows. It sends a warning when remaining usage crosses 20% or 10%, and sends a reset notification when a window returns to 100%.
 
 Reset alerts are intentionally separate from normal task-complete alerts. By default they use a different title, voice message, and reset sound so it is clear that tokens have refilled. The voice message identifies the window, for example `Codex token daily limit reset` or `Codex token weekly limit reset`. You can disable or customize that behavior:
-
-Voice samples:
-
-| Alert | Sample |
-| --- | --- |
-| Codex daily limit reset | [Listen](assets/audio/codex-token-daily-limit-reset.m4a) |
-| Codex weekly limit reset | [Listen](assets/audio/codex-token-weekly-limit-reset.m4a) |
 
 ```bash
 cn usage reset-alerts off

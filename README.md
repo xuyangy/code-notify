@@ -21,9 +21,13 @@ Voice samples: [Daily reset](https://cdn.jsdelivr.net/gh/mylee04/code-notify@mai
 
 ```bash
 cn usage on
+cn usage check
+cn usage watch --interval 300
 cn usage reset-alerts voice on
 cn usage reset-alerts sound default
 ```
+
+Leave `cn usage watch` running while you want reset alerts. `cn usage check` is a one-shot check.
 
 <p>
   <img src="assets/multi-tools-support.png" width="48%" alt="Multi-tool support"/>
@@ -237,18 +241,20 @@ Webhook URLs are stored locally in `~/.config/code-notify/channels.json` and are
 
 ### Usage Alerts
 
-Usage alerts are opt-in for Codex and Claude:
+Usage alerts are opt-in for Codex and Claude. The setup is:
 
 ```bash
-cn usage on
-cn usage check
-cn usage watch --interval 300
-cn usage thresholds set 20,10
-cn usage reset-alerts voice on
-cn usage reset-alerts sound default
+cn usage on                         # Enable usage alerts
+cn usage thresholds set 20,10       # Warn at 20% and 10% remaining
+cn usage reset-alerts voice on      # Speak reset alerts
+cn usage reset-alerts sound default # Use the reset sound
+cn usage check                      # Run one check now
+cn usage watch --interval 300       # Keep watching every 5 minutes
 ```
 
 Code-Notify checks the daily (5h) and weekly (7d) usage windows. It sends a warning when remaining usage crosses 20% or 10%, and sends a reset notification when a window returns to 100%.
+
+`cn usage check` runs once and exits. `cn usage watch` keeps running in the current terminal while you want reset alerts; Code-Notify does not install a background scheduler.
 
 Reset alerts are intentionally separate from normal task-complete alerts. By default they use a different title, voice message, and reset sound so it is clear that tokens have refilled. The voice message identifies the window, for example `Codex token daily limit reset` or `Codex token weekly limit reset`. You can disable or customize that behavior:
 

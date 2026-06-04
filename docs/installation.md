@@ -9,6 +9,8 @@ Code-Notify adds desktop notifications to Claude Code, Codex, and Gemini CLI. Yo
 - Tasks complete
 - Claude or Gemini needs your input
 - Voice announcements (macOS)
+- Slack or Discord webhook messages when channels are configured
+- Codex or Claude usage crosses configured thresholds or resets
 
 Codex currently exposes completion notifications through its `notify` hook. Approval and `request_permissions` prompts do not currently trigger Code-Notify through Codex.
 
@@ -48,6 +50,30 @@ cn version    # Should show: code-notify version X.X.X
 cn status     # Should show: Global notifications: ENABLED
 cn test       # Should trigger a desktop notification
 ```
+
+### Optional Slack/Discord Delivery
+
+```bash
+cn channels add slack https://hooks.slack.com/services/...
+cn channels add discord https://discord.com/api/webhooks/...
+cn channels test all
+```
+
+Webhook URLs are stored locally and are redacted in status output.
+
+### Optional Usage Alerts
+
+```bash
+cn usage on
+cn usage check
+cn usage watch --interval 300
+cn usage reset-alerts voice on
+cn usage reset-alerts sound default
+```
+
+Usage alerts currently support Codex and Claude daily (5h) and weekly (7d) windows. Low-usage warnings use normal Code-Notify delivery. Token reset alerts are separate and can use their own voice/sound controls with `cn usage reset-alerts ...`. Reset voice messages identify the window, such as `Codex token daily limit reset` or `Codex token weekly limit reset`.
+
+They use existing local login state from `~/.codex/auth.json` and `~/.claude/.credentials.json`. Code-Notify does not start provider login flows or install a background scheduler.
 
 ### Enable Voice (macOS only)
 
@@ -97,6 +123,9 @@ After installation, these files are created:
 - `~/.claude/settings.json` - Hook configuration on the default Claude Code path
 - `~/.config/.claude/settings.json` - Hook configuration on some Windows Claude Code setups
 - `~/.claude/notifications/voice-enabled` - Voice setting (if enabled)
+- `~/.config/code-notify/channels.json` - Slack/Discord channel config (if configured)
+- `~/.config/code-notify/usage.json` - Usage alert config (if enabled)
+- `~/.config/code-notify/usage-state.json` - Usage alert dedupe state (if alerts have fired)
 
 ### Uninstallation
 
@@ -164,6 +193,8 @@ cd code-notify
 | `cn status`   | Check current status            |
 | `cn update`   | Update code-notify              |
 | `cn update check` | Check the latest release and show the update command |
+| `cn channels` | Configure Slack/Discord delivery |
+| `cn usage`    | Configure Codex/Claude usage alerts |
 | `cn voice on` | Enable voice (macOS)            |
 | `cnp on`      | Enable for current project only |
 

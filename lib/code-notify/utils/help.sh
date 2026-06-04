@@ -31,6 +31,8 @@ ${BOLD}COMMANDS:${RESET}
     ${GREEN}test${RESET}            Send a test notification
     ${GREEN}update${RESET} [check]  Update code-notify or check the latest release
     ${GREEN}alerts${RESET} <cmd>    Configure which events trigger alerts
+    ${GREEN}channels${RESET} <cmd>  Configure Slack/Discord delivery
+    ${GREEN}usage${RESET} <cmd>     Configure Codex/Claude usage alerts
     ${GREEN}voice${RESET} <cmd>     Voice notification commands
 EOF
 
@@ -81,6 +83,24 @@ ${BOLD}SOUND COMMANDS:${RESET}
     ${GREEN}sound test${RESET}          Play current sound
     ${GREEN}sound list${RESET}          Show available system sounds
     ${GREEN}sound status${RESET}        Show sound configuration
+
+${BOLD}CHANNEL COMMANDS:${RESET}
+    ${GREEN}channels status${RESET}     Show Slack/Discord channel status
+    ${GREEN}channels add${RESET} slack <url> [--name <name>]
+    ${GREEN}channels add${RESET} discord <url> [--name <name>]
+    ${GREEN}channels remove${RESET} <name>
+    ${GREEN}channels test${RESET} [name|all]
+    ${GREEN}channels on${RESET}         Enable remote delivery
+    ${GREEN}channels off${RESET}        Disable remote delivery
+
+${BOLD}USAGE ALERT COMMANDS:${RESET}
+    ${GREEN}usage status${RESET}        Show usage alert status
+    ${GREEN}usage on${RESET} [tool]     Enable Codex/Claude usage alerts
+    ${GREEN}usage off${RESET} [tool]    Disable usage alerts
+    ${GREEN}usage check${RESET} [tool]  Check now and notify on threshold/reset changes
+    ${GREEN}usage watch${RESET} [tool] [--interval seconds]
+    ${GREEN}usage thresholds set${RESET} 20,10
+    ${GREEN}usage reset-state${RESET}   Clear usage alert dedupe state
 EOF
 
     if is_macos_help_context; then
@@ -117,6 +137,10 @@ ${BOLD}EXAMPLES:${RESET}
     cn alerts add ask_user
     cn alerts add SubagentStop       # Also notify when Claude subagents finish
     cn alerts reset         # Back to idle_prompt only (less noisy)
+    cn channels add slack https://hooks.slack.com/services/...
+    cn channels add discord https://discord.com/api/webhooks/...
+    cn usage on
+    cn usage check
     cn sound on             # Enable notification sounds
     cn sound set ~/ding.wav # Use custom sound
 EOF
@@ -135,5 +159,43 @@ EOF
 ${BOLD}MORE INFO:${RESET}
     ${DIM}https://github.com/mylee04/code-notify${RESET}
 
+EOF
+}
+
+show_channels_help() {
+    cat << EOF
+${BOLD}Channel Commands${RESET}
+
+${BOLD}USAGE:${RESET}
+    cn channels status
+    cn channels add slack <webhook-url> [--name <name>]
+    cn channels add discord <webhook-url> [--name <name>]
+    cn channels remove <name>
+    cn channels test <name|all>
+    cn channels on|off
+    cn channels reset
+
+Webhook URLs are stored locally and redacted in status output.
+EOF
+}
+
+show_usage_help() {
+    cat << EOF
+${BOLD}Usage Alert Commands${RESET}
+
+${BOLD}USAGE:${RESET}
+    cn usage status
+    cn usage on [codex|claude|all]
+    cn usage off [codex|claude|all]
+    cn usage check [codex|claude|all]
+    cn usage watch [codex|claude|all] [--interval seconds]
+    cn usage thresholds set 20,10
+    cn usage thresholds reset
+    cn usage reset-alerts on|off
+    cn usage reset-alerts voice on|off
+    cn usage reset-alerts sound on|off|set <path>|default
+    cn usage reset-state
+
+Usage alerts are opt-in. Low-usage warnings use normal Code-Notify delivery. Reset alerts have separate voice/sound controls so token reset can feel distinct from task-complete notifications.
 EOF
 }

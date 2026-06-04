@@ -8,6 +8,8 @@ source "$GLOBAL_CMD_DIR/../utils/voice.sh"
 source "$GLOBAL_CMD_DIR/../utils/sound.sh"
 source "$GLOBAL_CMD_DIR/../utils/help.sh"
 source "$GLOBAL_CMD_DIR/../utils/click-through.sh"
+source "$GLOBAL_CMD_DIR/../utils/channels.sh"
+source "$GLOBAL_CMD_DIR/../utils/usage.sh"
 
 CODE_NOTIFY_RELEASES_API="https://api.github.com/repos/mylee04/code-notify/releases/latest"
 
@@ -43,6 +45,12 @@ handle_global_command() {
             ;;
         "alerts")
             handle_alerts_command "$@"
+            ;;
+        "channels")
+            handle_channels_command "$@"
+            ;;
+        "usage")
+            handle_usage_command "$@"
             ;;
         "click-through")
             handle_click_through_command "$@"
@@ -599,6 +607,43 @@ show_status() {
     # Alert types
     local alert_types=$(get_notify_types)
     echo "  ${BELL} Alert types: ${CYAN}$alert_types${RESET}"
+
+    echo ""
+    if channels_has_python3; then
+        local channel_summary
+        channel_summary="$(channels_list_redacted 2>/dev/null | awk -F '\t' '
+            $1 == "enabled" { enabled = $2 }
+            $1 == "channel" { count++; providers[$3] = 1 }
+            END {
+                if (enabled == "") enabled = "true"
+                provider_list = ""
+                for (provider in providers) {
+                    provider_list = provider_list (provider_list ? "," : "") provider
+                }
+                if (count == "") count = 0
+                print enabled "\t" count "\t" provider_list
+            }
+        ')"
+        local channels_enabled channels_count channels_providers
+        IFS=$'\t' read -r channels_enabled channels_count channels_providers <<< "$channel_summary"
+        if [[ "$channels_enabled" == "true" && "$channels_count" -gt 0 ]]; then
+            echo "  ${CHECK_MARK} Channels: ${GREEN}ENABLED${RESET} ($channels_count configured: $channels_providers)"
+        elif [[ "$channels_count" -gt 0 ]]; then
+            echo "  ${MUTE} Channels: ${DIM}DISABLED${RESET} ($channels_count configured)"
+        else
+            echo "  ${MUTE} Channels: ${DIM}not configured${RESET}"
+        fi
+    fi
+
+    if usage_has_python3; then
+        local usage_enabled
+        usage_enabled="$(usage_read_config_json | python3 -c 'import json,sys; print("true" if json.load(sys.stdin).get("enabled", False) else "false")' 2>/dev/null || echo false)"
+        if [[ "$usage_enabled" == "true" ]]; then
+            echo "  ${CHECK_MARK} Usage alerts: ${GREEN}ENABLED${RESET}"
+        else
+            echo "  ${MUTE} Usage alerts: ${DIM}DISABLED${RESET}"
+        fi
+    fi
 
     # Notification tool status (platform-specific)
     local current_os

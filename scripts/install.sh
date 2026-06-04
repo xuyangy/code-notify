@@ -124,6 +124,8 @@ else
     curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/help.sh" -o "$INSTALL_DIR/lib/code-notify/utils/help.sh"
     curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/voice.sh" -o "$INSTALL_DIR/lib/code-notify/utils/voice.sh"
     curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/sound.sh" -o "$INSTALL_DIR/lib/code-notify/utils/sound.sh"
+    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/channels.sh" -o "$INSTALL_DIR/lib/code-notify/utils/channels.sh"
+    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/usage.sh" -o "$INSTALL_DIR/lib/code-notify/utils/usage.sh"
     curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/click-through.sh" -o "$INSTALL_DIR/lib/code-notify/utils/click-through.sh"
     curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/click-through-store.sh" -o "$INSTALL_DIR/lib/code-notify/utils/click-through-store.sh"
     curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/click-through-runtime.sh" -o "$INSTALL_DIR/lib/code-notify/utils/click-through-runtime.sh"

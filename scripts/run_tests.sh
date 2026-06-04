@@ -159,6 +159,20 @@ else
 fi
 
 # Test 15: Windows PowerShell status regex stays .NET-safe
+test_start "delivery channels"
+if bash tests/test-channels.sh >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "delivery channels failed"
+fi
+
+test_start "usage alerts"
+if bash tests/test-usage-alerts.sh >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "usage alerts failed"
+fi
+
 test_start "windows status regex"
 if bash tests/test-windows-status-regex.sh >/dev/null 2>&1; then
     test_pass

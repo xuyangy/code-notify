@@ -13,7 +13,7 @@ Desktop notifications for AI coding tools - get alerts when tasks complete or in
   <img src="assets/multi-tools-support-02.png" width="48%" alt="All tools enabled"/>
 </p>
 
-[![Version](https://img.shields.io/badge/version-1.8.0-blue.svg)](https://github.com/mylee04/code-notify/releases)
+[![Version](https://img.shields.io/badge/version-1.9.0-blue.svg)](https://github.com/mylee04/code-notify/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![macOS](https://img.shields.io/badge/macOS-supported-green.svg)](https://www.apple.com/macos)
 [![Linux](https://img.shields.io/badge/Linux-supported-green.svg)](https://www.linux.org/)
@@ -21,11 +21,11 @@ Desktop notifications for AI coding tools - get alerts when tasks complete or in
 
 ---
 
-## What's New in v1.8.0
+## What's New in v1.9.0
 
-- **Immediate AskUserQuestion alerts**: `cn alerts add ask_user` now enables a Claude `PreToolUse` hook for `AskUserQuestion` prompts
-- **Preserves custom PreToolUse hooks**: enabling or removing `ask_user` only manages code-notify's own hook and keeps existing user hooks intact
-- **Windows UTF-8 stdin fix**: Windows notifications now read redirected Claude hook payloads as UTF-8 before parsing question text
+- **Slack and Discord delivery**: `cn channels` can mirror Code-Notify alerts to incoming webhooks
+- **Codex and Claude usage alerts**: `cn usage` can warn at 20%/10% and announce daily (5h) or weekly (7d) token resets
+- **Distinct reset announcements**: token reset alerts use separate voice/sound controls and include README voice samples
 
 ---
 
@@ -38,6 +38,8 @@ Desktop notifications for AI coding tools - get alerts when tasks complete or in
 - **macOS click-through control** - Choose which app notification clicks activate
 - **Sound notifications** - Play custom sounds on task completion
 - **Voice announcements** - Hear when tasks complete (macOS, Windows)
+- **Slack/Discord delivery** - Mirror notifications to incoming webhooks
+- **Usage alerts** - Opt-in Codex/Claude 20%, 10%, and reset notifications
 - **Tool-specific messages** - "Claude completed the task", "Codex completed the task"
 - **Project-specific settings** - Different configs per project
 - **Quick aliases** - `cn` and `cnp` for fast access
@@ -117,6 +119,8 @@ curl -s https://raw.githubusercontent.com/mylee04/code-notify/main/docs/installa
 | `cn click-through`   | Show current macOS click-through mappings    |
 | `cn click-through add <app>` | Add a macOS click-through mapping    |
 | `cn alerts`          | Configure which events trigger notifications |
+| `cn channels`        | Configure Slack/Discord delivery channels    |
+| `cn usage`           | Configure Codex/Claude usage alerts          |
 | `cn sound on`        | Enable sound notifications                   |
 | `cn sound set <path>`| Use custom sound file                        |
 | `cn voice on`        | Enable voice (macOS, Windows)                |
@@ -200,6 +204,51 @@ cn alerts reset                    # Back to default (idle_prompt only)
 Alert-type matching applies to Claude Code notification hooks and Gemini CLI notification hooks. `ask_user` is a Claude-only `PreToolUse` hook for `AskUserQuestion`; it is applied immediately when Claude notifications are already enabled. Claude Code agent/team events are separate hook events and are opt-in via `cn alerts add SubagentStop`, `cn alerts add TeammateIdle`, or `cn alerts add TaskCompleted`.
 
 Agent-team and subagent workflows can be noisy if `permission_prompt` is enabled. If you only want idle pings, run `cn alerts remove permission_prompt && cn on`. Codex currently uses completion events from `notify`, so `permission_prompt` and `idle_prompt` settings do not change Codex behavior.
+
+### Slack And Discord
+
+Code-Notify can also send the same notification to Slack or Discord through incoming webhooks. Desktop notifications still work normally; remote delivery is an extra channel.
+
+```bash
+cn channels add slack https://hooks.slack.com/services/...
+cn channels add discord https://discord.com/api/webhooks/...
+cn channels status
+cn channels test all
+```
+
+Webhook URLs are stored locally in `~/.config/code-notify/channels.json` and are redacted in `cn status`.
+
+### Usage Alerts
+
+Usage alerts are opt-in for Codex and Claude:
+
+```bash
+cn usage on
+cn usage check
+cn usage watch --interval 300
+cn usage thresholds set 20,10
+cn usage reset-alerts voice on
+cn usage reset-alerts sound default
+```
+
+Code-Notify checks the daily (5h) and weekly (7d) usage windows. It sends a warning when remaining usage crosses 20% or 10%, and sends a reset notification when a window returns to 100%.
+
+Reset alerts are intentionally separate from normal task-complete alerts. By default they use a different title, voice message, and reset sound so it is clear that tokens have refilled. The voice message identifies the window, for example `Codex token daily limit reset` or `Codex token weekly limit reset`. You can disable or customize that behavior:
+
+Voice samples:
+
+| Alert | Sample |
+| --- | --- |
+| Codex daily limit reset | [Listen](assets/audio/codex-token-daily-limit-reset.m4a) |
+| Codex weekly limit reset | [Listen](assets/audio/codex-token-weekly-limit-reset.m4a) |
+
+```bash
+cn usage reset-alerts off
+cn usage reset-alerts voice off
+cn usage reset-alerts sound set ~/sounds/tokens-reset.wav
+```
+
+Codex usage checks read `~/.codex/auth.json`. Claude usage checks read `~/.claude/.credentials.json`. Code-Notify does not launch provider CLIs, start login flows, or install a background daemon.
 
 ## Troubleshooting
 

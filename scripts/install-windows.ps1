@@ -20,7 +20,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Version
-$VERSION = "1.8.0"
+$VERSION = "1.9.0"
 
 # Colors and formatting
 function Write-Success { param([string]$Message) Write-Host "[OK] $Message" -ForegroundColor Green }
@@ -107,7 +107,7 @@ function Install-ClaudeNotify {
 # Code-Notify PowerShell Module
 # https://github.com/mylee04/code-notify
 
-$script:VERSION = "1.8.0"
+$script:VERSION = "1.9.0"
 $script:ClaudeHome = if ($env:CLAUDE_HOME) { $env:CLAUDE_HOME } else { "$env:USERPROFILE\.claude" }
 $script:DefaultSettingsFile = "$script:ClaudeHome\settings.json"
 $script:AlternateSettingsFile = "$env:USERPROFILE\.config\.claude\settings.json"
@@ -125,6 +125,10 @@ $script:CodexHome = "$env:USERPROFILE\.codex"
 $script:CodexConfigFile = "$script:CodexHome\config.toml"
 $script:GeminiHome = "$env:USERPROFILE\.gemini"
 $script:GeminiSettingsFile = "$script:GeminiHome\settings.json"
+$script:CodeNotifyConfigDir = "$env:USERPROFILE\.config\code-notify"
+$script:ChannelsFile = "$script:CodeNotifyConfigDir\channels.json"
+$script:UsageConfigFile = "$script:CodeNotifyConfigDir\usage.json"
+$script:UsageStateFile = "$script:CodeNotifyConfigDir\usage-state.json"
 
 # Helper functions for colored output
 function Write-Success { param([string]$Message) Write-Host "[OK] $Message" -ForegroundColor Green }
@@ -1130,6 +1134,23 @@ function Show-Status {
         Write-Host "[-] Sound: DISABLED" -ForegroundColor DarkGray
     }
 
+    $channelConfig = Get-ChannelsConfig
+    $channelCount = @($channelConfig.channels).Count
+    if ($channelConfig.enabled -and $channelCount -gt 0) {
+        Write-Host "[*] Channels: ENABLED ($channelCount configured)" -ForegroundColor Green
+    } elseif ($channelCount -gt 0) {
+        Write-Host "[-] Channels: DISABLED ($channelCount configured)" -ForegroundColor DarkGray
+    } else {
+        Write-Host "[-] Channels: not configured" -ForegroundColor DarkGray
+    }
+
+    $usageConfig = Get-UsageConfig
+    if ($usageConfig.enabled) {
+        Write-Host "[*] Usage alerts: ENABLED" -ForegroundColor Green
+    } else {
+        Write-Host "[-] Usage alerts: DISABLED" -ForegroundColor DarkGray
+    }
+
     # BurntToast status
     Write-Host ""
     if (Get-Module -ListAvailable -Name BurntToast) {
@@ -1429,6 +1450,337 @@ function Update-CodeNotify {
     }
 }
 
+function Ensure-CodeNotifyConfigDir {
+    if (-not (Test-Path $script:CodeNotifyConfigDir)) {
+        New-Item -ItemType Directory -Path $script:CodeNotifyConfigDir -Force | Out-Null
+    }
+}
+
+function Read-CodeNotifyJson {
+    param(
+        [string]$Path,
+        [string]$DefaultJson
+    )
+
+    if (Test-Path $Path) {
+        try {
+            return (Get-Content $Path -Raw | ConvertFrom-Json)
+        } catch {
+            return ($DefaultJson | ConvertFrom-Json)
+        }
+    }
+    return ($DefaultJson | ConvertFrom-Json)
+}
+
+function Save-CodeNotifyJson {
+    param(
+        [string]$Path,
+        [object]$Value
+    )
+
+    Ensure-CodeNotifyConfigDir
+    $Value | ConvertTo-Json -Depth 20 | Set-Content $Path -Encoding UTF8
+}
+
+function Get-DefaultChannelsConfig {
+    return ('{"enabled":true,"channels":[]}' | ConvertFrom-Json)
+}
+
+function Get-ChannelsConfig {
+    return Read-CodeNotifyJson -Path $script:ChannelsFile -DefaultJson '{"enabled":true,"channels":[]}'
+}
+
+function Test-ChannelUrl {
+    param(
+        [string]$Provider,
+        [string]$Url
+    )
+
+    if ($Provider -eq "slack") {
+        return ($Url.StartsWith("https://hooks.slack.com/") -or $Url.StartsWith("https://hooks.slack-gov.com/"))
+    }
+    if ($Provider -eq "discord") {
+        return ($Url.StartsWith("https://discord.com/api/webhooks/") -or $Url.StartsWith("https://discordapp.com/api/webhooks/"))
+    }
+    return $false
+}
+
+function Add-Channel {
+    param(
+        [string]$Provider,
+        [string]$Url,
+        [string]$Name
+    )
+
+    if (-not $Provider -or -not $Url) {
+        Write-Host "Usage: cn channels add <slack|discord> <webhook-url> [--name <name>]" -ForegroundColor Gray
+        return
+    }
+    $Provider = $Provider.ToLower()
+    if (-not $Name) { $Name = $Provider }
+    if (-not (Test-ChannelUrl -Provider $Provider -Url $Url)) {
+        Write-Error "Invalid $Provider webhook URL"
+        return
+    }
+
+    $config = Get-ChannelsConfig
+    $channels = @($config.channels | Where-Object { $_.name -ne $Name })
+    $channels += [pscustomobject]@{ name = $Name; provider = $Provider; url = $Url }
+    $config.enabled = $true
+    $config.channels = $channels
+    Save-CodeNotifyJson -Path $script:ChannelsFile -Value $config
+    Write-Success "Channel saved: $Name ($Provider)"
+}
+
+function Show-ChannelsStatus {
+    Write-Host "`n[*] Delivery Channels" -ForegroundColor Cyan
+    Write-Host ""
+    $config = Get-ChannelsConfig
+    if ($config.enabled) {
+        Write-Host "Status: ENABLED" -ForegroundColor Green
+    } else {
+        Write-Host "Status: DISABLED" -ForegroundColor DarkGray
+    }
+    $channels = @($config.channels)
+    if ($channels.Count -eq 0) {
+        Write-Host "No Slack/Discord channels configured" -ForegroundColor DarkGray
+        return
+    }
+    foreach ($channel in $channels) {
+        try {
+            $hostName = ([uri]$channel.url).Host
+        } catch {
+            $hostName = "unknown"
+        }
+        Write-Host "[*] $($channel.name): $($channel.provider) ($hostName)" -ForegroundColor Green
+    }
+}
+
+function Remove-Channel {
+    param([string]$Name)
+
+    if (-not $Name) {
+        Write-Error "Please specify a channel name"
+        return
+    }
+    $config = Get-ChannelsConfig
+    $before = @($config.channels).Count
+    $config.channels = @($config.channels | Where-Object { $_.name -ne $Name })
+    if (@($config.channels).Count -eq $before) {
+        Write-Error "Channel not found: $Name"
+        return
+    }
+    Save-CodeNotifyJson -Path $script:ChannelsFile -Value $config
+    Write-Success "Channel removed: $Name"
+}
+
+function Set-ChannelsEnabled {
+    param([bool]$Enabled)
+
+    $config = Get-ChannelsConfig
+    $config.enabled = $Enabled
+    Save-CodeNotifyJson -Path $script:ChannelsFile -Value $config
+    if ($Enabled) {
+        Write-Success "Channels enabled"
+    } else {
+        Write-Success "Channels disabled"
+    }
+}
+
+function Reset-Channels {
+    Save-CodeNotifyJson -Path $script:ChannelsFile -Value (Get-DefaultChannelsConfig)
+    Write-Success "Channels reset"
+}
+
+function Send-ChannelDelivery {
+    param(
+        [string]$Title,
+        [string]$Message,
+        [string]$Context = ""
+    )
+
+    $config = Get-ChannelsConfig
+    if (-not $config.enabled) { return }
+    foreach ($channel in @($config.channels)) {
+        try {
+            $text = $Title
+            if ($Message) { $text = "$text`n$Message" }
+            if ($Context) { $text = "$text`n$Context" }
+            if ($channel.provider -eq "discord") {
+                $payload = @{ content = $text; allowed_mentions = @{ parse = @() } } | ConvertTo-Json -Depth 10
+            } else {
+                $payload = @{ text = $text } | ConvertTo-Json -Depth 10
+            }
+            Invoke-RestMethod -Uri $channel.url -Method Post -Body $payload -ContentType "application/json" -TimeoutSec 5 | Out-Null
+        } catch {
+        }
+    }
+}
+
+function Test-Channels {
+    param([string]$Target = "all")
+
+    $config = Get-ChannelsConfig
+    $count = 0
+    foreach ($channel in @($config.channels)) {
+        if ($Target -ne "all" -and $Target -ne $channel.name) { continue }
+        $count++
+        Send-ChannelDelivery -Title "Code-Notify Test" -Message "Slack/Discord delivery is working." -Context "Channel: $($channel.name)"
+    }
+    if ($count -eq 0) {
+        Write-Error "No matching channels configured"
+    } else {
+        Write-Success "Test message sent to $count channel(s)"
+    }
+}
+
+function Invoke-ChannelsCommand {
+    param(
+        [string]$SubCommand = "status",
+        [string[]]$Args = @()
+    )
+
+    switch ($SubCommand) {
+        "add" {
+            $provider = if ($Args.Count -gt 0) { $Args[0] } else { "" }
+            $url = if ($Args.Count -gt 1) { $Args[1] } else { "" }
+            $name = ""
+            for ($i = 2; $i -lt $Args.Count; $i++) {
+                if ($Args[$i] -eq "--name" -and ($i + 1) -lt $Args.Count) {
+                    $name = $Args[$i + 1]
+                }
+            }
+            Add-Channel -Provider $provider -Url $url -Name $name
+        }
+        "remove" { Remove-Channel -Name ($Args | Select-Object -First 1) }
+        "test" { Test-Channels -Target ($(if ($Args.Count -gt 0) { $Args[0] } else { "all" })) }
+        "on" { Set-ChannelsEnabled -Enabled $true }
+        "off" { Set-ChannelsEnabled -Enabled $false }
+        "reset" { Reset-Channels }
+        default { Show-ChannelsStatus }
+    }
+}
+
+function Get-DefaultUsageConfig {
+    return ('{"enabled":false,"providers":["codex","claude"],"thresholds":[20,10],"provider_enabled":{"codex":false,"claude":false},"reset_alerts":{"enabled":true,"voice":true,"sound":true,"sound_file":""}}' | ConvertFrom-Json)
+}
+
+function Get-UsageConfig {
+    $config = Read-CodeNotifyJson -Path $script:UsageConfigFile -DefaultJson '{"enabled":false,"providers":["codex","claude"],"thresholds":[20,10],"provider_enabled":{"codex":false,"claude":false},"reset_alerts":{"enabled":true,"voice":true,"sound":true,"sound_file":""}}'
+    if (-not $config.reset_alerts) {
+        $config | Add-Member -NotePropertyName reset_alerts -NotePropertyValue ([pscustomobject]@{ enabled = $true; voice = $true; sound = $true; sound_file = "" }) -Force
+    }
+    return $config
+}
+
+function Save-UsageConfig {
+    param([object]$Config)
+    Save-CodeNotifyJson -Path $script:UsageConfigFile -Value $Config
+}
+
+function Set-UsageEnabled {
+    param(
+        [string]$Provider = "all",
+        [bool]$Enabled
+    )
+
+    $config = Get-UsageConfig
+    if (-not $config.provider_enabled) {
+        $config | Add-Member -NotePropertyName provider_enabled -NotePropertyValue ([pscustomobject]@{ codex = $false; claude = $false }) -Force
+    }
+    $targets = if (-not $Provider -or $Provider -eq "all") { @("codex", "claude") } else { @($Provider.ToLower()) }
+    foreach ($target in $targets) {
+        if ($target -ne "codex" -and $target -ne "claude") {
+            Write-Error "Unsupported usage provider: $target"
+            return
+        }
+        $config.provider_enabled.$target = $Enabled
+    }
+    $config.enabled = [bool]($config.provider_enabled.codex -or $config.provider_enabled.claude)
+    Save-UsageConfig -Config $config
+    if ($Enabled) {
+        Write-Success "Usage alerts enabled"
+    } else {
+        Write-Success "Usage alerts disabled"
+    }
+}
+
+function Show-UsageStatus {
+    Write-Host "`n[*] Usage Alerts" -ForegroundColor Cyan
+    Write-Host ""
+    $config = Get-UsageConfig
+    if ($config.enabled) {
+        Write-Host "Status: ENABLED" -ForegroundColor Green
+    } else {
+        Write-Host "Status: DISABLED" -ForegroundColor DarkGray
+    }
+    Write-Host "Thresholds: $($config.thresholds -join ',')" -ForegroundColor Cyan
+    Write-Host "codex: $(if ($config.provider_enabled.codex) { 'ENABLED' } else { 'DISABLED' })"
+    Write-Host "claude: $(if ($config.provider_enabled.claude) { 'ENABLED' } else { 'DISABLED' })"
+    Write-Host "Reset alerts: $(if ($config.reset_alerts.enabled) { 'ENABLED' } else { 'DISABLED' })"
+    Write-Host "Reset voice: $(if ($config.reset_alerts.voice) { 'ENABLED' } else { 'DISABLED' })"
+    Write-Host "Reset sound: $(if ($config.reset_alerts.sound) { 'ENABLED' } else { 'DISABLED' })"
+    Write-Host ""
+    Write-Host "Usage checks use local Codex/Claude auth files and provider usage endpoints." -ForegroundColor DarkGray
+}
+
+function Set-UsageResetAlert {
+    param(
+        [string]$Field,
+        [object]$Value
+    )
+    $config = Get-UsageConfig
+    if (-not $config.reset_alerts) {
+        $config | Add-Member -NotePropertyName reset_alerts -NotePropertyValue ([pscustomobject]@{ enabled = $true; voice = $true; sound = $true; sound_file = "" }) -Force
+    }
+    $config.reset_alerts.$Field = $Value
+    Save-UsageConfig -Config $config
+}
+
+function Invoke-UsageResetAlertsCommand {
+    param([string[]]$Args = @())
+    $sub = if ($Args.Count -gt 0) { $Args[0] } else { "status" }
+    switch ($sub) {
+        "on" { Set-UsageResetAlert -Field "enabled" -Value $true; Write-Success "Usage reset alerts enabled" }
+        "off" { Set-UsageResetAlert -Field "enabled" -Value $false; Write-Success "Usage reset alerts disabled" }
+        "voice" {
+            $value = if ($Args.Count -gt 1) { $Args[1] } else { "status" }
+            if ($value -eq "on") { Set-UsageResetAlert -Field "voice" -Value $true; Write-Success "Usage reset voice enabled" }
+            elseif ($value -eq "off") { Set-UsageResetAlert -Field "voice" -Value $false; Write-Success "Usage reset voice disabled" }
+            else { Show-UsageStatus }
+        }
+        "sound" {
+            $value = if ($Args.Count -gt 1) { $Args[1] } else { "status" }
+            if ($value -eq "on") { Set-UsageResetAlert -Field "sound" -Value $true; Write-Success "Usage reset sound enabled" }
+            elseif ($value -eq "off") { Set-UsageResetAlert -Field "sound" -Value $false; Write-Success "Usage reset sound disabled" }
+            elseif ($value -eq "set" -and $Args.Count -gt 2) { Set-UsageResetAlert -Field "sound_file" -Value $Args[2]; Set-UsageResetAlert -Field "sound" -Value $true; Write-Success "Usage reset sound set" }
+            elseif ($value -eq "default") { Set-UsageResetAlert -Field "sound_file" -Value ""; Set-UsageResetAlert -Field "sound" -Value $true; Write-Success "Usage reset sound reset to distinct default" }
+            else { Show-UsageStatus }
+        }
+        default { Show-UsageStatus }
+    }
+}
+
+function Invoke-UsageCommand {
+    param(
+        [string]$SubCommand = "status",
+        [string[]]$Args = @()
+    )
+
+    switch ($SubCommand) {
+        "on" { Set-UsageEnabled -Provider ($(if ($Args.Count -gt 0) { $Args[0] } else { "all" })) -Enabled $true }
+        "off" { Set-UsageEnabled -Provider ($(if ($Args.Count -gt 0) { $Args[0] } else { "all" })) -Enabled $false }
+        "check" { Write-Info "Windows usage polling will run from hook notifications in a future update. Current status follows."; Show-UsageStatus }
+        "watch" { Write-Info "Windows usage watch is not installed as a background scheduler in this release."; Show-UsageStatus }
+        "reset-alerts" { Invoke-UsageResetAlertsCommand -Args $Args }
+        "reset-state" {
+            if (Test-Path $script:UsageStateFile) { Remove-Item $script:UsageStateFile -Force }
+            Write-Success "Usage alert state reset"
+        }
+        default { Show-UsageStatus }
+    }
+}
+
 function Show-Help {
     Write-Host @"
 
@@ -1445,6 +1797,8 @@ COMMANDS:
     status [tool|all] Show notification status
     test            Send a test notification
     update [check]  Update code-notify or check the latest release
+    channels <cmd>  Configure Slack/Discord delivery
+    usage <cmd>     Configure Codex/Claude usage alert settings
     voice on        Enable voice notifications
     voice off       Disable voice notifications
     help            Show this help message
@@ -1464,6 +1818,24 @@ SOUND COMMANDS:
     sound list      Show available system sounds
     sound status    Show sound configuration
 
+CHANNEL COMMANDS:
+    channels status
+    channels add slack <url> [--name <name>]
+    channels add discord <url> [--name <name>]
+    channels remove <name>
+    channels test <name|all>
+    channels on|off
+
+USAGE COMMANDS:
+    usage status
+    usage on [codex|claude|all]
+    usage off [codex|claude|all]
+    usage check [codex|claude|all]
+    usage reset-alerts on|off
+    usage reset-alerts voice on|off
+    usage reset-alerts sound on|off|set <path>|default
+    usage reset-state
+
 PROJECT COMMANDS:
     project on      Enable for current project (Claude project hooks) (or: cnp on)
     project off     Disable for current project (Claude project hooks) (or: cnp off)
@@ -1479,6 +1851,8 @@ EXAMPLES:
     cnp on                    # Enable Claude project notifications
     cn test                   # Send test notification
     cn update check           # Check whether an update is needed and show the update command
+    cn channels status
+    cn usage status
     cn sound on               # Enable notification sounds
     cn sound set C:\sounds\ding.wav  # Use custom sound
 
@@ -1566,6 +1940,12 @@ function Invoke-CodeNotify {
                 default { Show-SoundStatus }
             }
         }
+        "channels" {
+            Invoke-ChannelsCommand -SubCommand ($(if ($SubCommand) { $SubCommand } else { "status" })) -Args $Args
+        }
+        "usage" {
+            Invoke-UsageCommand -SubCommand ($(if ($SubCommand) { $SubCommand } else { "status" })) -Args $Args
+        }
         "project" {
             switch ($SubCommand) {
                 "on" { Enable-Notifications -Project }
@@ -1649,6 +2029,8 @@ param(
 $ClaudeHome = "$env:USERPROFILE\.claude"
 $VoiceFile = "$ClaudeHome\notifications\voice-enabled"
 $LogFile = "$ClaudeHome\logs\notifications.log"
+$CodeNotifyConfigDir = "$env:USERPROFILE\.config\code-notify"
+$ChannelsFile = "$CodeNotifyConfigDir\channels.json"
 
 # Read hook data from stdin (Claude Code passes JSON with hook context)
 $HookData = ""
@@ -1744,6 +2126,7 @@ function Get-ToolDisplayName {
 $ToolDisplay = Get-ToolDisplayName $ToolName
 
 $NotificationStateDir = "$ClaudeHome\notifications\state"
+$UsageConfigFile = Join-Path $env:USERPROFILE ".config\code-notify\usage.json"
 
 try {
     $StopRateLimitSeconds = [int]($env:CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS)
@@ -1800,6 +2183,28 @@ function Get-NotificationSubtype {
     }
 
     return "notification"
+}
+
+function Get-UsageResetAlertConfigLocal {
+    $defaults = [pscustomobject]@{ enabled = $true; voice = $true; sound = $true; sound_file = "" }
+    if (-not (Test-Path $UsageConfigFile)) {
+        return $defaults
+    }
+
+    try {
+        $config = Get-Content $UsageConfigFile -Raw | ConvertFrom-Json
+        if ($config.reset_alerts) {
+            foreach ($name in @("enabled", "voice", "sound", "sound_file")) {
+                if ($null -eq $config.reset_alerts.$name) {
+                    $config.reset_alerts | Add-Member -NotePropertyName $name -NotePropertyValue $defaults.$name -Force
+                }
+            }
+            return $config.reset_alerts
+        }
+    } catch {
+    }
+
+    return $defaults
 }
 
 function Get-RateLimitPath {
@@ -1949,6 +2354,16 @@ switch ($HookType.ToLower()) {
         $Message = "Notifications are working correctly!"
         $VoiceMessage = "Test notification successful"
     }
+    "usage" {
+        $Title = if ($env:CODE_NOTIFY_USAGE_TITLE) { $env:CODE_NOTIFY_USAGE_TITLE } else { "$ToolDisplay usage alert" }
+        $Message = if ($env:CODE_NOTIFY_USAGE_MESSAGE) { $env:CODE_NOTIFY_USAGE_MESSAGE } else { "$ToolDisplay usage changed" }
+        $VoiceMessage = if ($env:CODE_NOTIFY_USAGE_VOICE_MESSAGE) { $env:CODE_NOTIFY_USAGE_VOICE_MESSAGE } else { "$ToolDisplay usage alert" }
+    }
+    "usage_reset" {
+        $Title = if ($env:CODE_NOTIFY_USAGE_TITLE) { $env:CODE_NOTIFY_USAGE_TITLE } else { "$ToolDisplay token limit reset" }
+        $Message = if ($env:CODE_NOTIFY_USAGE_MESSAGE) { $env:CODE_NOTIFY_USAGE_MESSAGE } else { "$ToolDisplay tokens have reset. Usage is back to 100%." }
+        $VoiceMessage = if ($env:CODE_NOTIFY_USAGE_VOICE_MESSAGE) { $env:CODE_NOTIFY_USAGE_VOICE_MESSAGE } else { "$ToolDisplay token limit reset" }
+    }
     default {
         $Title = $ToolDisplay
         $Message = "Status update: $HookType"
@@ -2066,6 +2481,11 @@ function Send-DesktopNotification {
 
 # Send voice notification if enabled
 function Send-VoiceNotificationLocal {
+    if ($HookType -eq "usage_reset") {
+        $resetConfig = Get-UsageResetAlertConfigLocal
+        if (-not $resetConfig.enabled -or -not $resetConfig.voice) { return }
+    }
+
     # Check for project-specific voice first
     $projectRoot = $null
     try {
@@ -2087,10 +2507,14 @@ function Send-VoiceNotificationLocal {
         }
     }
 
+    $voice = $null
     if (Test-Path $VoiceFile) {
         $voice = Get-Content $VoiceFile -ErrorAction SilentlyContinue
-        if (-not $voice) { $voice = "Microsoft David Desktop" }
+    } elseif ($HookType -eq "usage_reset") {
+        $voice = "Microsoft David Desktop"
+    }
 
+    if ($voice) {
         Add-Type -AssemblyName System.Speech
         $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
 
@@ -2109,12 +2533,23 @@ function Send-SoundNotificationLocal {
     $SoundEnabledFile = "$ClaudeHome\notifications\sound-enabled"
     $SoundCustomFile = "$ClaudeHome\notifications\sound-custom"
     $DefaultSoundFile = "C:\Windows\Media\chimes.wav"
+    $UsageResetSoundFile = "C:\Windows\Media\tada.wav"
 
-    if (-not (Test-Path $SoundEnabledFile)) { return }
+    if ($HookType -eq "usage_reset") {
+        $resetConfig = Get-UsageResetAlertConfigLocal
+        if (-not $resetConfig.enabled -or -not $resetConfig.sound) { return }
+        if ($resetConfig.sound_file) {
+            $soundFile = $resetConfig.sound_file
+        } else {
+            $soundFile = $UsageResetSoundFile
+        }
+    } else {
+        if (-not (Test-Path $SoundEnabledFile)) { return }
 
-    $soundFile = $DefaultSoundFile
-    if (Test-Path $SoundCustomFile) {
-        $soundFile = Get-Content $SoundCustomFile -ErrorAction SilentlyContinue
+        $soundFile = $DefaultSoundFile
+        if (Test-Path $SoundCustomFile) {
+            $soundFile = Get-Content $SoundCustomFile -ErrorAction SilentlyContinue
+        }
     }
 
     if (-not (Test-Path $soundFile)) { return }
@@ -2126,6 +2561,39 @@ function Send-SoundNotificationLocal {
         $player.PlaySync()
     } catch {
         # Silently fail if sound cannot be played
+    }
+}
+
+function Send-ChannelDeliveryLocal {
+    if (-not (Test-Path $ChannelsFile)) {
+        return
+    }
+
+    try {
+        $config = Get-Content $ChannelsFile -Raw | ConvertFrom-Json
+    } catch {
+        return
+    }
+
+    if (-not $config.enabled) {
+        return
+    }
+
+    foreach ($channel in @($config.channels)) {
+        try {
+            $text = $Title
+            if ($Message) { $text = "$text`n$Message" }
+            if ($ProjectName) { $text = "$text`nProject: $ProjectName" }
+
+            if ($channel.provider -eq "discord") {
+                $payload = @{ content = $text; allowed_mentions = @{ parse = @() } } | ConvertTo-Json -Depth 10
+            } else {
+                $payload = @{ text = $text } | ConvertTo-Json -Depth 10
+            }
+
+            Invoke-RestMethod -Uri $channel.url -Method Post -Body $payload -ContentType "application/json" -TimeoutSec 5 | Out-Null
+        } catch {
+        }
     }
 }
 
@@ -2146,6 +2614,7 @@ function Write-NotificationLog {
 Send-DesktopNotification
 Send-VoiceNotificationLocal
 Send-SoundNotificationLocal
+Send-ChannelDeliveryLocal
 Write-NotificationLog
 
 exit 0

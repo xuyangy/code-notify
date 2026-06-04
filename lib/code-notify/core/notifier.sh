@@ -15,6 +15,8 @@ NOTIFIER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$NOTIFIER_DIR/../utils/detect.sh"
 source "$NOTIFIER_DIR/../utils/voice.sh"
 source "$NOTIFIER_DIR/../utils/sound.sh"
+source "$NOTIFIER_DIR/../utils/channels.sh"
+source "$NOTIFIER_DIR/../utils/usage.sh"
 source "$NOTIFIER_DIR/../utils/click-through-store.sh"
 source "$NOTIFIER_DIR/../utils/click-through-runtime.sh"
 source "$NOTIFIER_DIR/../utils/click-through-resolver.sh"
@@ -475,6 +477,20 @@ case "$HOOK_TYPE" in
         VOICE_MESSAGE="Notifications are working"
         SOUND="Glass"
         ;;
+    "usage")
+        TITLE="${CODE_NOTIFY_USAGE_TITLE:-$TOOL_DISPLAY usage alert}"
+        SUBTITLE="Usage Alert"
+        MESSAGE="${CODE_NOTIFY_USAGE_MESSAGE:-$TOOL_DISPLAY usage changed}"
+        VOICE_MESSAGE="${CODE_NOTIFY_USAGE_VOICE_MESSAGE:-$TOOL_DISPLAY usage alert}"
+        SOUND="Ping"
+        ;;
+    "usage_reset")
+        TITLE="${CODE_NOTIFY_USAGE_TITLE:-$TOOL_DISPLAY tokens reset}"
+        SUBTITLE="Tokens Reset"
+        MESSAGE="${CODE_NOTIFY_USAGE_MESSAGE:-$TOOL_DISPLAY tokens have reset. Usage is back to 100%.}"
+        VOICE_MESSAGE="${CODE_NOTIFY_USAGE_VOICE_MESSAGE:-$TOOL_DISPLAY tokens have reset}"
+        SOUND="Hero"
+        ;;
     "PreToolUse")
         # AskUserQuestion: extract question text and show notification
         ASK_QUESTION_TEXT=""
@@ -593,6 +609,10 @@ send_windows_notification() {
 
 # Check if voice is enabled for this tool
 should_speak() {
+    if [[ "$HOOK_TYPE" == "usage_reset" && "${CODE_NOTIFY_USAGE_RESET_VOICE:-true}" == "true" ]]; then
+        return 0
+    fi
+
     # Check tool-specific voice setting first
     if [[ -n "$TOOL_NAME" ]]; then
         local tool_voice_file="$HOME/.claude/notifications/voice-$TOOL_NAME"
@@ -612,6 +632,17 @@ should_speak() {
 
 # Get voice setting (tool-specific or global)
 get_voice_setting() {
+    if [[ "$HOOK_TYPE" == "usage_reset" ]]; then
+        local usage_reset_voice
+        usage_reset_voice=$(get_voice "tool" "$TOOL_NAME" 2>/dev/null || get_voice "global" 2>/dev/null || true)
+        if [[ -n "$usage_reset_voice" ]]; then
+            printf '%s\n' "$usage_reset_voice"
+            return
+        fi
+        printf '%s\n' "Samantha"
+        return
+    fi
+
     # Check tool-specific voice first
     if [[ -n "$TOOL_NAME" ]]; then
         local tool_voice_file="$HOME/.claude/notifications/voice-$TOOL_NAME"
@@ -627,7 +658,28 @@ get_voice_setting() {
 
 # Check if sound should play
 should_play_sound() {
+    if [[ "$HOOK_TYPE" == "usage_reset" ]]; then
+        [[ "${CODE_NOTIFY_USAGE_RESET_SOUND:-true}" == "true" ]]
+        return $?
+    fi
     is_sound_enabled
+}
+
+get_notification_sound_file() {
+    if [[ "$HOOK_TYPE" == "usage_reset" ]]; then
+        if [[ -n "${CODE_NOTIFY_USAGE_RESET_SOUND_FILE:-}" ]]; then
+            printf '%s\n' "$CODE_NOTIFY_USAGE_RESET_SOUND_FILE"
+            return
+        fi
+        case "$(detect_os 2>/dev/null || uname -s | tr '[:upper:]' '[:lower:]')" in
+            "macos"|"Darwin"|"darwin")
+                printf '%s\n' "/System/Library/Sounds/Hero.aiff"
+                return
+                ;;
+        esac
+    fi
+
+    get_sound
 }
 
 # Send notification based on OS
@@ -644,14 +696,14 @@ case "$OS" in
         fi
         # Sound notification if enabled (separate from voice)
         if should_play_sound; then
-            play_sound
+            play_sound "$(get_notification_sound_file)"
         fi
         ;;
     linux)
         send_linux_notification
         # Sound notification if enabled
         if should_play_sound; then
-            play_sound
+            play_sound "$(get_notification_sound_file)"
         fi
         ;;
     wsl)
@@ -685,7 +737,7 @@ case "$OS" in
         fi
         # Sound notification if enabled
         if should_play_sound; then
-            play_sound
+            play_sound "$(get_notification_sound_file)"
         fi
         ;;
     windows)
@@ -698,6 +750,16 @@ case "$OS" in
 esac
 
 # Log the notification
+channels_deliver "$TITLE" "$MESSAGE" "$TOOL_NAME" "$PROJECT_NAME" "${CODE_NOTIFY_USAGE_CONTEXT:-}" || true
+
+if [[ "${CODE_NOTIFY_SKIP_USAGE_CHECK:-}" != "1" ]]; then
+    case "$TOOL_NAME" in
+        "codex"|"claude")
+            usage_check_with_lock "$TOOL_NAME" >/dev/null 2>&1 || true
+            ;;
+    esac
+fi
+
 LOG_DIR="$HOME/.claude/logs"
 if [[ -d "$LOG_DIR" ]]; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$TOOL_NAME] [$PROJECT_NAME] $MESSAGE" >> "$LOG_DIR/notifications.log"

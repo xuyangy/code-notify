@@ -34,7 +34,7 @@ Leave `cn usage watch` running while you want reset alerts. `cn usage check` is 
   <img src="assets/multi-tools-support-02.png" width="48%" alt="All tools enabled"/>
 </p>
 
-[![Version](https://img.shields.io/badge/version-1.9.0-blue.svg)](https://github.com/mylee04/code-notify/releases)
+[![Version](https://img.shields.io/badge/version-1.9.1-blue.svg)](https://github.com/mylee04/code-notify/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![macOS](https://img.shields.io/badge/macOS-supported-green.svg)](https://www.apple.com/macos)
 [![Linux](https://img.shields.io/badge/Linux-supported-green.svg)](https://www.linux.org/)
@@ -42,11 +42,11 @@ Leave `cn usage watch` running while you want reset alerts. `cn usage check` is 
 
 ---
 
-## What's New in v1.9.0
+## What's New in v1.9.1
 
-- **Slack and Discord delivery**: `cn channels` can mirror Code-Notify alerts to incoming webhooks
-- **Codex and Claude usage alerts**: `cn usage` can warn at 20%/10% and announce daily (5h) or weekly (7d) token resets
-- **Distinct reset announcements**: token reset alerts use separate voice/sound controls and include README voice samples
+- **Trusted npm publishing**: GitHub Actions can publish through npm Trusted Publisher without a long-lived npm token
+- **Community metadata**: Root contributing, code of conduct, security, and funding files improve package indexers
+- **README refresh**: npm package metadata will include the latest usage reset setup and voice sample links
 
 ---
 

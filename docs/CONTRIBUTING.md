@@ -1,6 +1,6 @@
 # Contributing to Code-Notify
 
-First off, thank you for considering contributing to Code-Notify! 🎉
+Thank you for considering contributing to Code-Notify.
 
 ## How Can I Contribute?
 
@@ -45,7 +45,7 @@ chmod +x bin/code-notify
 export PATH="$PWD/bin:$PATH"
 
 # Run tests
-./test/run_tests.sh
+bash scripts/run_tests.sh
 ```
 
 ## Style Guidelines
@@ -76,4 +76,4 @@ export PATH="$PWD/bin:$PATH"
 
 Feel free to open an issue with your question or reach out to the maintainers.
 
-Thank you for contributing! 🚀
+Thank you for contributing.

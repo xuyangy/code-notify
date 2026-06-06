@@ -64,19 +64,15 @@ Webhook URLs are stored locally and are redacted in status output.
 ### Optional Usage Alerts
 
 ```bash
-cn usage on                         # Enable usage alerts
-cn usage thresholds set 20,10       # Warn at 20% and 10% remaining
-cn usage reset-alerts voice on      # Speak reset alerts
-cn usage reset-alerts sound default # Use the reset sound
-cn usage check                      # Run one check now
-cn usage watch --interval 300       # Keep watching every 5 minutes
+cn usage setup --watch
+cn usage status
 ```
 
 Usage alerts currently support Codex and Claude daily (5h) and weekly (7d) windows. Low-usage warnings use normal Code-Notify delivery. Token reset alerts are separate and can use their own voice/sound controls with `cn usage reset-alerts ...`. Reset voice messages identify the window, such as `Codex token daily limit reset` or `Codex token weekly limit reset`.
 
-`cn usage check` runs once and exits. `cn usage watch` keeps running in the current terminal while you want reset alerts.
+`cn usage setup --watch` enables usage alerts, sets the default 20% and 10% warning thresholds, enables distinct reset voice/sound, and starts a background watcher on macOS/Linux. `cn usage check` runs once and exits. Use `cn usage watch stop` to stop the watcher.
 
-They use existing local login state from `~/.codex/auth.json` and `~/.claude/.credentials.json`. Code-Notify does not start provider login flows or install a background scheduler.
+They use existing local login state from `~/.codex/auth.json` and `~/.claude/.credentials.json`. Code-Notify does not start provider login flows. Background watching starts only when you run `cn usage setup --watch` or `cn usage watch start`.
 
 ### Enable Voice (macOS only)
 

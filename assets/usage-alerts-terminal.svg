@@ -1,0 +1,32 @@
+<svg width="1166" height="624" viewBox="0 0 1166 624" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1166" height="624" rx="18" fill="#101114"/>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 27px; font-weight: 700; }
+    .prompt { fill: #f4f4f5; }
+    .green { fill: #39e75f; }
+    .blue { fill: #7c6cff; }
+    .cyan { fill: #45d7ff; }
+    .muted { fill: #8b8d92; }
+  </style>
+  <text x="20" y="44" class="prompt">developer@mac code-notify % cn usage setup --watch</text>
+
+  <text x="20" y="102" class="green">[OK] Usage reset alerts configured</text>
+  <text x="20" y="138" class="blue">[i] Providers: all</text>
+  <text x="20" y="174" class="blue">[i] Thresholds: 20%, 10%</text>
+  <text x="20" y="210" class="blue">[i] Reset alerts: voice and distinct reset sound enabled</text>
+  <text x="20" y="246" class="green">[OK] Usage watcher started (pid 84079, every 300s)</text>
+  <text x="20" y="282" class="blue">[i] Log: ~/.config/code-notify/usage-watch.log</text>
+
+  <text x="20" y="340" class="prompt">developer@mac code-notify % cn usage status</text>
+
+  <text x="20" y="404" class="prompt">Usage Alerts</text>
+  <text x="38" y="474" class="prompt">Status: </text>
+  <text x="150" y="474" class="green">ENABLED</text>
+  <text x="38" y="510" class="prompt">Thresholds: </text>
+  <text x="206" y="510" class="cyan">20,10</text>
+  <text x="38" y="546" class="prompt">Reset alerts: </text>
+  <text x="262" y="546" class="green">ENABLED</text>
+  <text x="38" y="582" class="prompt">Watcher: </text>
+  <text x="178" y="582" class="green">RUNNING</text>
+  <text x="304" y="582" class="prompt">(pid 84079)</text>
+</svg>

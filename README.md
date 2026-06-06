@@ -20,14 +20,13 @@ Code-Notify can now watch Codex and Claude usage limits and tell you when tokens
 Voice samples: [Daily reset](https://cdn.jsdelivr.net/gh/mylee04/code-notify@main/assets/audio/codex-token-daily-limit-reset.m4a) · [Weekly reset](https://cdn.jsdelivr.net/gh/mylee04/code-notify@main/assets/audio/codex-token-weekly-limit-reset.m4a)
 
 ```bash
-cn usage on
-cn usage check
-cn usage watch --interval 300
-cn usage reset-alerts voice on
-cn usage reset-alerts sound default
+cn usage setup --watch
+cn usage status
 ```
 
-Leave `cn usage watch` running while you want reset alerts. `cn usage check` is a one-shot check.
+`cn usage setup --watch` enables usage alerts, turns on distinct reset voice/sound, and starts a background watcher.
+
+![Usage limit reset alerts terminal demo](assets/usage-alerts-terminal.svg)
 
 <p>
   <img src="assets/multi-tools-support.png" width="48%" alt="Multi-tool support"/>
@@ -241,7 +240,16 @@ Webhook URLs are stored locally in `~/.config/code-notify/channels.json` and are
 
 ### Usage Alerts
 
-Usage alerts are opt-in for Codex and Claude. The setup is:
+Usage alerts are opt-in for Codex and Claude. Fast setup:
+
+```bash
+cn usage setup --watch
+cn usage status
+```
+
+That enables usage alerts, sets the default 20% and 10% warning thresholds, enables distinct reset voice/sound, and starts a background watcher.
+
+Manual setup:
 
 ```bash
 cn usage on                         # Enable usage alerts
@@ -249,12 +257,19 @@ cn usage thresholds set 20,10       # Warn at 20% and 10% remaining
 cn usage reset-alerts voice on      # Speak reset alerts
 cn usage reset-alerts sound default # Use the reset sound
 cn usage check                      # Run one check now
-cn usage watch --interval 300       # Keep watching every 5 minutes
+cn usage watch start --interval 300 # Keep watching in the background
 ```
 
 Code-Notify checks the daily (5h) and weekly (7d) usage windows. It sends a warning when remaining usage crosses 20% or 10%, and sends a reset notification when a window returns to 100%.
 
-`cn usage check` runs once and exits. `cn usage watch` keeps running in the current terminal while you want reset alerts; Code-Notify does not install a background scheduler.
+`cn usage check` runs once and exits. `cn usage watch start` keeps watching in the background on macOS/Linux. Use `cn usage watch stop` to stop it.
+
+Terminal demo:
+
+```bash
+cn usage setup --watch
+cn usage status
+```
 
 Reset alerts are intentionally separate from normal task-complete alerts. By default they use a different title, voice message, and reset sound so it is clear that tokens have refilled. The voice message identifies the window, for example `Codex token daily limit reset` or `Codex token weekly limit reset`. You can disable or customize that behavior:
 
@@ -264,7 +279,15 @@ cn usage reset-alerts voice off
 cn usage reset-alerts sound set ~/sounds/tokens-reset.wav
 ```
 
-Codex usage checks read `~/.codex/auth.json`. Claude usage checks read `~/.claude/.credentials.json`. Code-Notify does not launch provider CLIs, start login flows, or install a background daemon.
+Send reset alerts to Slack or Discord too:
+
+```bash
+cn channels add slack https://hooks.slack.com/services/...
+cn channels add discord https://discord.com/api/webhooks/...
+cn channels test all
+```
+
+Codex usage checks read `~/.codex/auth.json`. Claude usage checks read `~/.claude/.credentials.json`. Code-Notify does not launch provider CLIs or start login flows. Background watching starts only when you run `cn usage setup --watch` or `cn usage watch start`.
 
 ## Troubleshooting
 

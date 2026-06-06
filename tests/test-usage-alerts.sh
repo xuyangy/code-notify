@@ -143,4 +143,16 @@ PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
 disabled_reset_status=$(PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" "$ROOT_DIR/bin/code-notify" usage status)
 printf '%s' "$disabled_reset_status" | grep -q "Reset alerts: .*DISABLED" || fail "reset alerts should be optional"
 
+watch_home="$test_dir/watch-home"
+mkdir -p "$watch_home/.codex"
+printf '{"tokens":{"access_token":"codex-token"}}' > "$watch_home/.codex/auth.json"
+PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$watch_home" \
+    "$ROOT_DIR/bin/code-notify" usage setup codex --watch --interval 60 >/dev/null
+watch_status=$(PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$watch_home" "$ROOT_DIR/bin/code-notify" usage status)
+printf '%s' "$watch_status" | grep -q "Watcher: .*RUNNING" || fail "setup --watch should start background watcher"
+PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$watch_home" \
+    "$ROOT_DIR/bin/code-notify" usage watch stop >/dev/null
+stopped_status=$(PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$watch_home" "$ROOT_DIR/bin/code-notify" usage watch status)
+printf '%s' "$stopped_status" | grep -q "Watcher: .*STOPPED" || fail "usage watcher should stop cleanly"
+
 pass "usage alerts detect Codex thresholds and reset transitions without duplicates"

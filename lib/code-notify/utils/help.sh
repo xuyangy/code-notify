@@ -95,10 +95,13 @@ ${BOLD}CHANNEL COMMANDS:${RESET}
 
 ${BOLD}USAGE ALERT COMMANDS:${RESET}
     ${GREEN}usage status${RESET}        Show usage alert status
+    ${GREEN}usage setup${RESET}         Guided usage alert setup
     ${GREEN}usage on${RESET} [tool]     Enable Codex/Claude usage alerts
     ${GREEN}usage off${RESET} [tool]    Disable usage alerts
     ${GREEN}usage check${RESET} [tool]  Check now and notify on threshold/reset changes
     ${GREEN}usage watch${RESET} [tool] [--interval seconds]
+    ${GREEN}usage watch start${RESET} [tool] [--interval seconds]
+    ${GREEN}usage watch stop${RESET}    Stop background usage watcher
     ${GREEN}usage thresholds set${RESET} 20,10
     ${GREEN}usage reset-state${RESET}   Clear usage alert dedupe state
 EOF
@@ -140,6 +143,7 @@ ${BOLD}EXAMPLES:${RESET}
     cn channels add slack https://hooks.slack.com/services/...
     cn channels add discord https://discord.com/api/webhooks/...
     cn usage on
+    cn usage setup --watch
     cn usage check
     cn sound on             # Enable notification sounds
     cn sound set ~/ding.wav # Use custom sound
@@ -185,10 +189,13 @@ ${BOLD}Usage Alert Commands${RESET}
 
 ${BOLD}USAGE:${RESET}
     cn usage status
+    cn usage setup [codex|claude|all] [--watch] [--interval seconds]
     cn usage on [codex|claude|all]
     cn usage off [codex|claude|all]
     cn usage check [codex|claude|all]
     cn usage watch [codex|claude|all] [--interval seconds]
+    cn usage watch start [codex|claude|all] [--interval seconds]
+    cn usage watch stop|restart|status
     cn usage thresholds set 20,10
     cn usage thresholds reset
     cn usage reset-alerts on|off
@@ -196,6 +203,6 @@ ${BOLD}USAGE:${RESET}
     cn usage reset-alerts sound on|off|set <path>|default
     cn usage reset-state
 
-Usage alerts are opt-in. Low-usage warnings use normal Code-Notify delivery. Reset alerts have separate voice/sound controls so token reset can feel distinct from task-complete notifications.
+Usage alerts are opt-in. Use 'cn usage setup --watch' for the fastest setup. Low-usage warnings use normal Code-Notify delivery. Reset alerts have separate voice/sound controls so token reset can feel distinct from task-complete notifications.
 EOF
 }

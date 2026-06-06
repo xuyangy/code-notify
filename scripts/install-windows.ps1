@@ -1705,6 +1705,14 @@ function Set-UsageEnabled {
     }
 }
 
+function Set-UsageThresholds {
+    param([int[]]$Thresholds = @(20, 10))
+    $config = Get-UsageConfig
+    $config.thresholds = @($Thresholds | Sort-Object -Descending -Unique)
+    Save-UsageConfig -Config $config
+    Write-Success "Usage thresholds set: $($config.thresholds -join ',')"
+}
+
 function Show-UsageStatus {
     Write-Host "`n[*] Usage Alerts" -ForegroundColor Cyan
     Write-Host ""
@@ -1722,6 +1730,27 @@ function Show-UsageStatus {
     Write-Host "Reset sound: $(if ($config.reset_alerts.sound) { 'ENABLED' } else { 'DISABLED' })"
     Write-Host ""
     Write-Host "Usage checks use local Codex/Claude auth files and provider usage endpoints." -ForegroundColor DarkGray
+}
+
+function Invoke-UsageSetup {
+    param([string[]]$Args = @())
+
+    $provider = "all"
+    foreach ($arg in $Args) {
+        if ($arg -in @("codex", "claude", "all")) {
+            $provider = $arg
+        }
+    }
+
+    Set-UsageEnabled -Provider $provider -Enabled $true
+    Set-UsageThresholds -Thresholds @(20, 10)
+    Set-UsageResetAlert -Field "enabled" -Value $true
+    Set-UsageResetAlert -Field "voice" -Value $true
+    Set-UsageResetAlert -Field "sound" -Value $true
+    Set-UsageResetAlert -Field "sound_file" -Value ""
+    Write-Success "Usage reset alerts configured"
+    Write-Info "Windows background usage watch is not installed in this release."
+    Show-UsageStatus
 }
 
 function Set-UsageResetAlert {
@@ -1768,6 +1797,7 @@ function Invoke-UsageCommand {
     )
 
     switch ($SubCommand) {
+        "setup" { Invoke-UsageSetup -Args $Args }
         "on" { Set-UsageEnabled -Provider ($(if ($Args.Count -gt 0) { $Args[0] } else { "all" })) -Enabled $true }
         "off" { Set-UsageEnabled -Provider ($(if ($Args.Count -gt 0) { $Args[0] } else { "all" })) -Enabled $false }
         "check" { Write-Info "Windows usage polling will run from hook notifications in a future update. Current status follows."; Show-UsageStatus }
@@ -1828,6 +1858,7 @@ CHANNEL COMMANDS:
 
 USAGE COMMANDS:
     usage status
+    usage setup [codex|claude|all]
     usage on [codex|claude|all]
     usage off [codex|claude|all]
     usage check [codex|claude|all]
@@ -1853,6 +1884,7 @@ EXAMPLES:
     cn update check           # Check whether an update is needed and show the update command
     cn channels status
     cn usage status
+    cn usage setup
     cn sound on               # Enable notification sounds
     cn sound set C:\sounds\ding.wav  # Use custom sound
 

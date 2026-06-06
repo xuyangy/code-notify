@@ -4,6 +4,8 @@ USAGE_DIR="${CODE_NOTIFY_CONFIG_DIR:-$HOME/.config/code-notify}"
 USAGE_CONFIG_FILE="$USAGE_DIR/usage.json"
 USAGE_STATE_FILE="$USAGE_DIR/usage-state.json"
 USAGE_LOCK_DIR="$USAGE_DIR/usage.lock"
+USAGE_WATCH_PID_FILE="$USAGE_DIR/usage-watch.pid"
+USAGE_WATCH_LOG_FILE="$USAGE_DIR/usage-watch.log"
 
 usage_has_python3() {
     command -v python3 >/dev/null 2>&1
@@ -385,6 +387,7 @@ PY
     done
 
     echo ""
+    usage_watch_status_line
     echo "  ${DIM}Usage alerts use local Codex/Claude auth files and provider usage endpoints.${RESET}"
 }
 
@@ -713,6 +716,189 @@ usage_watch() {
     done
 }
 
+usage_command_path() {
+    if [[ -n "${CODE_NOTIFY_MAIN_SCRIPT:-}" && -f "${CODE_NOTIFY_MAIN_SCRIPT:-}" ]]; then
+        printf '%s\n' "$CODE_NOTIFY_MAIN_SCRIPT"
+        return 0
+    fi
+    if command -v code-notify >/dev/null 2>&1; then
+        command -v code-notify
+        return 0
+    fi
+    if command -v cn >/dev/null 2>&1; then
+        command -v cn
+        return 0
+    fi
+    return 1
+}
+
+usage_watch_pid() {
+    [[ -f "$USAGE_WATCH_PID_FILE" ]] || return 1
+    sed -n '1p' "$USAGE_WATCH_PID_FILE" 2>/dev/null | tr -cd '0-9'
+}
+
+usage_watch_is_running() {
+    local pid
+    pid="$(usage_watch_pid)" || return 1
+    [[ -n "$pid" ]] || return 1
+    kill -0 "$pid" 2>/dev/null
+}
+
+usage_watch_status_line() {
+    local pid
+    if usage_watch_is_running; then
+        pid="$(usage_watch_pid)"
+        echo "  Watcher: ${GREEN}RUNNING${RESET} (pid $pid)"
+    else
+        echo "  Watcher: ${DIM}STOPPED${RESET}"
+    fi
+}
+
+usage_watch_status() {
+    header "${BELL} Usage Watcher"
+    echo ""
+    usage_watch_status_line
+    echo "  Log: ${DIM}$USAGE_WATCH_LOG_FILE${RESET}"
+}
+
+usage_watch_start() {
+    local requested="${1:-all}"
+    local interval="${2:-300}"
+    local normalized command_path pid
+
+    normalized="$(usage_normalize_provider "$requested")" || { error "Unsupported usage provider: $requested"; return 1; }
+    if ! [[ "$interval" =~ ^[0-9]+$ ]]; then
+        error "Interval must be a number of seconds"
+        return 1
+    fi
+    if [[ "$interval" -lt 60 ]]; then
+        interval=60
+    fi
+
+    ensure_usage_dir
+    if usage_watch_is_running; then
+        pid="$(usage_watch_pid)"
+        success "Usage watcher already running (pid $pid)"
+        return 0
+    fi
+
+    command_path="$(usage_command_path)" || { error "Could not find code-notify command for background watcher"; return 1; }
+    : > "$USAGE_WATCH_LOG_FILE"
+    chmod 600 "$USAGE_WATCH_LOG_FILE" 2>/dev/null || true
+
+    nohup bash "$command_path" usage watch-run "$normalized" --interval "$interval" >> "$USAGE_WATCH_LOG_FILE" 2>&1 &
+    pid="$!"
+    printf '%s\n' "$pid" > "$USAGE_WATCH_PID_FILE"
+    chmod 600 "$USAGE_WATCH_PID_FILE" 2>/dev/null || true
+
+    sleep 0.2
+    if usage_watch_is_running; then
+        success "Usage watcher started (pid $pid, every ${interval}s)"
+        info "Log: $USAGE_WATCH_LOG_FILE"
+    else
+        rm -f "$USAGE_WATCH_PID_FILE"
+        error "Usage watcher failed to start. See: $USAGE_WATCH_LOG_FILE"
+        return 1
+    fi
+}
+
+usage_watch_stop() {
+    local pid
+    if ! usage_watch_is_running; then
+        rm -f "$USAGE_WATCH_PID_FILE"
+        success "Usage watcher is not running"
+        return 0
+    fi
+
+    pid="$(usage_watch_pid)"
+    kill "$pid" 2>/dev/null || true
+    sleep 0.2
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -TERM "$pid" 2>/dev/null || true
+    fi
+    rm -f "$USAGE_WATCH_PID_FILE"
+    success "Usage watcher stopped"
+}
+
+usage_watch_restart() {
+    local requested="${1:-all}"
+    local interval="${2:-300}"
+    usage_watch_stop >/dev/null 2>&1 || true
+    usage_watch_start "$requested" "$interval"
+}
+
+usage_setup() {
+    local requested="all"
+    local interval="300"
+    local start_watch="false"
+    local normalized
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            "codex"|"claude"|"all")
+                requested="$1"
+                shift
+                ;;
+            "--watch"|"--start")
+                start_watch="true"
+                shift
+                ;;
+            "--interval")
+                interval="${2:-300}"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    normalized="$(usage_normalize_provider "$requested")" || { error "Unsupported usage provider: $requested"; return 1; }
+
+    usage_set_enabled "$normalized" true || return 1
+    usage_set_thresholds "20,10" >/dev/null || return 1
+    usage_set_reset_alert_field enabled true || return 1
+    usage_set_reset_alert_field voice true || return 1
+    usage_set_reset_alert_field sound true || return 1
+    usage_set_reset_alert_field sound_file "" || return 1
+
+    success "Usage reset alerts configured"
+    info "Providers: $normalized"
+    info "Thresholds: 20%, 10%"
+    info "Reset alerts: voice and distinct reset sound enabled"
+
+    if [[ "$start_watch" == "true" ]]; then
+        usage_watch_start "$normalized" "$interval"
+    else
+        echo ""
+        dim "Run ${BOLD}cn usage watch start --interval $interval${RESET}${DIM} to keep watching in the background.${RESET}"
+        dim "Run ${BOLD}cn usage check${RESET}${DIM} for a one-shot check.${RESET}"
+    fi
+}
+
+usage_parse_watch_args() {
+    local provider="${1:-all}"
+    local interval="300"
+
+    if [[ "$provider" == "--interval" ]]; then
+        provider="all"
+    else
+        shift 2>/dev/null || true
+    fi
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            "--interval")
+                interval="${2:-300}"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+    printf '%s\t%s\n' "$provider" "$interval"
+}
+
 handle_usage_command() {
     local subcommand="${1:-status}"
     shift || true
@@ -730,7 +916,42 @@ handle_usage_command() {
         "check")
             usage_check "${1:-all}"
             ;;
+        "setup")
+            usage_setup "$@"
+            ;;
         "watch")
+            local action="${1:-}"
+            local parsed provider interval
+            case "$action" in
+                "start")
+                    shift
+                    parsed="$(usage_parse_watch_args "$@")"
+                    provider="${parsed%%$'\t'*}"
+                    interval="${parsed#*$'\t'}"
+                    usage_watch_start "$provider" "$interval"
+                    ;;
+                "stop")
+                    usage_watch_stop
+                    ;;
+                "restart")
+                    shift
+                    parsed="$(usage_parse_watch_args "$@")"
+                    provider="${parsed%%$'\t'*}"
+                    interval="${parsed#*$'\t'}"
+                    usage_watch_restart "$provider" "$interval"
+                    ;;
+                "status")
+                    usage_watch_status
+                    ;;
+                *)
+                    parsed="$(usage_parse_watch_args "$@")"
+                    provider="${parsed%%$'\t'*}"
+                    interval="${parsed#*$'\t'}"
+                    usage_watch "$provider" "$interval"
+                    ;;
+            esac
+            ;;
+        "watch-run")
             local provider="${1:-all}"
             local interval="300"
             shift 2>/dev/null || true

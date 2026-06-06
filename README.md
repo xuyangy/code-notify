@@ -33,7 +33,7 @@ cn usage status
   <img src="assets/multi-tools-support-02.png" width="48%" alt="All tools enabled"/>
 </p>
 
-[![Version](https://img.shields.io/badge/version-1.9.1-blue.svg)](https://github.com/mylee04/code-notify/releases)
+[![Version](https://img.shields.io/badge/version-1.10.0-blue.svg)](https://github.com/mylee04/code-notify/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![macOS](https://img.shields.io/badge/macOS-supported-green.svg)](https://www.apple.com/macos)
 [![Linux](https://img.shields.io/badge/Linux-supported-green.svg)](https://www.linux.org/)
@@ -41,11 +41,11 @@ cn usage status
 
 ---
 
-## What's New in v1.9.1
+## What's New in v1.10.0
 
-- **Trusted npm publishing**: GitHub Actions can publish through npm Trusted Publisher without a long-lived npm token
-- **Community metadata**: Root contributing, code of conduct, security, and funding files improve package indexers
-- **README refresh**: npm package metadata will include the latest usage reset setup and voice sample links
+- **One-command usage setup**: `cn usage setup --watch` configures Codex/Claude usage alerts and starts the background watcher
+- **Background usage watcher**: macOS/Linux users can start, stop, restart, and inspect usage watching with `cn usage watch ...`
+- **Usage alert docs**: README now shows the terminal setup flow and Slack/Discord reset alert routing
 
 ---
 

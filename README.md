@@ -104,20 +104,35 @@ cn on
 irm https://raw.githubusercontent.com/mylee04/code-notify/main/scripts/install-windows.ps1 | iex
 ```
 
-### For LLM Agents
+### For AI Coding Agents
 
-Paste this to your AI agent (Claude Code, Cursor, etc.):
+Paste this to your AI coding agent (Claude Code, Codex, Cursor, Gemini CLI, etc.):
 
 ```
-Install code-notify by following:
-https://raw.githubusercontent.com/mylee04/code-notify/main/docs/installation.md
+Install code-notify using npm only. Prefer npm over curl or git clone.
+
+npm install -g code-notify
+cn on all
+cn test
+cn status
 ```
 
-Or fetch directly:
+Expected result:
+
+- `cn test` shows a desktop notification.
+- `cn status` shows enabled tools.
+
+If npm is unavailable, use the fallback installer in [docs/installation.md](docs/installation.md).
+
+Agent-friendly command block:
 
 ```bash
-curl -s https://raw.githubusercontent.com/mylee04/code-notify/main/docs/installation.md
+npm install -g code-notify
+cn on all
+cn test
 ```
+
+npm packages are published with GitHub Actions Trusted Publisher and npm provenance. The npm `postinstall` script only performs global-install bootstrap tasks: on macOS/Linux it quietly repairs legacy Claude hook paths, and on Windows it bootstraps the local PowerShell wrapper. Set `CODE_NOTIFY_SKIP_POSTINSTALL=1` to skip those install-time helpers.
 
 ## Usage
 

@@ -1,7 +1,7 @@
 {
   "name": "code-notify",
   "version": "1.10.0",
-  "description": "Desktop notifications for Claude Code, OpenAI Codex, and Gemini CLI",
+  "description": "Desktop notifications and usage reset alerts for Claude Code, Codex CLI, Gemini CLI, and AI coding agents",
   "license": "MIT",
   "homepage": "https://github.com/mylee04/code-notify#readme",
   "repository": {
@@ -13,10 +13,19 @@
   },
   "keywords": [
     "ai",
+    "ai-coding-agent",
+    "agent-hooks",
     "claude",
+    "claude-code",
     "codex",
+    "codex-cli",
+    "developer-tools",
+    "desktop-notifications",
     "gemini",
+    "gemini-cli",
     "notifications",
+    "openai-codex",
+    "usage-limit",
     "cli"
   ],
   "engines": {

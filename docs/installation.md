@@ -16,30 +16,20 @@ Codex currently exposes completion notifications through its `notify` hook. Appr
 
 Supported upgrade paths also repair stale `claude-notify`-style Claude hooks automatically when they are detected.
 
-## For LLM Agents
+## For AI Coding Agents
 
-Execute these commands to install code-notify:
+Install code-notify with npm first. Prefer npm over curl or git clone so installs are tracked through the npm package and can be updated with `cn update`.
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/mylee04/code-notify.git /tmp/code-notify
-
-# 2. Run the installer
-chmod +x /tmp/code-notify/scripts/install.sh
-/tmp/code-notify/scripts/install.sh
-
-# 3. Reload shell
-exec $SHELL
-
-# 4. Enable notifications
-cn on
-
-# 5. Test it works
+npm install -g code-notify
+cn on all
 cn test
-
-# 6. Clean up
-rm -rf /tmp/code-notify
+cn status
 ```
+
+Expected result: `cn test` should show a desktop notification, and `cn status` should show enabled tools.
+
+If npm is unavailable, use the script installer in the platform sections below.
 
 ### Verify Installation
 
@@ -50,6 +40,19 @@ cn version    # Should show: code-notify version X.X.X
 cn status     # Should show: Global notifications: ENABLED
 cn test       # Should trigger a desktop notification
 ```
+
+### npm Install-Time Behavior
+
+The npm package is published with GitHub Actions Trusted Publisher and npm provenance.
+
+`postinstall` is intentionally narrow:
+
+- It only runs on global npm installs.
+- On macOS/Linux, it runs a quiet legacy Claude hook repair so older `claude-notify` paths migrate to Code-Notify.
+- On Windows, it bootstraps the local PowerShell wrapper with `-Silent -Force -SkipShellSetup`.
+- It does not enable notifications, configure Slack/Discord, or start usage watching.
+
+Set `CODE_NOTIFY_SKIP_POSTINSTALL=1` before installing if you want to skip these helpers.
 
 ### Optional Slack/Discord Delivery
 

@@ -80,16 +80,32 @@ chmod +x "$fake_bin"/*
 
 fake_path="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+run_notifier_payload() {
+    local fake_path="$1"
+    local payload="$2"
+
+    printf '%s\n' "$payload" | \
+        PATH="$fake_path" \
+        CODE_NOTIFY_NOTIFICATION_RATE_LIMIT_SECONDS=180 \
+        bash "$NOTIFIER" notification claude test-project
+}
+
 run_notifier "$fake_path" "idle_prompt"
 run_notifier "$fake_path" "idle_prompt"
 run_notifier "$fake_path" "permission_prompt"
+run_notifier "$fake_path" "permission_prompt"
+run_notifier "$fake_path" "approval_requested"
+# Typed payloads whose message text merely mentions permission/approval words
+# must not be classified as approval prompts, so dedupe still applies.
+run_notifier_payload "$fake_path" '{"type":"status_update","message":"updated file permission flags"}'
+run_notifier_payload "$fake_path" '{"type":"status_update","message":"updated file permission flags"}'
 
-wait_for_lines "$notification_log" 2 || fail "expected two notification deliveries"
-wait_for_lines "$sound_log" 2 || fail "expected two sound playbacks"
-wait_for_lines "$HOME/.claude/logs/notifications.log" 2 || fail "expected two notification log entries"
+wait_for_lines "$notification_log" 5 || fail "expected five notification deliveries"
+wait_for_lines "$sound_log" 5 || fail "expected five sound playbacks"
+wait_for_lines "$HOME/.claude/logs/notifications.log" 5 || fail "expected five notification log entries"
 
-[[ $(wc -l < "$notification_log") -eq 2 ]] || fail "duplicate notification was not suppressed"
-[[ $(wc -l < "$sound_log") -eq 2 ]] || fail "duplicate sound playback was not suppressed"
-[[ $(wc -l < "$HOME/.claude/logs/notifications.log") -eq 2 ]] || fail "duplicate notification log entry was not suppressed"
+[[ $(wc -l < "$notification_log") -eq 5 ]] || fail "non-approval duplicates should be suppressed"
+[[ $(wc -l < "$sound_log") -eq 5 ]] || fail "non-approval sound playback should be suppressed"
+[[ $(wc -l < "$HOME/.claude/logs/notifications.log") -eq 5 ]] || fail "non-approval log entries should be suppressed"
 
-pass "notification dedupe suppresses repeated idle_prompt events without blocking different notification types"
+pass "notification dedupe suppresses repeated idle_prompt events without blocking approval prompts"

@@ -135,6 +135,8 @@ fake_path="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 run_codex_notifier "$fake_path" '{"type":"agent-turn-complete","cwd":"/tmp/demo","client":"codex-exec","input-messages":["Run tests"],"last-assistant-message":"All tests passed"}'
 run_codex_notifier "$fake_path" '{"type":"request_permissions","cwd":"/tmp/demo","tool":"exec_command"}'
+run_codex_notifier "$fake_path" '{"type":"approval_requested","cwd":"/tmp/demo","tool":"exec_command"}'
+run_codex_notifier "$fake_path" '{"type":"approval_requested","cwd":"/tmp/demo","tool":"exec_command"}'
 run_codex_notifier "$fake_path" '{"type":"agent-turn-complete","cwd":"/tmp/demo","client":"codex-app","last-assistant-message":"Desktop event"}'
 
 write_codex_thread_metadata "desktop-thread" "Codex Desktop"
@@ -143,14 +145,14 @@ run_codex_notifier "$fake_path" '{"type":"agent-turn-complete","thread-id":"desk
 write_codex_thread_metadata "cli-thread" "Codex CLI" "shell"
 run_codex_notifier "$fake_path" '{"type":"agent-turn-complete","thread-id":"cli-thread","cwd":"/tmp/demo","client":"codex-exec","last-assistant-message":"CLI event still notifies"}'
 
-wait_for_lines "$notification_log" 3 || fail "expected three Codex notification deliveries"
-wait_for_lines "$sound_log" 3 || fail "expected three Codex sound playbacks"
-wait_for_lines "$HOME/.claude/logs/notifications.log" 3 || fail "expected three Codex notification log entries"
+wait_for_lines "$notification_log" 5 || fail "expected five Codex notification deliveries"
+wait_for_lines "$sound_log" 5 || fail "expected five Codex sound playbacks"
+wait_for_lines "$HOME/.claude/logs/notifications.log" 5 || fail "expected five Codex notification log entries"
 
 grep -q "Task Complete - demo" "$notification_log" || fail "Codex completion payload did not map to a stop notification"
 grep -q "Input Required - demo" "$notification_log" || fail "Codex permission-like payload did not map to an input-required notification"
-[[ $(wc -l < "$notification_log") -eq 3 ]] || fail "desktop-origin Codex events were not suppressed correctly"
-[[ $(wc -l < "$sound_log") -eq 3 ]] || fail "desktop-origin Codex sound playback was not suppressed correctly"
-[[ $(wc -l < "$HOME/.claude/logs/notifications.log") -eq 3 ]] || fail "desktop-origin Codex log entries were not suppressed correctly"
+[[ $(wc -l < "$notification_log") -eq 5 ]] || fail "desktop-origin Codex events were not suppressed correctly"
+[[ $(wc -l < "$sound_log") -eq 5 ]] || fail "desktop-origin Codex sound playback was not suppressed correctly"
+[[ $(wc -l < "$HOME/.claude/logs/notifications.log") -eq 5 ]] || fail "desktop-origin Codex log entries were not suppressed correctly"
 
-pass "Codex notifies for CLI sessions while suppressing desktop-origin duplicate events"
+pass "Codex notifies for CLI sessions and repeated approval events while suppressing desktop-origin duplicates"

@@ -20,6 +20,7 @@ source "$NOTIFIER_DIR/../utils/usage.sh"
 source "$NOTIFIER_DIR/../utils/click-through-store.sh"
 source "$NOTIFIER_DIR/../utils/click-through-runtime.sh"
 source "$NOTIFIER_DIR/../utils/click-through-resolver.sh"
+source "$NOTIFIER_DIR/../utils/tmux.sh"
 
 has_jq() {
     command -v jq >/dev/null 2>&1
@@ -58,6 +59,9 @@ print(value if isinstance(value, str) else "", end="")
     case "$key" in
         "type")
             printf '%s' "$json" | sed -nE 's/.*"type"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
+            ;;
+        "notification_type")
+            printf '%s' "$json" | sed -nE 's/.*"notification_type"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
             ;;
         "cwd")
             printf '%s' "$json" | sed -nE 's/.*"cwd"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
@@ -158,12 +162,29 @@ get_legacy_rate_limit_file() {
 }
 
 get_notification_subtype() {
+    # Match approval/permission tokens against the structured type field when
+    # the payload has one, so free-form message text containing words like
+    # "permission" or "approved" can't misclassify (and bypass rate limiting).
+    # Untyped payloads (Claude Code Notification hooks only carry a message)
+    # keep the raw substring match.
+    local payload_type permission_source
+    payload_type=$(json_extract_string "$HOOK_DATA" "type")
+    if [[ -z "$payload_type" ]]; then
+        payload_type=$(json_extract_string "$HOOK_DATA" "notification_type")
+    fi
+    permission_source="${payload_type:-$HOOK_DATA}"
+
     if [[ "$HOOK_DATA" == *"idle_prompt"* ]]; then
         printf '%s\n' "idle_prompt"
         return 0
     fi
 
-    if [[ "$HOOK_DATA" == *"permission_prompt"* ]] || [[ "$HOOK_DATA" == *"request_permissions"* ]] || [[ "$HOOK_DATA" == *"sandbox_approval"* ]]; then
+    if [[ "$permission_source" == *"permission_prompt"* ]] ||
+        [[ "$permission_source" == *"request_permissions"* ]] ||
+        [[ "$permission_source" == *"sandbox_approval"* ]] ||
+        [[ "$permission_source" == *"approval"* ]] ||
+        [[ "$permission_source" == *"approve"* ]] ||
+        [[ "$permission_source" == *"permission"* ]]; then
         printf '%s\n' "permission_prompt"
         return 0
     fi
@@ -181,9 +202,21 @@ get_notification_subtype() {
     printf '%s\n' "notification"
 }
 
+should_rate_limit_notification_subtype() {
+    case "$1" in
+        "permission_prompt"|"elicitation_dialog")
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
 get_notification_rate_limit_key() {
-    local subtype
-    subtype=$(get_notification_subtype)
+    local subtype="${1:-}"
+    if [[ -z "$subtype" ]]; then
+        subtype=$(get_notification_subtype)
+    fi
     printf '%s\n' "last_notification_${TOOL_NAME}_${PROJECT_NAME}_${subtype}"
 }
 
@@ -364,8 +397,12 @@ should_suppress_notification() {
 
     # Suppress repeated state-style notifications such as idle_prompt.
     if [[ "$HOOK_TYPE" == "notification" ]]; then
-        if is_rate_limited "$(get_notification_rate_limit_key)" "$NOTIFICATION_RATE_LIMIT_SECONDS"; then
-            return 0
+        local notification_subtype
+        notification_subtype=$(get_notification_subtype)
+        if should_rate_limit_notification_subtype "$notification_subtype"; then
+            if is_rate_limited "$(get_notification_rate_limit_key "$notification_subtype")" "$NOTIFICATION_RATE_LIMIT_SECONDS"; then
+                return 0
+            fi
         fi
     fi
 
@@ -407,7 +444,10 @@ fi
 if [[ "$HOOK_TYPE" == "stop" ]]; then
     update_rate_limit "last_stop_notification"
 elif [[ "$HOOK_TYPE" == "notification" ]]; then
-    update_rate_limit "$(get_notification_rate_limit_key)"
+    notification_subtype=$(get_notification_subtype)
+    if should_rate_limit_notification_subtype "$notification_subtype"; then
+        update_rate_limit "$(get_notification_rate_limit_key "$notification_subtype")"
+    fi
 elif is_claude_event_hook; then
     update_rate_limit "$(get_event_rate_limit_key)"
 fi
@@ -541,21 +581,55 @@ get_terminal_bundle_id() {
     click_through_resolve_activation_bundle_id
 }
 
+# Persistent alert via alerter (https://github.com/vjeantet/alerter).
+# alerter blocks until the user interacts, so it runs detached and the
+# click handler jumps back to the originating tmux pane.
+send_macos_alerter_notification() {
+    local focus_cmd="$1"
+    (
+        # result stays scoped to this background subshell (the subshell body
+        # is not a function, so `local` cannot be used here).
+        result=$(alerter \
+            --title "$TITLE" \
+            --subtitle "$SUBTITLE" \
+            --message "$MESSAGE" \
+            --group "code-notify-$TOOL_NAME-$PROJECT_NAME" \
+            --timeout "${CODE_NOTIFY_ALERTER_TIMEOUT:-600}" \
+            2>/dev/null)
+        case "$result" in
+            "@CONTENTCLICKED"|"@ACTIONCLICKED")
+                /bin/sh -c "$focus_cmd" > /dev/null 2>&1
+                ;;
+        esac
+    ) > /dev/null 2>&1 &
+    disown 2>/dev/null || true
+}
+
 # Function to send notification on macOS
 send_macos_notification() {
-    local bundle_id
+    local bundle_id focus_cmd
     bundle_id=$(get_terminal_bundle_id)
 
-    if command -v terminal-notifier &> /dev/null; then
+    # When running inside tmux, clicking the notification jumps back to the
+    # originating tmux window/pane (in addition to activating the terminal).
+    focus_cmd=$(tmux_focus_build_command "$bundle_id" 2>/dev/null) || focus_cmd=""
+
+    if [[ -n "$focus_cmd" ]] && command -v alerter &> /dev/null; then
+        send_macos_alerter_notification "$focus_cmd"
+    elif command -v terminal-notifier &> /dev/null; then
         # Keep desktop notifications silent and let play_sound() own audio playback.
         # That avoids double audio and preserves custom sound files.
-        terminal-notifier \
-            -title "$TITLE" \
-            -subtitle "$SUBTITLE" \
-            -message "$MESSAGE" \
-            -group "code-notify-$TOOL_NAME-$PROJECT_NAME" \
-            -activate "$bundle_id" \
-            2>/dev/null
+        local tn_args=(
+            -title "$TITLE"
+            -subtitle "$SUBTITLE"
+            -message "$MESSAGE"
+            -group "code-notify-$TOOL_NAME-$PROJECT_NAME"
+            -activate "$bundle_id"
+        )
+        if [[ -n "$focus_cmd" ]]; then
+            tn_args+=(-execute "$focus_cmd")
+        fi
+        terminal-notifier "${tn_args[@]}" 2>/dev/null
     else
         # osascript doesn't support click-to-activate, but we can use a workaround.
         # Keep this silent too so custom/default sound playback stays single-sourced.

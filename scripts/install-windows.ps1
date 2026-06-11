@@ -2198,11 +2198,30 @@ function Get-ProjectNameForNotification {
 }
 
 function Get-NotificationSubtype {
+    # Match approval/permission tokens against the structured type field when
+    # the payload has one, so free-form message text containing words like
+    # "permission" or "approved" can't misclassify (and bypass rate limiting).
+    # Untyped payloads keep the raw substring match.
+    $typeField = $null
+    try {
+        $parsed = $HookData | ConvertFrom-Json -ErrorAction Stop
+        foreach ($key in @("type", "notification_type")) {
+            $prop = $parsed.PSObject.Properties[$key]
+            if ($prop -and $prop.Value -is [string] -and $prop.Value) {
+                $typeField = $prop.Value
+                break
+            }
+        }
+    } catch {
+        $typeField = $null
+    }
+    $permissionSource = if ($typeField) { $typeField } else { $HookData }
+
     if ($HookData -match 'idle_prompt') {
         return "idle_prompt"
     }
 
-    if ($HookData -match 'permission_prompt|request_permissions|sandbox_approval') {
+    if ($permissionSource -match 'permission_prompt|request_permissions|sandbox_approval|approval|approve|permission') {
         return "permission_prompt"
     }
 
@@ -2215,6 +2234,12 @@ function Get-NotificationSubtype {
     }
 
     return "notification"
+}
+
+function Test-ShouldRateLimitNotificationSubtype {
+    param([string]$Subtype)
+
+    return ($Subtype -ne "permission_prompt" -and $Subtype -ne "elicitation_dialog")
 }
 
 function Get-UsageResetAlertConfigLocal {
@@ -2314,9 +2339,12 @@ function Test-ShouldSuppressNotification {
     }
 
     if ($HookType -eq "notification") {
-        $notificationKey = "last_notification_{0}_{1}_{2}" -f $ToolName, (Get-ProjectNameForNotification), (Get-NotificationSubtype)
-        if (Test-RateLimited -Key $notificationKey -WindowSeconds $NotificationRateLimitSeconds) {
-            return $true
+        $notificationSubtype = Get-NotificationSubtype
+        if (Test-ShouldRateLimitNotificationSubtype -Subtype $notificationSubtype) {
+            $notificationKey = "last_notification_{0}_{1}_{2}" -f $ToolName, (Get-ProjectNameForNotification), $notificationSubtype
+            if (Test-RateLimited -Key $notificationKey -WindowSeconds $NotificationRateLimitSeconds) {
+                return $true
+            }
         }
     }
 
@@ -2352,7 +2380,10 @@ if ($HookType -eq "stop" -or $HookType -eq "notification") {
 if ($HookType -eq "stop") {
     Update-RateLimit -Key "last_stop_notification"
 } elseif ($HookType -eq "notification") {
-    Update-RateLimit -Key ("last_notification_{0}_{1}_{2}" -f $ToolName, (Get-ProjectNameForNotification), (Get-NotificationSubtype))
+    $notificationSubtype = Get-NotificationSubtype
+    if (Test-ShouldRateLimitNotificationSubtype -Subtype $notificationSubtype) {
+        Update-RateLimit -Key ("last_notification_{0}_{1}_{2}" -f $ToolName, (Get-ProjectNameForNotification), $notificationSubtype)
+    }
 }
 
 if (-not $ProjectName) {

@@ -56,6 +56,7 @@ cn usage status
 - **Cross-platform** - macOS, Linux, Windows
 - **Native notifications** - Uses system notification APIs
 - **macOS click-through control** - Choose which app notification clicks activate
+- **tmux click-to-focus** - Clicking a notification jumps to the exact tmux window/pane the tool runs in (macOS; uses [alerter](https://github.com/vjeantet/alerter) for persistent alerts when installed)
 - **Sound notifications** - Play custom sounds on task completion
 - **Voice announcements** - Hear when tasks complete (macOS, Windows)
 - **Slack/Discord delivery** - Mirror notifications to incoming webhooks

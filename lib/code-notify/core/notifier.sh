@@ -20,6 +20,7 @@ source "$NOTIFIER_DIR/../utils/usage.sh"
 source "$NOTIFIER_DIR/../utils/click-through-store.sh"
 source "$NOTIFIER_DIR/../utils/click-through-runtime.sh"
 source "$NOTIFIER_DIR/../utils/click-through-resolver.sh"
+source "$NOTIFIER_DIR/../utils/tmux.sh"
 
 has_jq() {
     command -v jq >/dev/null 2>&1
@@ -580,21 +581,55 @@ get_terminal_bundle_id() {
     click_through_resolve_activation_bundle_id
 }
 
+# Persistent alert via alerter (https://github.com/vjeantet/alerter).
+# alerter blocks until the user interacts, so it runs detached and the
+# click handler jumps back to the originating tmux pane.
+send_macos_alerter_notification() {
+    local focus_cmd="$1"
+    (
+        # result stays scoped to this background subshell (the subshell body
+        # is not a function, so `local` cannot be used here).
+        result=$(alerter \
+            --title "$TITLE" \
+            --subtitle "$SUBTITLE" \
+            --message "$MESSAGE" \
+            --group "code-notify-$TOOL_NAME-$PROJECT_NAME" \
+            --timeout "${CODE_NOTIFY_ALERTER_TIMEOUT:-600}" \
+            2>/dev/null)
+        case "$result" in
+            "@CONTENTCLICKED"|"@ACTIONCLICKED")
+                /bin/sh -c "$focus_cmd" > /dev/null 2>&1
+                ;;
+        esac
+    ) > /dev/null 2>&1 &
+    disown 2>/dev/null || true
+}
+
 # Function to send notification on macOS
 send_macos_notification() {
-    local bundle_id
+    local bundle_id focus_cmd
     bundle_id=$(get_terminal_bundle_id)
 
-    if command -v terminal-notifier &> /dev/null; then
+    # When running inside tmux, clicking the notification jumps back to the
+    # originating tmux window/pane (in addition to activating the terminal).
+    focus_cmd=$(tmux_focus_build_command "$bundle_id" 2>/dev/null) || focus_cmd=""
+
+    if [[ -n "$focus_cmd" ]] && command -v alerter &> /dev/null; then
+        send_macos_alerter_notification "$focus_cmd"
+    elif command -v terminal-notifier &> /dev/null; then
         # Keep desktop notifications silent and let play_sound() own audio playback.
         # That avoids double audio and preserves custom sound files.
-        terminal-notifier \
-            -title "$TITLE" \
-            -subtitle "$SUBTITLE" \
-            -message "$MESSAGE" \
-            -group "code-notify-$TOOL_NAME-$PROJECT_NAME" \
-            -activate "$bundle_id" \
-            2>/dev/null
+        local tn_args=(
+            -title "$TITLE"
+            -subtitle "$SUBTITLE"
+            -message "$MESSAGE"
+            -group "code-notify-$TOOL_NAME-$PROJECT_NAME"
+            -activate "$bundle_id"
+        )
+        if [[ -n "$focus_cmd" ]]; then
+            tn_args+=(-execute "$focus_cmd")
+        fi
+        terminal-notifier "${tn_args[@]}" 2>/dev/null
     else
         # osascript doesn't support click-to-activate, but we can use a workaround.
         # Keep this silent too so custom/default sound playback stays single-sourced.

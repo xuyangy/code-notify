@@ -204,6 +204,14 @@ else
     test_fail "click-through resolver failed"
 fi
 
+# Test: clicking a notification jumps back to the originating tmux pane
+test_start "tmux click-to-focus"
+if bash tests/test-tmux-focus.sh >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "tmux click-to-focus failed"
+fi
+
 # Test 19: click-through commands persist mappings and drive notifier activation
 test_start "click-through commands"
 if bash tests/test-click-through.sh >/dev/null 2>&1; then

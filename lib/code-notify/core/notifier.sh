@@ -172,7 +172,10 @@ get_notification_subtype() {
     if [[ -z "$payload_type" ]]; then
         payload_type=$(json_extract_string "$HOOK_DATA" "notification_type")
     fi
-    permission_source="${payload_type:-$HOOK_DATA}"
+    # Lowercase for case-insensitive matching — gemini sends capitalised
+    # types like "ToolPermission" (PowerShell's -match is already
+    # case-insensitive, keeping the two implementations in parity).
+    permission_source=$(printf '%s' "${payload_type:-$HOOK_DATA}" | tr '[:upper:]' '[:lower:]')
 
     if [[ "$HOOK_DATA" == *"idle_prompt"* ]]; then
         printf '%s\n' "idle_prompt"

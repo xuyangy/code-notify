@@ -99,13 +99,17 @@ run_notifier "$fake_path" "approval_requested"
 # must not be classified as approval prompts, so dedupe still applies.
 run_notifier_payload "$fake_path" '{"type":"status_update","message":"updated file permission flags"}'
 run_notifier_payload "$fake_path" '{"type":"status_update","message":"updated file permission flags"}'
+# Gemini sends capitalised types; matching must be case-insensitive and
+# repeated confirmations must all be delivered.
+run_notifier_payload "$fake_path" '{"notification_type":"ToolPermission","message":"Tool requires confirmation"}'
+run_notifier_payload "$fake_path" '{"notification_type":"ToolPermission","message":"Tool requires confirmation"}'
 
-wait_for_lines "$notification_log" 5 || fail "expected five notification deliveries"
-wait_for_lines "$sound_log" 5 || fail "expected five sound playbacks"
-wait_for_lines "$HOME/.claude/logs/notifications.log" 5 || fail "expected five notification log entries"
+wait_for_lines "$notification_log" 7 || fail "expected seven notification deliveries"
+wait_for_lines "$sound_log" 7 || fail "expected seven sound playbacks"
+wait_for_lines "$HOME/.claude/logs/notifications.log" 7 || fail "expected seven notification log entries"
 
-[[ $(wc -l < "$notification_log") -eq 5 ]] || fail "non-approval duplicates should be suppressed"
-[[ $(wc -l < "$sound_log") -eq 5 ]] || fail "non-approval sound playback should be suppressed"
-[[ $(wc -l < "$HOME/.claude/logs/notifications.log") -eq 5 ]] || fail "non-approval log entries should be suppressed"
+[[ $(wc -l < "$notification_log") -eq 7 ]] || fail "non-approval duplicates should be suppressed"
+[[ $(wc -l < "$sound_log") -eq 7 ]] || fail "non-approval sound playback should be suppressed"
+[[ $(wc -l < "$HOME/.claude/logs/notifications.log") -eq 7 ]] || fail "non-approval log entries should be suppressed"
 
 pass "notification dedupe suppresses repeated idle_prompt events without blocking approval prompts"

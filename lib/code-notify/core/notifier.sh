@@ -59,6 +59,9 @@ print(value if isinstance(value, str) else "", end="")
         "type")
             printf '%s' "$json" | sed -nE 's/.*"type"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
             ;;
+        "notification_type")
+            printf '%s' "$json" | sed -nE 's/.*"notification_type"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
+            ;;
         "cwd")
             printf '%s' "$json" | sed -nE 's/.*"cwd"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
             ;;
@@ -158,12 +161,29 @@ get_legacy_rate_limit_file() {
 }
 
 get_notification_subtype() {
+    # Match approval/permission tokens against the structured type field when
+    # the payload has one, so free-form message text containing words like
+    # "permission" or "approved" can't misclassify (and bypass rate limiting).
+    # Untyped payloads (Claude Code Notification hooks only carry a message)
+    # keep the raw substring match.
+    local payload_type permission_source
+    payload_type=$(json_extract_string "$HOOK_DATA" "type")
+    if [[ -z "$payload_type" ]]; then
+        payload_type=$(json_extract_string "$HOOK_DATA" "notification_type")
+    fi
+    permission_source="${payload_type:-$HOOK_DATA}"
+
     if [[ "$HOOK_DATA" == *"idle_prompt"* ]]; then
         printf '%s\n' "idle_prompt"
         return 0
     fi
 
-    if [[ "$HOOK_DATA" == *"permission_prompt"* ]] || [[ "$HOOK_DATA" == *"request_permissions"* ]] || [[ "$HOOK_DATA" == *"sandbox_approval"* ]]; then
+    if [[ "$permission_source" == *"permission_prompt"* ]] ||
+        [[ "$permission_source" == *"request_permissions"* ]] ||
+        [[ "$permission_source" == *"sandbox_approval"* ]] ||
+        [[ "$permission_source" == *"approval"* ]] ||
+        [[ "$permission_source" == *"approve"* ]] ||
+        [[ "$permission_source" == *"permission"* ]]; then
         printf '%s\n' "permission_prompt"
         return 0
     fi
@@ -181,9 +201,21 @@ get_notification_subtype() {
     printf '%s\n' "notification"
 }
 
+should_rate_limit_notification_subtype() {
+    case "$1" in
+        "permission_prompt"|"elicitation_dialog")
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
 get_notification_rate_limit_key() {
-    local subtype
-    subtype=$(get_notification_subtype)
+    local subtype="${1:-}"
+    if [[ -z "$subtype" ]]; then
+        subtype=$(get_notification_subtype)
+    fi
     printf '%s\n' "last_notification_${TOOL_NAME}_${PROJECT_NAME}_${subtype}"
 }
 
@@ -364,8 +396,12 @@ should_suppress_notification() {
 
     # Suppress repeated state-style notifications such as idle_prompt.
     if [[ "$HOOK_TYPE" == "notification" ]]; then
-        if is_rate_limited "$(get_notification_rate_limit_key)" "$NOTIFICATION_RATE_LIMIT_SECONDS"; then
-            return 0
+        local notification_subtype
+        notification_subtype=$(get_notification_subtype)
+        if should_rate_limit_notification_subtype "$notification_subtype"; then
+            if is_rate_limited "$(get_notification_rate_limit_key "$notification_subtype")" "$NOTIFICATION_RATE_LIMIT_SECONDS"; then
+                return 0
+            fi
         fi
     fi
 
@@ -407,7 +443,10 @@ fi
 if [[ "$HOOK_TYPE" == "stop" ]]; then
     update_rate_limit "last_stop_notification"
 elif [[ "$HOOK_TYPE" == "notification" ]]; then
-    update_rate_limit "$(get_notification_rate_limit_key)"
+    notification_subtype=$(get_notification_subtype)
+    if should_rate_limit_notification_subtype "$notification_subtype"; then
+        update_rate_limit "$(get_notification_rate_limit_key "$notification_subtype")"
+    fi
 elif is_claude_event_hook; then
     update_rate_limit "$(get_event_rate_limit_key)"
 fi

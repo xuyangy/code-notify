@@ -48,7 +48,9 @@ cat > "$config_file" <<'EOF'
 JetBrains-JediTerm=com.jetbrains.pycharm
 EOF
 
-unset __CFBundleIdentifier
+# Clear all runtime terminal hints so the host environment (iTerm2 sets
+# LC_TERMINAL, JediTerm sets TERMINAL_EMULATOR) can't leak into resolution.
+unset __CFBundleIdentifier TERMINAL_EMULATOR LC_TERMINAL
 
 TERM_PROGRAM="JetBrains-JediTerm"
 [[ "$(click_through_resolve_configured_bundle_id)" == "com.jetbrains.pycharm" ]] || fail "configured resolution should prefer the live TERM_PROGRAM"

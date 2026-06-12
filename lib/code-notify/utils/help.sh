@@ -31,8 +31,9 @@ ${BOLD}COMMANDS:${RESET}
     ${GREEN}test${RESET}            Send a test notification
     ${GREEN}update${RESET} [check]  Update code-notify or check the latest release
     ${GREEN}alerts${RESET} <cmd>    Configure which events trigger alerts
-    ${GREEN}channels${RESET} <cmd>  Configure Slack/Discord delivery
+    ${GREEN}channels${RESET} <cmd>  Configure Slack/Discord/ntfy delivery
     ${GREEN}usage${RESET} <cmd>     Configure Codex/Claude usage alerts
+    ${GREEN}snooze${RESET} <time>   Pause all notifications (30m, 2h, off, status)
     ${GREEN}voice${RESET} <cmd>     Voice notification commands
 EOF
 
@@ -85,13 +86,19 @@ ${BOLD}SOUND COMMANDS:${RESET}
     ${GREEN}sound status${RESET}        Show sound configuration
 
 ${BOLD}CHANNEL COMMANDS:${RESET}
-    ${GREEN}channels status${RESET}     Show Slack/Discord channel status
+    ${GREEN}channels status${RESET}     Show remote channel status
     ${GREEN}channels add${RESET} slack <url> [--name <name>]
     ${GREEN}channels add${RESET} discord <url> [--name <name>]
+    ${GREEN}channels add${RESET} ntfy https://ntfy.sh/<topic> [--name <name>]
     ${GREEN}channels remove${RESET} <name>
     ${GREEN}channels test${RESET} [name|all]
     ${GREEN}channels on${RESET}         Enable remote delivery
     ${GREEN}channels off${RESET}        Disable remote delivery
+
+${BOLD}SNOOZE COMMANDS:${RESET}
+    ${GREEN}snooze${RESET} <duration>   Pause all notifications (e.g. 30m, 2h, 90s)
+    ${GREEN}snooze off${RESET}          Resume notifications immediately
+    ${GREEN}snooze status${RESET}       Show remaining snooze time
 
 ${BOLD}USAGE ALERT COMMANDS:${RESET}
     ${GREEN}usage status${RESET}        Show usage alert status
@@ -142,6 +149,8 @@ ${BOLD}EXAMPLES:${RESET}
     cn alerts reset         # Back to idle_prompt only (less noisy)
     cn channels add slack https://hooks.slack.com/services/...
     cn channels add discord https://discord.com/api/webhooks/...
+    cn channels add ntfy https://ntfy.sh/my-topic  # phone push via ntfy app
+    cn snooze 30m           # Pause all notifications for 30 minutes
     cn usage on
     cn usage setup --watch
     cn usage check
@@ -174,12 +183,29 @@ ${BOLD}USAGE:${RESET}
     cn channels status
     cn channels add slack <webhook-url> [--name <name>]
     cn channels add discord <webhook-url> [--name <name>]
+    cn channels add ntfy https://<server>/<topic> [--name <name>]
     cn channels remove <name>
     cn channels test <name|all>
     cn channels on|off
     cn channels reset
 
 Webhook URLs are stored locally and redacted in status output.
+ntfy delivers push notifications to your phone via the ntfy app
+(https://ntfy.sh) - pick a hard-to-guess topic name.
+EOF
+}
+
+show_snooze_help() {
+    cat << EOF
+${BOLD}Snooze Commands${RESET}
+
+${BOLD}USAGE:${RESET}
+    cn snooze <duration>    Pause all notifications (e.g. 30m, 2h, 90s)
+    cn snooze off           Resume notifications immediately
+    cn snooze status        Show remaining snooze time
+
+Snooze silences every notification, including approval prompts.
+It expires automatically; no daemon is involved.
 EOF
 }
 

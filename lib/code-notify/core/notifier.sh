@@ -21,6 +21,7 @@ source "$NOTIFIER_DIR/../utils/click-through-store.sh"
 source "$NOTIFIER_DIR/../utils/click-through-runtime.sh"
 source "$NOTIFIER_DIR/../utils/click-through-resolver.sh"
 source "$NOTIFIER_DIR/../utils/tmux.sh"
+source "$NOTIFIER_DIR/../utils/snooze.sh"
 
 has_jq() {
     command -v jq >/dev/null 2>&1
@@ -417,6 +418,12 @@ should_suppress_notification() {
     # Skip suppression checks for test notifications
     if [[ "$HOOK_TYPE" == "test" ]]; then
         return 1
+    fi
+
+    # Timed snooze silences everything, including approval prompts — unlike
+    # automatic rate limiting it is an explicit user request for quiet.
+    if snooze_is_active; then
+        return 0
     fi
 
     # Suppress only when this Codex event originated from the desktop app.

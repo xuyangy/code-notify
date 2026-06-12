@@ -15,7 +15,7 @@ Code-Notify can now watch Codex and Claude usage limits and tell you when tokens
 - **Daily reset**: `Codex token daily limit reset`
 - **Weekly reset**: `Codex token weekly limit reset`
 - **Low-usage warnings**: 20% and 10% remaining
-- **Delivery options**: desktop notification, voice, sound, Slack, or Discord
+- **Delivery options**: desktop notification, voice, sound, Slack, Discord, or ntfy phone push
 
 Voice samples: [Daily reset](https://cdn.jsdelivr.net/gh/mylee04/code-notify@main/assets/audio/codex-token-daily-limit-reset.m4a) · [Weekly reset](https://cdn.jsdelivr.net/gh/mylee04/code-notify@main/assets/audio/codex-token-weekly-limit-reset.m4a)
 
@@ -59,7 +59,7 @@ cn usage status
 - **tmux click-to-focus** - Clicking a notification jumps to the exact tmux window/pane the tool runs in (macOS; uses [alerter](https://github.com/vjeantet/alerter) for persistent alerts when installed)
 - **Sound notifications** - Play custom sounds on task completion
 - **Voice announcements** - Hear when tasks complete (macOS, Windows)
-- **Slack/Discord delivery** - Mirror notifications to incoming webhooks
+- **Slack/Discord/ntfy delivery** - Mirror notifications to webhooks or your phone
 - **Usage alerts** - Opt-in Codex/Claude 20%, 10%, and reset notifications
 - **Tool-specific messages** - "Claude completed the task", "Codex completed the task"
 - **Project-specific settings** - Different configs per project
@@ -155,7 +155,8 @@ npm packages are published with GitHub Actions Trusted Publisher and npm provena
 | `cn click-through`   | Show current macOS click-through mappings    |
 | `cn click-through add <app>` | Add a macOS click-through mapping    |
 | `cn alerts`          | Configure which events trigger notifications |
-| `cn channels`        | Configure Slack/Discord delivery channels    |
+| `cn channels`        | Configure Slack/Discord/ntfy delivery        |
+| `cn snooze <time>`   | Pause all notifications (30m, 2h, off)       |
 | `cn usage`           | Configure Codex/Claude usage alerts          |
 | `cn sound on`        | Enable sound notifications                   |
 | `cn sound set <path>`| Use custom sound file                        |
@@ -241,18 +242,29 @@ Alert-type matching applies to Claude Code notification hooks and Gemini CLI not
 
 Agent-team and subagent workflows can be noisy if `permission_prompt` is enabled. If you only want idle pings, run `cn alerts remove permission_prompt && cn on`. Codex currently uses completion events from `notify`, so `permission_prompt` and `idle_prompt` settings do not change Codex behavior.
 
-### Slack And Discord
+### Slack, Discord, And ntfy (Phone Push)
 
-Code-Notify can also send the same notification to Slack or Discord through incoming webhooks. Desktop notifications still work normally; remote delivery is an extra channel.
+Code-Notify can also send the same notification to Slack, Discord, or [ntfy](https://ntfy.sh) through webhooks. Desktop notifications still work normally; remote delivery is an extra channel. ntfy delivers push notifications to your phone via the ntfy app — subscribe to your topic there, and pick a hard-to-guess topic name since topics are open by default.
 
 ```bash
 cn channels add slack https://hooks.slack.com/services/...
 cn channels add discord https://discord.com/api/webhooks/...
+cn channels add ntfy https://ntfy.sh/my-private-topic --name phone
 cn channels status
 cn channels test all
 ```
 
-Webhook URLs are stored locally in `~/.config/code-notify/channels.json` and are redacted in `cn status`.
+Webhook URLs are stored locally in `~/.config/code-notify/channels.json` and are redacted in `cn status`. Self-hosted ntfy servers work too (any `https://<server>/<topic>` URL).
+
+### Snooze
+
+Pause every notification — including approval prompts — for a fixed time, then resume automatically. No daemon involved; expiry is checked when the next event fires.
+
+```bash
+cn snooze 30m     # also accepts 2h, 90s, or bare minutes
+cn snooze status
+cn snooze off
+```
 
 ### Usage Alerts
 

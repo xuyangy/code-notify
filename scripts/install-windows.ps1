@@ -2334,6 +2334,21 @@ function Test-ShouldSuppressNotification {
         return $false
     }
 
+    # Timed snooze silences everything, including approval prompts.
+    # Same marker file as the bash notifier: epoch seconds in snooze-until.
+    $snoozeFile = Join-Path $NotificationsDir "snooze-until"
+    if (Test-Path $snoozeFile) {
+        $snoozeUntil = 0
+        $snoozeRaw = (Get-Content $snoozeFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ([long]::TryParse($snoozeRaw, [ref]$snoozeUntil)) {
+            $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+            if ($now -lt $snoozeUntil) {
+                return $true
+            }
+        }
+        Remove-Item $snoozeFile -Force -ErrorAction SilentlyContinue
+    }
+
     if ($HookType -eq "stop" -and (Test-RateLimited -Key "last_stop_notification" -WindowSeconds $StopRateLimitSeconds)) {
         return $true
     }

@@ -49,6 +49,11 @@ channels_validate_provider_url() {
         discord:https://discord.com/api/webhooks/*|discord:https://discordapp.com/api/webhooks/*)
             return 0
             ;;
+        # ntfy is self-hostable, so any https host is allowed as long as a
+        # topic segment is present after the host.
+        ntfy:https://*/?*)
+            return 0
+            ;;
     esac
 
     return 1
@@ -62,13 +67,17 @@ channels_add() {
 
     [[ -n "$name" ]] || name="$provider"
 
-    if [[ "$provider" != "slack" && "$provider" != "discord" ]]; then
-        error "Unsupported channel provider: $provider"
+    if [[ "$provider" != "slack" && "$provider" != "discord" && "$provider" != "ntfy" ]]; then
+        error "Unsupported channel provider: $provider (expected slack, discord, or ntfy)"
         return 1
     fi
 
     if ! channels_validate_provider_url "$provider" "$url"; then
-        error "Invalid $provider webhook URL"
+        if [[ "$provider" == "ntfy" ]]; then
+            error "Invalid ntfy URL (expected https://<server>/<topic>, e.g. https://ntfy.sh/my-topic)"
+        else
+            error "Invalid $provider webhook URL"
+        fi
         return 1
     fi
 
@@ -282,6 +291,23 @@ channels_send_one() {
     local payload
 
     command -v curl >/dev/null 2>&1 || return 0
+
+    if [[ "$provider" == "ntfy" ]]; then
+        # ntfy takes a plain-text body with the title in a header. HTTP
+        # headers must stay ASCII, so emoji in titles are stripped; the
+        # message body keeps full UTF-8. No python3 needed for this path.
+        local ntfy_title body
+        ntfy_title=$(printf '%s' "$title" | LC_ALL=C tr -cd ' -~')
+        body="$message"
+        [[ -n "$context" ]] && body="${body}${body:+
+}$context"
+        curl -fsS -m "${CODE_NOTIFY_CHANNEL_TIMEOUT_SECONDS:-5}" \
+            -H "Title: ${ntfy_title:-Code-Notify}" \
+            -d "$body" \
+            "$url" >/dev/null 2>&1 || return 0
+        return 0
+    fi
+
     payload="$(channels_json_payload "$provider" "$title" "$message" "$context")" || return 0
     curl -fsS -m "${CODE_NOTIFY_CHANNEL_TIMEOUT_SECONDS:-5}" \
         -H "Content-Type: application/json" \
@@ -319,7 +345,7 @@ channels_test() {
             continue
         fi
         count=$((count + 1))
-        channels_send_one "$provider" "$url" "Code-Notify Test" "Slack/Discord delivery is working." "Channel: $name"
+        channels_send_one "$provider" "$url" "Code-Notify Test" "Channel delivery is working." "Channel: $name"
     done < <(channels_emit_entries)
 
     if [[ "$count" -eq 0 ]]; then
@@ -354,7 +380,7 @@ handle_channels_command() {
                         ;;
                 esac
             done
-            [[ -n "$provider" && -n "$url" ]] || { error "Usage: cn channels add <slack|discord> <webhook-url> [--name <name>]"; return 1; }
+            [[ -n "$provider" && -n "$url" ]] || { error "Usage: cn channels add <slack|discord|ntfy> <url> [--name <name>]"; return 1; }
             channels_add "$provider" "$url" "$name"
             ;;
         "remove"|"rm")

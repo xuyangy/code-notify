@@ -10,6 +10,7 @@ source "$GLOBAL_CMD_DIR/../utils/help.sh"
 source "$GLOBAL_CMD_DIR/../utils/click-through.sh"
 source "$GLOBAL_CMD_DIR/../utils/channels.sh"
 source "$GLOBAL_CMD_DIR/../utils/usage.sh"
+source "$GLOBAL_CMD_DIR/../utils/snooze.sh"
 
 CODE_NOTIFY_RELEASES_API="https://api.github.com/repos/mylee04/code-notify/releases/latest"
 
@@ -51,6 +52,9 @@ handle_global_command() {
             ;;
         "usage")
             handle_usage_command "$@"
+            ;;
+        "snooze")
+            handle_snooze_command "$@"
             ;;
         "click-through")
             handle_click_through_command "$@"

@@ -155,6 +155,7 @@ npm packages are published with GitHub Actions Trusted Publisher and npm provena
 | `cn click-through`   | Show current macOS click-through mappings    |
 | `cn click-through add <app>` | Add a macOS click-through mapping    |
 | `cn alerts`          | Configure which events trigger notifications |
+| `cn alerts persist`  | Keep selected alerts visible until closed    |
 | `cn channels`        | Configure Slack/Discord/ntfy delivery        |
 | `cn snooze <time>`   | Pause all notifications (30m, 2h, off)       |
 | `cn usage`           | Configure Codex/Claude usage alerts          |
@@ -241,6 +242,25 @@ cn alerts reset                    # Back to default (idle_prompt only)
 Alert-type matching applies to Claude Code notification hooks and Gemini CLI notification hooks. `ask_user` is a Claude-only `PreToolUse` hook for `AskUserQuestion`; it is applied immediately when Claude notifications are already enabled. Claude Code agent/team events are separate hook events and are opt-in via `cn alerts add SubagentStop`, `cn alerts add TeammateIdle`, or `cn alerts add TaskCompleted`.
 
 Agent-team and subagent workflows can be noisy if `permission_prompt` is enabled. If you only want idle pings, run `cn alerts remove permission_prompt && cn on`. Codex currently uses completion events from `notify`, so `permission_prompt` and `idle_prompt` settings do not change Codex behavior.
+
+### Persistent Notifications
+
+By default, desktop notifications auto-hide after a few seconds. You can mark specific alert types as persistent so they stay visible until you close them, or until a timeout you choose (default 12 hours):
+
+```bash
+cn alerts persist add permission_prompt  # Keep permission requests on screen
+cn alerts persist add stop               # Keep task-complete alerts on screen
+cn alerts persist timeout 12h            # Hide after 12 hours (default)
+cn alerts persist timeout 0              # Stay until manually closed
+cn alerts persist                        # Show current config
+cn alerts persist reset                  # Back to normal banners
+```
+
+- **macOS**: requires [alerter](https://github.com/vjeantet/alerter) (`brew install alerter`); without it, persistent types fall back to normal banners. Clicking the alert still focuses your terminal (and the originating tmux window/pane when applicable).
+- **Linux**: persistent alerts are sent with critical urgency, which GNOME/KDE keep on screen until dismissed.
+- **Windows**: persistent alerts use a reminder toast with a Dismiss button.
+
+Persistence only changes how long a notification stays visible. Which events notify at all is still controlled by `cn alerts add/remove`, and `stop` (task complete) can be made persistent even though it is not an alert-type filter.
 
 ### Slack, Discord, And ntfy (Phone Push)
 

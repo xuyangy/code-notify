@@ -173,6 +173,13 @@ else
     test_fail "snooze failed"
 fi
 
+test_start "persistent alerts"
+if bash tests/test-persistent-alerts.sh >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "persistent alerts failed"
+fi
+
 test_start "usage alerts"
 if bash tests/test-usage-alerts.sh >/dev/null 2>&1; then
     test_pass

@@ -22,6 +22,7 @@ source "$NOTIFIER_DIR/../utils/click-through-runtime.sh"
 source "$NOTIFIER_DIR/../utils/click-through-resolver.sh"
 source "$NOTIFIER_DIR/../utils/tmux.sh"
 source "$NOTIFIER_DIR/../utils/snooze.sh"
+source "$NOTIFIER_DIR/../utils/persist.sh"
 
 has_jq() {
     command -v jq >/dev/null 2>&1
@@ -483,6 +484,38 @@ if [[ "$HOOK_TYPE" == "notification" ]]; then
     NOTIFICATION_SUBTYPE=$(get_notification_subtype)
 fi
 
+# Map the current event to the canonical key stored by `cn alerts persist add`.
+get_persist_key() {
+    case "$HOOK_TYPE" in
+        "stop")
+            printf '%s\n' "stop"
+            ;;
+        "notification")
+            printf '%s\n' "$NOTIFICATION_SUBTYPE"
+            ;;
+        "PreToolUse")
+            printf '%s\n' "ask_user"
+            ;;
+        "SubagentStart"|"SubagentStop"|"TeammateIdle"|"TaskCreated"|"TaskCompleted")
+            printf '%s\n' "$HOOK_TYPE"
+            ;;
+        *)
+            printf '%s\n' ""
+            ;;
+    esac
+}
+
+# Persistent ("sticky") delivery: classified once, used by the per-platform
+# senders to keep the alert visible until dismissed or until persist-timeout.
+PERSIST_ACTIVE=0
+if persist_is_type_enabled "$(get_persist_key)"; then
+    PERSIST_ACTIVE=1
+fi
+
+notification_is_persistent() {
+    [[ "$PERSIST_ACTIVE" == "1" ]]
+}
+
 # Check if notification should be suppressed
 if [[ "$HOOK_TYPE" == "stop" ]] || [[ "$HOOK_TYPE" == "notification" ]] || [[ "$HOOK_TYPE" == "PreToolUse" ]] || is_claude_event_hook; then
     if should_suppress_notification; then
@@ -635,19 +668,27 @@ get_terminal_bundle_id() {
 # click handler jumps back to the originating tmux pane.
 send_macos_alerter_notification() {
     local focus_cmd="$1"
+    local timeout_seconds="${2:-${CODE_NOTIFY_ALERTER_TIMEOUT:-600}}"
+    local -a alerter_args=(
+        --title "$TITLE"
+        --subtitle "$SUBTITLE"
+        --message "$MESSAGE"
+        --group "code-notify-$TOOL_NAME-$PROJECT_NAME"
+    )
+    # Timeout 0 keeps the alert up until the user closes it (alerter waits
+    # forever when no --timeout is given).
+    if (( timeout_seconds > 0 )); then
+        alerter_args+=(--timeout "$timeout_seconds")
+    fi
     (
         # result stays scoped to this background subshell (the subshell body
         # is not a function, so `local` cannot be used here).
-        result=$(alerter \
-            --title "$TITLE" \
-            --subtitle "$SUBTITLE" \
-            --message "$MESSAGE" \
-            --group "code-notify-$TOOL_NAME-$PROJECT_NAME" \
-            --timeout "${CODE_NOTIFY_ALERTER_TIMEOUT:-600}" \
-            2>/dev/null)
+        result=$(alerter "${alerter_args[@]}" 2>/dev/null)
         case "$result" in
             "@CONTENTCLICKED"|"@ACTIONCLICKED")
-                /bin/sh -c "$focus_cmd" > /dev/null 2>&1
+                if [[ -n "$focus_cmd" ]]; then
+                    /bin/sh -c "$focus_cmd" > /dev/null 2>&1
+                fi
                 ;;
         esac
     ) > /dev/null 2>&1 &
@@ -663,7 +704,15 @@ send_macos_notification() {
     # originating tmux window/pane (in addition to activating the terminal).
     focus_cmd=$(tmux_focus_build_command "$bundle_id" 2>/dev/null) || focus_cmd=""
 
-    if [[ -n "$focus_cmd" ]] && command -v alerter &> /dev/null; then
+    if notification_is_persistent && command -v alerter &> /dev/null; then
+        # Persistent alert: stays visible until clicked/closed or until the
+        # persist timeout. Outside tmux, clicking still activates the
+        # originating terminal app.
+        if [[ -z "$focus_cmd" ]] && [[ -n "$bundle_id" ]]; then
+            focus_cmd=$(printf 'open -b %q' "$bundle_id")
+        fi
+        send_macos_alerter_notification "$focus_cmd" "$(persist_get_timeout_seconds)"
+    elif [[ -n "$focus_cmd" ]] && command -v alerter &> /dev/null; then
         send_macos_alerter_notification "$focus_cmd"
     elif command -v terminal-notifier &> /dev/null; then
         # Keep desktop notifications silent and let play_sound() own audio playback.
@@ -689,11 +738,22 @@ send_macos_notification() {
 # Function to send notification on Linux
 send_linux_notification() {
     if command -v notify-send &> /dev/null; then
-        notify-send "$TITLE" "$MESSAGE" \
-            --urgency=normal \
-            --app-name="Code-Notify" \
-            --icon=dialog-information \
-            2>/dev/null
+        local -a ns_args=(
+            --urgency=normal
+            --app-name="Code-Notify"
+            --icon=dialog-information
+        )
+        if notification_is_persistent; then
+            # Critical urgency stays on screen in GNOME/KDE until dismissed;
+            # expire-time is a best-effort cap (0 = never expire).
+            ns_args=(
+                --urgency=critical
+                --app-name="Code-Notify"
+                --icon=dialog-information
+                --expire-time="$(( $(persist_get_timeout_seconds) * 1000 ))"
+            )
+        fi
+        notify-send "$TITLE" "$MESSAGE" "${ns_args[@]}" 2>/dev/null
     elif command -v zenity &> /dev/null; then
         zenity --notification \
             --text="$TITLE\n$MESSAGE" \

@@ -69,6 +69,42 @@ print(value if isinstance(value, str) else "", end="")
     esac
 }
 
+# Extract the payload's type ("type", falling back to "notification_type")
+# in a single interpreter spawn — this runs before every notification, so
+# spawn count directly delays the banner.
+get_payload_type_field() {
+    local json="$1"
+
+    if [[ -z "$json" ]]; then
+        return 0
+    fi
+
+    if has_jq; then
+        printf '%s' "$json" | jq -r '(((.type | strings) // (.notification_type | strings)) // "")' 2>/dev/null
+        return 0
+    fi
+
+    if has_python3; then
+        printf '%s' "$json" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    value = data.get("type") or data.get("notification_type") or ""
+except Exception:
+    value = ""
+print(value if isinstance(value, str) else "", end="")
+' 2>/dev/null
+        return 0
+    fi
+
+    local value
+    value=$(json_extract_string "$json" "type")
+    if [[ -z "$value" ]]; then
+        value=$(json_extract_string "$json" "notification_type")
+    fi
+    printf '%s' "$value"
+}
+
 get_codex_hook_type() {
     local payload_type
     payload_type=$(json_extract_string "$HOOK_DATA" "type" | tr '[:upper:]' '[:lower:]')
@@ -168,10 +204,7 @@ get_notification_subtype() {
     # Untyped payloads (Claude Code Notification hooks only carry a message)
     # keep the raw substring match.
     local payload_type permission_source
-    payload_type=$(json_extract_string "$HOOK_DATA" "type")
-    if [[ -z "$payload_type" ]]; then
-        payload_type=$(json_extract_string "$HOOK_DATA" "notification_type")
-    fi
+    payload_type=$(get_payload_type_field "$HOOK_DATA")
     # Lowercase for case-insensitive matching — gemini sends capitalised
     # types like "ToolPermission" (PowerShell's -match is already
     # case-insensitive, keeping the two implementations in parity).
@@ -399,11 +432,10 @@ should_suppress_notification() {
     fi
 
     # Suppress repeated state-style notifications such as idle_prompt.
+    # Uses NOTIFICATION_SUBTYPE computed once in the main flow.
     if [[ "$HOOK_TYPE" == "notification" ]]; then
-        local notification_subtype
-        notification_subtype=$(get_notification_subtype)
-        if should_rate_limit_notification_subtype "$notification_subtype"; then
-            if is_rate_limited "$(get_notification_rate_limit_key "$notification_subtype")" "$NOTIFICATION_RATE_LIMIT_SECONDS"; then
+        if should_rate_limit_notification_subtype "$NOTIFICATION_SUBTYPE"; then
+            if is_rate_limited "$(get_notification_rate_limit_key "$NOTIFICATION_SUBTYPE")" "$NOTIFICATION_RATE_LIMIT_SECONDS"; then
                 return 0
             fi
         fi
@@ -436,6 +468,14 @@ should_suppress_notification() {
     return 1
 }
 
+# Classify the notification subtype once; both the suppression check and the
+# rate-limit update below use it (classification spawns jq/python3, which is
+# the dominant pre-banner cost).
+NOTIFICATION_SUBTYPE=""
+if [[ "$HOOK_TYPE" == "notification" ]]; then
+    NOTIFICATION_SUBTYPE=$(get_notification_subtype)
+fi
+
 # Check if notification should be suppressed
 if [[ "$HOOK_TYPE" == "stop" ]] || [[ "$HOOK_TYPE" == "notification" ]] || [[ "$HOOK_TYPE" == "PreToolUse" ]] || is_claude_event_hook; then
     if should_suppress_notification; then
@@ -447,9 +487,8 @@ fi
 if [[ "$HOOK_TYPE" == "stop" ]]; then
     update_rate_limit "last_stop_notification"
 elif [[ "$HOOK_TYPE" == "notification" ]]; then
-    notification_subtype=$(get_notification_subtype)
-    if should_rate_limit_notification_subtype "$notification_subtype"; then
-        update_rate_limit "$(get_notification_rate_limit_key "$notification_subtype")"
+    if should_rate_limit_notification_subtype "$NOTIFICATION_SUBTYPE"; then
+        update_rate_limit "$(get_notification_rate_limit_key "$NOTIFICATION_SUBTYPE")"
     fi
 elif is_claude_event_hook; then
     update_rate_limit "$(get_event_rate_limit_key)"
@@ -764,17 +803,23 @@ OS=$(detect_os)
 case "$OS" in
     macos)
         send_macos_notification
-        # Voice notification if enabled
-        if should_speak; then
-            VOICE=$(get_voice_setting)
-            if [[ -n "$VOICE" ]]; then
-                say -v "$VOICE" "$VOICE_MESSAGE"
+        # Voice and sound run detached so the hook exits right after the
+        # banner — `say` alone blocks for seconds. Ordering inside the
+        # subshell keeps voice before sound.
+        (
+            # Voice notification if enabled
+            if should_speak; then
+                VOICE=$(get_voice_setting)
+                if [[ -n "$VOICE" ]]; then
+                    say -v "$VOICE" "$VOICE_MESSAGE"
+                fi
             fi
-        fi
-        # Sound notification if enabled (separate from voice)
-        if should_play_sound; then
-            play_sound "$(get_notification_sound_file)"
-        fi
+            # Sound notification if enabled (separate from voice)
+            if should_play_sound; then
+                play_sound "$(get_notification_sound_file)"
+            fi
+        ) > /dev/null 2>&1 &
+        disown 2>/dev/null || true
         ;;
     linux)
         send_linux_notification

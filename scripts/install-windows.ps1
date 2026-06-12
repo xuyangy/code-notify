@@ -2157,6 +2157,7 @@ function Get-ToolDisplayName {
 
 $ToolDisplay = Get-ToolDisplayName $ToolName
 
+$NotificationsDir = "$ClaudeHome\notifications"
 $NotificationStateDir = "$ClaudeHome\notifications\state"
 $UsageConfigFile = Join-Path $env:USERPROFILE ".config\code-notify\usage.json"
 
@@ -2240,6 +2241,49 @@ function Test-ShouldRateLimitNotificationSubtype {
     param([string]$Subtype)
 
     return ($Subtype -ne "permission_prompt" -and $Subtype -ne "elicitation_dialog")
+}
+
+# Persistent ("sticky") alerts share the bash notifier's config files:
+# persist-types (pipe-separated canonical keys) and persist-timeout (seconds).
+function Get-PersistKey {
+    switch ($HookType.ToLower()) {
+        "stop" { return "stop" }
+        "notification" { return Get-NotificationSubtype }
+        "pretooluse" { return "ask_user" }
+    }
+    if (@("SubagentStart", "SubagentStop", "TeammateIdle", "TaskCreated", "TaskCompleted") -contains $HookType) {
+        return $HookType
+    }
+    return ""
+}
+
+function Test-PersistentNotification {
+    $persistFile = Join-Path $NotificationsDir "persist-types"
+    if (-not (Test-Path $persistFile)) {
+        return $false
+    }
+    $raw = (Get-Content $persistFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if (-not $raw) {
+        return $false
+    }
+    $key = Get-PersistKey
+    if (-not $key) {
+        return $false
+    }
+    return (($raw -split '\|') -contains $key)
+}
+
+function Get-PersistTimeoutSeconds {
+    $timeoutFile = Join-Path $NotificationsDir "persist-timeout"
+    $seconds = 43200  # 12 hours
+    if (Test-Path $timeoutFile) {
+        $raw = (Get-Content $timeoutFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        $parsed = 0
+        if ([long]::TryParse($raw, [ref]$parsed) -and $parsed -ge 0) {
+            $seconds = $parsed
+        }
+    }
+    return $seconds
 }
 
 function Get-UsageResetAlertConfigLocal {
@@ -2414,8 +2458,17 @@ switch ($HookType.ToLower()) {
     }
     "notification" {
         $Title = "$ToolDisplay - Input Required"
-        $Message = "$ToolDisplay needs your input in $ProjectName"
-        $VoiceMessage = "$ToolDisplay needs your input in $ProjectName"
+        switch (Get-NotificationSubtype) {
+            "idle_prompt" { $Message = "$ToolDisplay is idle in $ProjectName" }
+            "permission_prompt" { $Message = "$ToolDisplay needs your approval in $ProjectName" }
+            "elicitation_dialog" { $Message = "$ToolDisplay needs MCP tool input in $ProjectName" }
+            "auth_success" {
+                $Title = "$ToolDisplay - Authentication"
+                $Message = "$ToolDisplay authentication succeeded in $ProjectName"
+            }
+            default { $Message = "$ToolDisplay needs your input in $ProjectName" }
+        }
+        $VoiceMessage = $Message
     }
     "pretooluse" {
         $Title = "$ToolDisplay - Command Approval"
@@ -2487,6 +2540,42 @@ function Set-WindowForeground {
 function Send-DesktopNotification {
     # Store terminal handle for activation
     $terminalHandle = Get-TerminalProcess
+
+    # Persistent alerts use a reminder-scenario toast, which stays on screen
+    # until the user dismisses it. ExpirationTime caps Action Center retention.
+    if (Test-PersistentNotification) {
+        try {
+            [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+            [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+
+            $template = @"
+<toast scenario="reminder">
+    <visual>
+        <binding template="ToastText02">
+            <text id="1">$Title</text>
+            <text id="2">$Message</text>
+        </binding>
+    </visual>
+    <actions>
+        <action activationType="system" arguments="dismiss" content="Dismiss"/>
+    </actions>
+    <audio silent="true"/>
+</toast>
+"@
+            $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+            $xml.LoadXml($template)
+            $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
+            $timeoutSeconds = Get-PersistTimeoutSeconds
+            if ($timeoutSeconds -gt 0) {
+                $toast.ExpirationTime = [DateTimeOffset]::Now.AddSeconds($timeoutSeconds)
+            }
+            [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Code-Notify").Show($toast)
+            return
+        }
+        catch {
+            # Fall through to the standard delivery paths below
+        }
+    }
 
     # Try BurntToast first
     if (Get-Module -ListAvailable -Name BurntToast) {

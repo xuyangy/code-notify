@@ -11,6 +11,7 @@ source "$GLOBAL_CMD_DIR/../utils/click-through.sh"
 source "$GLOBAL_CMD_DIR/../utils/channels.sh"
 source "$GLOBAL_CMD_DIR/../utils/usage.sh"
 source "$GLOBAL_CMD_DIR/../utils/snooze.sh"
+source "$GLOBAL_CMD_DIR/../utils/persist.sh"
 
 CODE_NOTIFY_RELEASES_API="https://api.github.com/repos/mylee04/code-notify/releases/latest"
 
@@ -998,6 +999,9 @@ handle_alerts_command() {
         "reset")
             reset_alert_types
             ;;
+        "persist")
+            handle_alerts_persist_command "${@:2}"
+            ;;
         "help"|"-h"|"--help")
             show_alerts_help
             ;;
@@ -1007,6 +1011,159 @@ handle_alerts_command() {
             return 1
             ;;
     esac
+}
+
+# ============================================
+# Persistent Alerts Management
+# ============================================
+
+# Persist accepts every alert type plus "stop" (task complete).
+normalize_persist_type() {
+    local key
+    key="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$key" == "stop" ]]; then
+        printf '%s\n' "stop"
+        return 0
+    fi
+    normalize_alert_type "$1"
+}
+
+warn_if_persist_needs_alerter() {
+    if [[ "$(uname -s)" == "Darwin" ]] && ! command -v alerter &> /dev/null; then
+        warning "alerter is not installed; persistent alerts fall back to normal banners"
+        echo "  Install it with: ${CYAN}brew install alerter${RESET}"
+    fi
+}
+
+# Handle persistent alert commands
+# Usage: cn alerts persist [add|remove|timeout|reset] [value]
+handle_alerts_persist_command() {
+    local action="${1:-}"
+    local value="${2:-}"
+    local type seconds
+
+    case "$action" in
+        "")
+            show_alerts_persist_status
+            ;;
+        "add")
+            if [[ -z "$value" ]]; then
+                error "Please specify a notification type"
+                echo ""
+                show_available_persist_types
+                return 1
+            fi
+            type="$(normalize_persist_type "$value" 2>/dev/null || true)"
+            if [[ -z "$type" ]]; then
+                error "Unknown notification type: $value"
+                echo ""
+                show_available_persist_types
+                return 1
+            fi
+            persist_add_type "$type"
+            success "Persistent: $type (stays visible $(persist_timeout_human))"
+            warn_if_persist_needs_alerter
+            ;;
+        "remove"|"rm")
+            if [[ -z "$value" ]]; then
+                error "Please specify a notification type to remove"
+                return 1
+            fi
+            type="$(normalize_persist_type "$value" 2>/dev/null || true)"
+            if [[ -z "$type" ]]; then
+                error "Unknown notification type: $value"
+                return 1
+            fi
+            if ! persist_is_type_enabled "$type"; then
+                warning "$type is not persistent"
+                return 0
+            fi
+            persist_remove_type "$type"
+            success "Back to a normal banner: $type"
+            ;;
+        "timeout")
+            if [[ -z "$value" ]]; then
+                echo "Persistent alerts stay visible $(persist_timeout_human)"
+                return 0
+            fi
+            if ! seconds=$(snooze_parse_duration_seconds "$value"); then
+                error "Invalid duration: $value (use 12h, 30m, 90s, or 0 to keep alerts until closed)"
+                return 1
+            fi
+            persist_set_timeout_seconds "$seconds"
+            success "Persistent alerts now stay visible $(persist_timeout_human)"
+            ;;
+        "reset")
+            persist_reset
+            success "Persistent alerts cleared - all notifications use normal banners"
+            ;;
+        "help"|"-h"|"--help")
+            show_alerts_persist_help
+            ;;
+        *)
+            error "Unknown persist command: $action"
+            show_alerts_persist_help
+            return 1
+            ;;
+    esac
+}
+
+show_alerts_persist_status() {
+    header "${BELL} Persistent Alerts"
+    echo ""
+
+    local current
+    current="$(persist_get_types)"
+    if [[ -z "$current" ]]; then
+        echo "  No persistent alert types configured."
+        echo "  All notifications use normal auto-hiding banners."
+    else
+        echo "  These alert types stay visible $(persist_timeout_human):"
+        local item
+        local -a _persist_types=()
+        IFS='|' read -r -a _persist_types <<< "$current"
+        for item in "${_persist_types[@]}"; do
+            [[ -n "$item" ]] || continue
+            echo "    ${CHECK_MARK} ${GREEN}$item${RESET}"
+        done
+        warn_if_persist_needs_alerter
+    fi
+
+    echo ""
+    info "Examples:"
+    echo "  ${CYAN}cn alerts persist add permission_prompt${RESET}  # Keep permission requests on screen"
+    echo "  ${CYAN}cn alerts persist add stop${RESET}               # Keep task-complete alerts on screen"
+    echo "  ${CYAN}cn alerts persist timeout 12h${RESET}            # Hide after 12 hours"
+    echo "  ${CYAN}cn alerts persist timeout 0${RESET}              # Stay until manually closed"
+    echo "  ${CYAN}cn alerts persist reset${RESET}                  # Back to normal banners"
+}
+
+show_available_persist_types() {
+    echo "Types that can be made persistent:"
+    echo "  ${CYAN}stop${RESET}               - Task complete"
+    show_available_alert_types
+}
+
+show_alerts_persist_help() {
+    echo ""
+    echo "Usage: cn alerts persist [command] [value]"
+    echo ""
+    echo "Persistent alerts stay visible until you close them or until a"
+    echo "timeout, instead of auto-hiding after a few seconds."
+    echo ""
+    echo "Commands:"
+    echo "  (none)            Show current persistent alert configuration"
+    echo "  add <type>        Make a notification type persistent"
+    echo "  remove <type>     Make a notification type a normal banner again"
+    echo "  timeout <time>    How long alerts stay visible (12h, 30m, 0 = until closed)"
+    echo "  reset             Clear all persistent types and the timeout"
+    echo ""
+    show_available_persist_types
+    echo ""
+    echo "Platform notes:"
+    echo "  macOS:   requires alerter (brew install alerter); falls back to banners"
+    echo "  Linux:   uses critical urgency, which stays on screen in GNOME/KDE"
+    echo "  Windows: uses a reminder toast with a Dismiss button"
 }
 
 # Show current alert types status
@@ -1198,6 +1355,7 @@ show_alerts_help() {
     echo "  add <type>     Add a notification type"
     echo "  remove <type>  Remove a notification type"
     echo "  reset          Reset to default (idle_prompt only)"
+    echo "  persist        Keep selected alerts visible until closed (see: cn alerts persist help)"
     echo ""
     show_available_alert_types
     echo ""

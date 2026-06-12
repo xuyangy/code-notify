@@ -63,6 +63,7 @@ ${BOLD}ALERT TYPES:${RESET}
     ${GREEN}alerts add${RESET} <type>   Add a notification type
     ${GREEN}alerts remove${RESET} <type> Remove a notification type
     ${GREEN}alerts reset${RESET}        Reset to default (idle_prompt only)
+    ${GREEN}alerts persist${RESET} <cmd> Keep selected alerts visible until closed (or a timeout)
 
     Notification types: ${CYAN}idle_prompt${RESET} (default), ${CYAN}permission_prompt${RESET}, ${CYAN}auth_success${RESET}, ${CYAN}elicitation_dialog${RESET}, ${CYAN}ask_user${RESET}
     Claude events: ${CYAN}SubagentStart${RESET}, ${CYAN}SubagentStop${RESET}, ${CYAN}TeammateIdle${RESET}, ${CYAN}TaskCreated${RESET}, ${CYAN}TaskCompleted${RESET}

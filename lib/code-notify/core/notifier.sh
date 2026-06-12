@@ -546,9 +546,26 @@ case "$HOOK_TYPE" in
     "notification")
         TITLE="$TOOL_DISPLAY 🔔"
         SUBTITLE="Input Required"
-        MESSAGE="$TOOL_DISPLAY needs your input"
-        VOICE_MESSAGE="$TOOL_DISPLAY needs your input"
         SOUND="Ping"
+        case "$NOTIFICATION_SUBTYPE" in
+            "idle_prompt")
+                MESSAGE="$TOOL_DISPLAY is idle"
+                ;;
+            "permission_prompt")
+                MESSAGE="$TOOL_DISPLAY needs your approval"
+                ;;
+            "elicitation_dialog")
+                MESSAGE="$TOOL_DISPLAY needs MCP tool input"
+                ;;
+            "auth_success")
+                SUBTITLE="Authentication"
+                MESSAGE="$TOOL_DISPLAY authentication succeeded"
+                ;;
+            *)
+                MESSAGE="$TOOL_DISPLAY needs your input"
+                ;;
+        esac
+        VOICE_MESSAGE="$MESSAGE"
         ;;
     "SubagentStart")
         TITLE="$TOOL_DISPLAY 🤖"

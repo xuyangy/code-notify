@@ -2458,8 +2458,17 @@ switch ($HookType.ToLower()) {
     }
     "notification" {
         $Title = "$ToolDisplay - Input Required"
-        $Message = "$ToolDisplay needs your input in $ProjectName"
-        $VoiceMessage = "$ToolDisplay needs your input in $ProjectName"
+        switch (Get-NotificationSubtype) {
+            "idle_prompt" { $Message = "$ToolDisplay is idle in $ProjectName" }
+            "permission_prompt" { $Message = "$ToolDisplay needs your approval in $ProjectName" }
+            "elicitation_dialog" { $Message = "$ToolDisplay needs MCP tool input in $ProjectName" }
+            "auth_success" {
+                $Title = "$ToolDisplay - Authentication"
+                $Message = "$ToolDisplay authentication succeeded in $ProjectName"
+            }
+            default { $Message = "$ToolDisplay needs your input in $ProjectName" }
+        }
+        $VoiceMessage = $Message
     }
     "pretooluse" {
         $Title = "$ToolDisplay - Command Approval"

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Code-Notify - Desktop notifications for AI coding tools
-# https://github.com/mylee04/code-notify
+# https://github.com/xuyangy/code-notify
 
 set -e
 

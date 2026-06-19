@@ -171,7 +171,7 @@ EOF
     cnp on                  # Enable for current project
 
 ${BOLD}MORE INFO:${RESET}
-    ${DIM}https://github.com/mylee04/code-notify${RESET}
+    ${DIM}https://github.com/xuyangy/code-notify${RESET}
 
 EOF
 }

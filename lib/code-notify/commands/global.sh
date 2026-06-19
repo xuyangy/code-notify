@@ -13,7 +13,7 @@ source "$GLOBAL_CMD_DIR/../utils/usage.sh"
 source "$GLOBAL_CMD_DIR/../utils/snooze.sh"
 source "$GLOBAL_CMD_DIR/../utils/persist.sh"
 
-CODE_NOTIFY_RELEASES_API="https://api.github.com/repos/mylee04/code-notify/releases/latest"
+CODE_NOTIFY_RELEASES_API="https://api.github.com/repos/xuyangy/code-notify/releases/latest"
 
 # Handle global commands
 handle_global_command() {
@@ -212,7 +212,7 @@ get_update_command() {
             echo "npm install -g code-notify@latest"
             ;;
         "script")
-            echo "curl -fsSL https://raw.githubusercontent.com/mylee04/code-notify/main/scripts/install.sh | bash"
+            echo "curl -fsSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | bash"
             ;;
         *)
             return 1
@@ -232,7 +232,7 @@ run_update_for_method() {
             npm install -g code-notify@latest
             ;;
         "script")
-            curl -fsSL https://raw.githubusercontent.com/mylee04/code-notify/main/scripts/install.sh | bash
+            curl -fsSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | bash
             ;;
         *)
             return 1
@@ -279,7 +279,7 @@ check_for_updates() {
             warning "Local checkout or unsupported install method detected"
             echo "Update manually:"
             echo "  ${CYAN}git pull${RESET}"
-            echo "  ${CYAN}https://github.com/mylee04/code-notify${RESET}"
+            echo "  ${CYAN}https://github.com/xuyangy/code-notify${RESET}"
             ;;
     esac
 }

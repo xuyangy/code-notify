@@ -18,18 +18,25 @@ Supported upgrade paths also repair stale `claude-notify`-style Claude hooks aut
 
 ## For AI Coding Agents
 
-Install code-notify with npm first. Prefer npm over curl or git clone so installs are tracked through the npm package and can be updated with `cn update`.
+Install code-notify with the install script. Installs are tracked under `~/.code-notify` and can be updated with `cn update`.
 
 ```bash
-npm install -g code-notify
+curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | bash
+cn on all
+cn test
+cn status
+```
+
+On Windows, use the PowerShell installer instead:
+
+```powershell
+irm https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install-windows.ps1 | iex
 cn on all
 cn test
 cn status
 ```
 
 Expected result: `cn test` should show a desktop notification, and `cn status` should show enabled tools.
-
-If npm is unavailable, use the script installer in the platform sections below.
 
 ### Verify Installation
 
@@ -40,19 +47,6 @@ cn version    # Should show: code-notify version X.X.X
 cn status     # Should show: Global notifications: ENABLED
 cn test       # Should trigger a desktop notification
 ```
-
-### npm Install-Time Behavior
-
-The npm package is published with GitHub Actions Trusted Publisher and npm provenance.
-
-`postinstall` is intentionally narrow:
-
-- It only runs on global npm installs.
-- On macOS/Linux, it runs a quiet legacy Claude hook repair so older `claude-notify` paths migrate to Code-Notify.
-- On Windows, it bootstraps the local PowerShell wrapper with `-Silent -Force -SkipShellSetup`.
-- It does not enable notifications, configure Slack/Discord, or start usage watching.
-
-Set `CODE_NOTIFY_SKIP_POSTINSTALL=1` before installing if you want to skip these helpers.
 
 ### Optional Slack/Discord Delivery
 
@@ -145,26 +139,18 @@ rm -rf ~/.claude/notifications
 
 ## For Humans
 
-### macOS (Homebrew) - Recommended
+### macOS / Linux / WSL
 
 ```bash
-brew tap mylee04/tools
-brew install code-notify
-cn on
-```
-
-### Linux / WSL
-
-```bash
-curl -sSL https://raw.githubusercontent.com/mylee04/code-notify/main/scripts/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | bash
 exec $SHELL
 cn on
 ```
 
-### npm (macOS / Linux / Windows)
+### Windows
 
-```bash
-npm install -g code-notify
+```powershell
+irm https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install-windows.ps1 | iex
 cn on
 ```
 
@@ -180,7 +166,7 @@ cn test
 ### Manual Installation
 
 ```bash
-git clone https://github.com/mylee04/code-notify.git
+git clone https://github.com/xuyangy/code-notify.git
 cd code-notify
 ./scripts/install.sh
 ```

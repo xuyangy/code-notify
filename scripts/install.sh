@@ -32,7 +32,7 @@ case "$OS" in
         echo "  powershell -ExecutionPolicy Bypass -File install-windows.ps1"
         echo ""
         echo "Or download and run directly:"
-        echo "  irm https://raw.githubusercontent.com/mylee04/code-notify/main/scripts/install-windows.ps1 | iex"
+        echo "  irm https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install-windows.ps1 | iex"
         echo ""
         exit 1
         ;;
@@ -101,7 +101,7 @@ mkdir -p "$INSTALL_DIR/lib/code-notify/utils"
 mkdir -p "$HOME/.claude/notifications"
 
 # GitHub raw URL base
-GITHUB_RAW="https://raw.githubusercontent.com/mylee04/code-notify/main"
+GITHUB_RAW="https://raw.githubusercontent.com/xuyangy/code-notify/main"
 
 # Check if running locally (repo exists) or via curl (need to download)
 if [[ -d "bin" ]] && [[ -d "lib" ]]; then
@@ -130,6 +130,9 @@ else
     curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/click-through-store.sh" -o "$INSTALL_DIR/lib/code-notify/utils/click-through-store.sh"
     curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/click-through-runtime.sh" -o "$INSTALL_DIR/lib/code-notify/utils/click-through-runtime.sh"
     curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/click-through-resolver.sh" -o "$INSTALL_DIR/lib/code-notify/utils/click-through-resolver.sh"
+    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/persist.sh" -o "$INSTALL_DIR/lib/code-notify/utils/persist.sh"
+    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/snooze.sh" -o "$INSTALL_DIR/lib/code-notify/utils/snooze.sh"
+    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/tmux.sh" -o "$INSTALL_DIR/lib/code-notify/utils/tmux.sh"
 fi
 
 # Update paths in the main script
@@ -174,4 +177,4 @@ echo "Run these commands to get started:"
 echo "  code-notify setup    # Initial setup"
 echo "  cn on                  # Enable notifications"
 echo ""
-echo "For more info: https://github.com/mylee04/code-notify"
+echo "For more info: https://github.com/xuyangy/code-notify"

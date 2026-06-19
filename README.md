@@ -1,10 +1,8 @@
 # Code-Notify
 
-> **Official downloads**: https://github.com/mylee04/code-notify/releases
+> **Official downloads**: https://github.com/xuyangy/code-notify/releases
 >
-> **Homebrew**: `brew install mylee04/tools/code-notify`
->
-> **npm**: `npm install -g code-notify`
+> **Install**: `curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | bash`
 
 Desktop notifications for AI coding tools - get alerts when tasks complete or input is needed.
 
@@ -17,7 +15,7 @@ Code-Notify can now watch Codex and Claude usage limits and tell you when tokens
 - **Low-usage warnings**: 20% and 10% remaining
 - **Delivery options**: desktop notification, voice, sound, Slack, Discord, or ntfy phone push
 
-Voice samples: [Daily reset](https://cdn.jsdelivr.net/gh/mylee04/code-notify@main/assets/audio/codex-token-daily-limit-reset.m4a) · [Weekly reset](https://cdn.jsdelivr.net/gh/mylee04/code-notify@main/assets/audio/codex-token-weekly-limit-reset.m4a)
+Voice samples: [Daily reset](https://cdn.jsdelivr.net/gh/xuyangy/code-notify@main/assets/audio/codex-token-daily-limit-reset.m4a) · [Weekly reset](https://cdn.jsdelivr.net/gh/xuyangy/code-notify@main/assets/audio/codex-token-weekly-limit-reset.m4a)
 
 ```bash
 cn usage setup --watch
@@ -33,7 +31,7 @@ cn usage status
   <img src="assets/multi-tools-support-02.png" width="48%" alt="All tools enabled"/>
 </p>
 
-[![Version](https://img.shields.io/badge/version-1.10.0-blue.svg)](https://github.com/mylee04/code-notify/releases)
+[![Version](https://img.shields.io/badge/version-1.10.0-blue.svg)](https://github.com/xuyangy/code-notify/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![macOS](https://img.shields.io/badge/macOS-supported-green.svg)](https://www.apple.com/macos)
 [![Linux](https://img.shields.io/badge/Linux-supported-green.svg)](https://www.linux.org/)
@@ -69,15 +67,20 @@ cn usage status
 
 ### For Humans
 
-**macOS (Homebrew)**
+**macOS / Linux / WSL**
 
 ```bash
-brew tap mylee04/tools
-brew install code-notify
+curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | bash
 cn on
 ```
 
-**macOS (Homebrew, Already Installed)**
+**Windows**
+
+```powershell
+irm https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install-windows.ps1 | iex
+```
+
+**Update an existing install**
 
 ```bash
 cn update
@@ -86,33 +89,14 @@ code-notify version
 
 If you were using the older `claude-notify` hook layout, supported upgrades now repair those Claude hooks automatically. On Windows, that repair also covers older `notify.ps1` hook layouts and alternate Claude settings locations such as `%USERPROFILE%\.config\.claude\settings.json`. Existing unrelated Claude hooks are preserved during enable/disable operations.
 
-**Linux / WSL**
-
-```bash
-curl -sSL https://raw.githubusercontent.com/mylee04/code-notify/main/scripts/install.sh | bash
-```
-
-**npm (macOS / Linux / Windows)**
-
-```bash
-npm install -g code-notify
-cn on
-```
-
-**Windows**
-
-```powershell
-irm https://raw.githubusercontent.com/mylee04/code-notify/main/scripts/install-windows.ps1 | iex
-```
-
 ### For AI Coding Agents
 
 Paste this to your AI coding agent (Claude Code, Codex, Cursor, Gemini CLI, etc.):
 
 ```
-Install code-notify using npm only. Prefer npm over curl or git clone.
+Install code-notify with the install script.
 
-npm install -g code-notify
+curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | bash
 cn on all
 cn test
 cn status
@@ -123,17 +107,7 @@ Expected result:
 - `cn test` shows a desktop notification.
 - `cn status` shows enabled tools.
 
-If npm is unavailable, use the fallback installer in [docs/installation.md](docs/installation.md).
-
-Agent-friendly command block:
-
-```bash
-npm install -g code-notify
-cn on all
-cn test
-```
-
-npm packages are published with GitHub Actions Trusted Publisher and npm provenance. The npm `postinstall` script only performs global-install bootstrap tasks: on macOS/Linux it quietly repairs legacy Claude hook paths, and on Windows it bootstraps the local PowerShell wrapper. Set `CODE_NOTIFY_SKIP_POSTINSTALL=1` to skip those install-time helpers.
+See [docs/installation.md](docs/installation.md) for more details.
 
 ## Usage
 
@@ -360,10 +334,10 @@ cn click-through add PhpStorm
 cn test
 ```
 
-**Installed with npm?**
+**Updating?**
 
 ```bash
-cn update     # Runs: npm install -g code-notify@latest
+cn update     # Update to the latest version (uses your install method)
 ```
 
 **Too many `last_notification_*` files in `~/.claude/notifications`?**
@@ -386,7 +360,7 @@ code-notify/
 - [Installation Guide](docs/installation.md)
 - [Hook Configuration](docs/HOOKS_GUIDE.md)
 - [Contributing](docs/CONTRIBUTING.md)
-- [GitHub Issues](https://github.com/mylee04/code-notify/issues)
+- [GitHub Issues](https://github.com/xuyangy/code-notify/issues)
 
 ## License
 

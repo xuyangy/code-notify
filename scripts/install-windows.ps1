@@ -1,12 +1,12 @@
 # Code-Notify Installation Script for Windows
 # Desktop notifications for Claude Code, Codex, and Gemini CLI
-# https://github.com/mylee04/code-notify
+# https://github.com/xuyangy/code-notify
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File install-windows.ps1
 #
 # Or run directly in PowerShell:
-#   irm https://raw.githubusercontent.com/mylee04/code-notify/main/scripts/install-windows.ps1 | iex
+#   irm https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install-windows.ps1 | iex
 
 #Requires -Version 5.1
 
@@ -105,7 +105,7 @@ function Install-ClaudeNotify {
     # Create the main PowerShell module
     $mainScript = @'
 # Code-Notify PowerShell Module
-# https://github.com/mylee04/code-notify
+# https://github.com/xuyangy/code-notify
 
 $script:VERSION = "1.10.0"
 $script:ClaudeHome = if ($env:CLAUDE_HOME) { $env:CLAUDE_HOME } else { "$env:USERPROFILE\.claude" }
@@ -1251,7 +1251,7 @@ function Get-UpdateCommand {
             return "npm install -g code-notify@latest"
         }
         default {
-            return "irm https://raw.githubusercontent.com/mylee04/code-notify/main/scripts/install-windows.ps1 | iex"
+            return "irm https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install-windows.ps1 | iex"
         }
     }
 }
@@ -1320,7 +1320,7 @@ function Get-LatestReleaseVersion {
     }
 
     try {
-        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/mylee04/code-notify/releases/latest" -Headers @{ "User-Agent" = "code-notify" }
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/xuyangy/code-notify/releases/latest" -Headers @{ "User-Agent" = "code-notify" }
         if ($release.tag_name) {
             return Normalize-Version $release.tag_name
         }
@@ -1434,7 +1434,7 @@ function Update-CodeNotify {
                 }
             }
             default {
-                Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/mylee04/code-notify/main/scripts/install-windows.ps1" -OutFile $tempScript
+                Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install-windows.ps1" -OutFile $tempScript
                 & $tempScript -Silent -Force
             }
         }
@@ -1889,7 +1889,7 @@ EXAMPLES:
     cn sound set C:\sounds\ding.wav  # Use custom sound
 
 MORE INFO:
-    https://github.com/mylee04/code-notify
+    https://github.com/xuyangy/code-notify
 
 "@ -ForegroundColor Gray
 }
@@ -2954,7 +2954,7 @@ function Show-PostInstall {
     Write-Host "For enhanced notifications (recommended):" -ForegroundColor White
     Write-Host "  Install-Module -Name BurntToast -Scope CurrentUser" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "More info: https://github.com/mylee04/code-notify" -ForegroundColor DarkGray
+    Write-Host "More info: https://github.com/xuyangy/code-notify" -ForegroundColor DarkGray
     Write-Host ""
 }
 

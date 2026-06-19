@@ -3,13 +3,13 @@
   "version": "1.10.0",
   "description": "Desktop notifications and usage reset alerts for Claude Code, Codex CLI, Gemini CLI, and AI coding agents",
   "license": "MIT",
-  "homepage": "https://github.com/mylee04/code-notify#readme",
+  "homepage": "https://github.com/xuyangy/code-notify#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mylee04/code-notify.git"
+    "url": "git+https://github.com/xuyangy/code-notify.git"
   },
   "bugs": {
-    "url": "https://github.com/mylee04/code-notify/issues"
+    "url": "https://github.com/xuyangy/code-notify/issues"
   },
   "keywords": [
     "ai",

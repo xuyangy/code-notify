@@ -10,7 +10,7 @@ Please do not open a public issue for a vulnerability.
 
 Report security issues privately through GitHub Security Advisories:
 
-https://github.com/mylee04/code-notify/security/advisories/new
+https://github.com/xuyangy/code-notify/security/advisories/new
 
 Include:
 

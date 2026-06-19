@@ -30,8 +30,8 @@ npm_method=$(detect_update_method "/usr/local/lib/node_modules/code-notify/lib/c
 pass "detects npm installations"
 
 script_command=$(get_update_command "script")
-[[ "$script_command" == "curl -fsSL https://raw.githubusercontent.com/mylee04/code-notify/main/scripts/install.sh | bash" ]] || fail "unexpected install-script update command"
-pass "uses the correct mylee04 install script URL"
+[[ "$script_command" == "curl -fsSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | bash" ]] || fail "unexpected install-script update command"
+pass "uses the correct fork install script URL"
 
 npm_command=$(get_update_command "npm")
 [[ "$npm_command" == "npm install -g code-notify@latest" ]] || fail "unexpected npm update command"

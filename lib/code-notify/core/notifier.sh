@@ -15,6 +15,7 @@ NOTIFIER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$NOTIFIER_DIR/../utils/detect.sh"
 source "$NOTIFIER_DIR/../utils/voice.sh"
 source "$NOTIFIER_DIR/../utils/sound.sh"
+source "$NOTIFIER_DIR/../utils/tts.sh"
 source "$NOTIFIER_DIR/../utils/channels.sh"
 source "$NOTIFIER_DIR/../utils/usage.sh"
 source "$NOTIFIER_DIR/../utils/click-through-store.sh"
@@ -895,7 +896,7 @@ case "$OS" in
             if should_speak; then
                 VOICE=$(get_voice_setting)
                 if [[ -n "$VOICE" ]]; then
-                    say -v "$VOICE" "$VOICE_MESSAGE"
+                    speak_notification "$VOICE_MESSAGE" "$VOICE"
                 fi
             fi
             # Sound notification if enabled (separate from voice)

@@ -78,6 +78,16 @@ cn voice on   # Follow prompts to select a voice
 cn test       # Should hear + see notification
 ```
 
+For higher-quality cloud voices, switch the TTS engine to ElevenLabs:
+
+```bash
+cn voice engine elevenlabs
+cn voice elevenlabs key <your-api-key>
+cn voice elevenlabs test
+```
+
+If ElevenLabs is unavailable (no key, network error, or quota), Code-Notify falls back to the built-in `say` voice. Synthesized audio is cached in `~/.cache/code-notify/tts/`; the API key is stored in `~/.config/code-notify/tts.json` (permissions `600`).
+
 ### Project-Specific Setup
 
 To enable notifications for a specific project only:
@@ -119,6 +129,7 @@ After installation, these files are created:
 - `~/.claude/settings.json` - Hook configuration on the default Claude Code path
 - `~/.config/.claude/settings.json` - Hook configuration on some Windows Claude Code setups
 - `~/.claude/notifications/voice-enabled` - Voice setting (if enabled)
+- `~/.config/code-notify/tts.json` - TTS engine config and ElevenLabs key (if used)
 - `~/.config/code-notify/channels.json` - Slack/Discord channel config (if configured)
 - `~/.config/code-notify/usage.json` - Usage alert config (if enabled)
 - `~/.config/code-notify/usage-state.json` - Usage alert dedupe state (if alerts have fired)

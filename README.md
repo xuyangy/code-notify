@@ -57,6 +57,7 @@ cn usage status
 - **tmux click-to-focus** - Clicking a notification jumps to the exact tmux window/pane the tool runs in (macOS; uses [alerter](https://github.com/vjeantet/alerter) for persistent alerts when installed)
 - **Sound notifications** - Play custom sounds on task completion
 - **Voice announcements** - Hear when tasks complete (macOS, Windows)
+- **ElevenLabs voices** - Optional high-quality cloud TTS for voice announcements (macOS)
 - **Slack/Discord/ntfy delivery** - Mirror notifications to webhooks or your phone
 - **Usage alerts** - Opt-in Codex/Claude 20%, 10%, and reset notifications
 - **Tool-specific messages** - "Claude completed the task", "Codex completed the task"
@@ -137,6 +138,8 @@ See [docs/installation.md](docs/installation.md) for more details.
 | `cn sound set <path>`| Use custom sound file                        |
 | `cn voice on`        | Enable voice (macOS, Windows)                |
 | `cn voice on claude` | Enable voice for Claude only                 |
+| `cn voice engine elevenlabs` | Use ElevenLabs cloud voice (macOS)   |
+| `cn voice elevenlabs key <key>` | Store your ElevenLabs API key     |
 | `cnp on`             | Enable for current project only              |
 
 When enabling project notifications with `cnp on`, Code-Notify warns if Claude project trust does not appear to be accepted yet.
@@ -259,6 +262,59 @@ cn snooze 30m     # also accepts 2h, 90s, or bare minutes
 cn snooze status
 cn snooze off
 ```
+
+### ElevenLabs Voices
+
+By default, voice announcements use the built-in macOS voice (`say`). You can switch to [ElevenLabs](https://elevenlabs.io) for higher-quality cloud voices.
+
+```bash
+cn voice on                                  # Enable voice first
+cn voice engine elevenlabs                   # Switch TTS engine
+cn voice elevenlabs key <your-api-key>       # Store your API key
+cn voice elevenlabs list                     # List voices (with category + plan)
+cn voice elevenlabs voice <voice-id>         # Pick a voice (default: Rachel)
+cn voice elevenlabs model <model-id>         # Default: eleven_flash_v2_5
+cn voice elevenlabs test                     # Speak a test message
+cn voice engine system                       # Switch back to the built-in voice
+```
+
+Notes:
+
+- ElevenLabs voice applies on macOS. If a call fails (no key, network error, or quota exhausted), Code-Notify automatically falls back to the built-in `say` voice so you still hear the announcement. `cn voice elevenlabs test` reports the specific API error when it fails.
+- `cn voice elevenlabs list` shows each voice's category and plan. Voices marked `paid only` (ElevenLabs `professional`/`library` voices) require a paid ElevenLabs plan; voices marked `free ok` (e.g. `premade`) work on the free tier.
+- Synthesized audio is cached in `~/.cache/code-notify/tts/`, so repeated messages (for example "Claude completed the task") do not make repeat API calls.
+- Your API key is stored locally in `~/.config/code-notify/tts.json` (permissions `600`) and is redacted in `cn voice status`.
+- `eleven_flash_v2_5` is the default model — it is the fastest and cheapest, which suits short notification phrases. Use `eleven_multilingual_v2` for higher quality.
+
+#### Free-tier voices and preview links
+
+The exact list comes from your ElevenLabs account at runtime, but these are the standard free-tier-safe `premade` voices. Open any preview URL in your browser to hear the sample voice before setting it in Code-Notify.
+
+| Voice | Voice ID | Preview |
+| --- | --- | --- |
+| Roger | `CwhRBWXzGAHq8TQ4Fs17` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/CwhRBWXzGAHq8TQ4Fs17/58ee3ff5-f6f2-4628-93b8-e38eb31806b0.mp3) |
+| Sarah | `EXAVITQu4vr4xnSDxMaL` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/EXAVITQu4vr4xnSDxMaL/01a3e33c-6e99-4ee7-8543-ff2216a32186.mp3) |
+| Laura | `FGY2WhTYpPnrIDTdsKH5` | [hear](https://api.us.elevenlabs.io/v1/voices/FGY2WhTYpPnrIDTdsKH5/previews/audio?payload=eyJ2b2ljZV9zb3VyY2UiOiJwcmVtYWRlIiwiZmlsZW5hbWUiOiI2NzM0MTc1OS1hZDA4LTQxYTUtYmU2ZS1kZTEyZmU0NDg2MTgubXAzIiwidGltZXN0YW1wIjoxNzgxOTAyODAwMDAwMDAwfQ%3D%3D) |
+| Charlie | `IKne3meq5aSn9XLyUdCD` | [hear](https://api.us.elevenlabs.io/v1/voices/IKne3meq5aSn9XLyUdCD/previews/audio?payload=eyJ2b2ljZV9zb3VyY2UiOiJwcmVtYWRlIiwiZmlsZW5hbWUiOiIxMDJkZTZmMi0yMmVkLTQzZTAtYTFmMS0xMTFmYTc1YzU0ODEubXAzIiwidGltZXN0YW1wIjoxNzgxOTAyODAwMDAwMDAwfQ%3D%3D) |
+| George | `JBFqnCBsd6RMkjVDRZzb` | [hear](https://api.us.elevenlabs.io/v1/voices/JBFqnCBsd6RMkjVDRZzb/previews/audio?payload=eyJ2b2ljZV9zb3VyY2UiOiJwcmVtYWRlIiwiZmlsZW5hbWUiOiJlNjIwNmQxYS0wNzIxLTQ3ODctYWFmYi0wNmE2ZTcwNWNhYzUubXAzIiwidGltZXN0YW1wIjoxNzgxOTAyODAwMDAwMDAwfQ%3D%3D) |
+| Callum | `N2lVS1w4EtoT3dr4eOWO` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/N2lVS1w4EtoT3dr4eOWO/ac833bd8-ffda-4938-9ebc-b0f99ca25481.mp3) |
+| River | `SAz9YHcvj6GT2YYXdXww` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/SAz9YHcvj6GT2YYXdXww/e6c95f0b-2227-491a-b3d7-2249240decb7.mp3) |
+| Harry | `SOYHLrjzK2X1ezoPC6cr` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/SOYHLrjzK2X1ezoPC6cr/86d178f6-f4b6-4e0e-85be-3de19f490794.mp3) |
+| Liam | `TX3LPaxmHKxFdv7VOQHJ` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/TX3LPaxmHKxFdv7VOQHJ/63148076-6363-42db-aea8-31424308b92c.mp3) |
+| Alice | `Xb7hH8MSUJpSbSDYk0k2` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/Xb7hH8MSUJpSbSDYk0k2/d10f7534-11f6-41fe-a012-2de1e482d336.mp3) |
+| Matilda | `XrExE9yKIg1WjnnlVkGX` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/XrExE9yKIg1WjnnlVkGX/b930e18d-6b4d-466e-bab2-0ae97c6d8535.mp3) |
+| Will | `bIHbv24MWmeRgasZH58o` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/bIHbv24MWmeRgasZH58o/8caf8f3d-ad29-4980-af41-53f20c72d7a4.mp3) |
+| Jessica | `cgSgspJ2msm6clMCkdW9` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/cgSgspJ2msm6clMCkdW9/56a97bf8-b69b-448f-846c-c3a11683d45a.mp3) |
+| Eric | `cjVigY5qzO86Huf0OWal` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/cjVigY5qzO86Huf0OWal/d098fda0-6456-4030-b3d8-63aa048c9070.mp3) |
+| Bella | `hpp4J3VqNfWAUOO0d1Us` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/hpp4J3VqNfWAUOO0d1Us/dab0f5ba-3aa4-48a8-9fad-f138fea1126d.mp3) |
+| Chris | `iP95p4xoKVk53GoZ742B` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/iP95p4xoKVk53GoZ742B/3f4bde72-cc48-40dd-829f-57fbf906f4d7.mp3) |
+| Brian | `nPczCjzI2devNBz1zQrb` | [hear](https://api.us.elevenlabs.io/v1/voices/nPczCjzI2devNBz1zQrb/previews/audio?payload=eyJ2b2ljZV9zb3VyY2UiOiJwcmVtYWRlIiwiZmlsZW5hbWUiOiIyZGQzZTcyYy00ZmQzLTQyZjEtOTNlYS1hYmM1ZDRlNWFhMWQubXAzIiwidGltZXN0YW1wIjoxNzgxOTAyODAwMDAwMDAwfQ%3D%3D) |
+| Daniel | `onwK4e9ZLuTAKqWW03F9` | [hear](https://api.us.elevenlabs.io/v1/voices/onwK4e9ZLuTAKqWW03F9/previews/audio?payload=eyJ2b2ljZV9zb3VyY2UiOiJwcmVtYWRlIiwiZmlsZW5hbWUiOiI3ZWVlMDIzNi0xYTcyLTRiODYtYjMwMy01ZGNhZGMwMDdiYTkubXAzIiwidGltZXN0YW1wIjoxNzgxOTAyODAwMDAwMDAwfQ%3D%3D) |
+| Lily | `pFZP5JQG7iQjIQuC4Bku` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/pFZP5JQG7iQjIQuC4Bku/89b68b35-b3dd-4348-a84a-a3c13a3c2b30.mp3) |
+| Adam | `pNInz6obpgDQGcFmaJgB` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/pNInz6obpgDQGcFmaJgB/d6905d7a-dd26-4187-bfff-1bd3a5ea7cac.mp3) |
+| Bill | `pqHfZKP75CvOlQylNhV4` | [hear](https://storage.googleapis.com/eleven-public-prod/premade/voices/pqHfZKP75CvOlQylNhV4/d782b3ff-84ba-4029-848c-acf01285524d.mp3) |
+
+Some preview URLs are direct public MP3 links; others are signed ElevenLabs preview URLs and may expire. If one stops working, run `cn voice elevenlabs list` again and use the current preview from ElevenLabs' website.
 
 ### Usage Alerts
 

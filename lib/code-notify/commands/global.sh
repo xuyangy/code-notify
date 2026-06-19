@@ -6,6 +6,7 @@
 GLOBAL_CMD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$GLOBAL_CMD_DIR/../utils/voice.sh"
 source "$GLOBAL_CMD_DIR/../utils/sound.sh"
+source "$GLOBAL_CMD_DIR/../utils/tts.sh"
 source "$GLOBAL_CMD_DIR/../utils/help.sh"
 source "$GLOBAL_CMD_DIR/../utils/click-through.sh"
 source "$GLOBAL_CMD_DIR/../utils/channels.sh"
@@ -589,7 +590,11 @@ show_status() {
     echo ""
     if is_voice_enabled "global"; then
         local current_voice=$(get_voice "global")
-        echo "  ${SPEAKER} Voice: ${GREEN}ENABLED${RESET} ($current_voice)"
+        if [[ "$(tts_get_engine)" == "elevenlabs" && -n "$(tts_elevenlabs_key)" ]]; then
+            echo "  ${SPEAKER} Voice: ${GREEN}ENABLED${RESET} (ElevenLabs)"
+        else
+            echo "  ${SPEAKER} Voice: ${GREEN}ENABLED${RESET} ($current_voice)"
+        fi
     else
         echo "  ${MUTE} Voice: ${DIM}DISABLED${RESET}"
     fi
@@ -881,6 +886,15 @@ handle_voice_command() {
     local tool="${2:-}"
 
     case "$subcommand" in
+        "engine")
+            handle_voice_engine_command "${2:-}"
+            return $?
+            ;;
+        "elevenlabs"|"11labs")
+            shift
+            handle_voice_elevenlabs_command "$@"
+            return $?
+            ;;
         "on")
             header "${SPEAKER} Enabling Voice Notifications"
             echo ""
@@ -928,6 +942,105 @@ handle_voice_command() {
     esac
 }
 
+handle_voice_engine_command() {
+    local engine="${1:-}"
+
+    if [[ -z "$engine" ]]; then
+        info "Current TTS engine: ${GREEN}$(tts_get_engine)${RESET}"
+        echo "  ${CYAN}cn voice engine system${RESET}      Use the built-in OS voice"
+        echo "  ${CYAN}cn voice engine elevenlabs${RESET}  Use ElevenLabs cloud voice"
+        return 0
+    fi
+
+    if tts_set_engine "$engine"; then
+        success "TTS engine set to: $engine"
+        if [[ "$engine" == "elevenlabs" && -z "$(tts_elevenlabs_key)" ]]; then
+            warning "No ElevenLabs API key set yet. Run: cn voice elevenlabs key <api-key>"
+        fi
+    fi
+}
+
+handle_voice_elevenlabs_command() {
+    local subcommand="${1:-status}"
+    shift || true
+
+    case "$subcommand" in
+        "key")
+            local key="${1:-}"
+            [[ -n "$key" ]] || { error "Usage: cn voice elevenlabs key <api-key>"; return 1; }
+            tts_set_value "elevenlabs.api_key" "$key" && success "ElevenLabs API key saved"
+            ;;
+        "voice")
+            local voice_id="${1:-}"
+            [[ -n "$voice_id" ]] || { error "Usage: cn voice elevenlabs voice <voice-id>"; return 1; }
+            tts_set_value "elevenlabs.voice_id" "$voice_id" && success "ElevenLabs voice set to: $voice_id"
+            ;;
+        "model")
+            local model_id="${1:-}"
+            [[ -n "$model_id" ]] || { error "Usage: cn voice elevenlabs model <model-id>"; return 1; }
+            tts_set_value "elevenlabs.model_id" "$model_id" && success "ElevenLabs model set to: $model_id"
+            ;;
+        "list")
+            tts_elevenlabs_list_voices
+            ;;
+        "test")
+            if ! tts_elevenlabs_ready; then
+                error "ElevenLabs is not ready. Set engine and key first:"
+                echo "  cn voice engine elevenlabs"
+                echo "  cn voice elevenlabs key <api-key>"
+                return 1
+            fi
+            info "Speaking test message via ElevenLabs..."
+            if tts_elevenlabs_speak "Code Notify ElevenLabs voice is working"; then
+                success "ElevenLabs test complete"
+            else
+                if [[ -n "${TTS_LAST_ERROR:-}" ]]; then
+                    error "ElevenLabs test failed: $TTS_LAST_ERROR"
+                else
+                    error "ElevenLabs test failed (check key, voice id, and credits)"
+                fi
+                return 1
+            fi
+            ;;
+        "status"|*)
+            show_elevenlabs_status
+            ;;
+    esac
+}
+
+show_elevenlabs_status() {
+    header "${SPEAKER} ElevenLabs Voice"
+    echo ""
+
+    local engine key voice model
+    engine="$(tts_get_engine)"
+    key="$(tts_elevenlabs_key)"
+    voice="$(tts_elevenlabs_voice_id)"
+    model="$(tts_elevenlabs_model_id)"
+
+    if [[ "$engine" == "elevenlabs" ]]; then
+        echo "  ${CHECK_MARK} Engine: ${GREEN}elevenlabs${RESET} (active)"
+    else
+        echo "  ${DIM}- Engine: $engine (ElevenLabs inactive; run cn voice engine elevenlabs)${RESET}"
+    fi
+
+    if [[ -n "$key" ]]; then
+        echo "  ${CHECK_MARK} API key: ${GREEN}set${RESET} (****${key: -4})"
+    else
+        echo "  ${MUTE} API key: ${DIM}not set${RESET}"
+    fi
+    echo "  Voice: $voice"
+    echo "  Model: $model"
+
+    echo ""
+    info "Commands:"
+    echo "  ${CYAN}cn voice elevenlabs key <api-key>${RESET}   Store your API key"
+    echo "  ${CYAN}cn voice elevenlabs voice <id>${RESET}      Set voice id"
+    echo "  ${CYAN}cn voice elevenlabs model <id>${RESET}      Set model id"
+    echo "  ${CYAN}cn voice elevenlabs list${RESET}            List available voices"
+    echo "  ${CYAN}cn voice elevenlabs test${RESET}            Speak a test message"
+}
+
 # Show detailed voice status
 show_voice_status() {
     header "${SPEAKER} Voice Status"
@@ -959,11 +1072,26 @@ show_voice_status() {
     done
 
     echo ""
+    local engine
+    engine="$(tts_get_engine)"
+    if [[ "$engine" == "elevenlabs" ]]; then
+        if [[ -n "$(tts_elevenlabs_key)" ]]; then
+            echo "  ${CHECK_MARK} Engine: ${GREEN}ElevenLabs${RESET} (voice $(tts_elevenlabs_voice_id))"
+        else
+            echo "  ${WARNING} Engine: ElevenLabs selected but no API key (cn voice elevenlabs key <api-key>)"
+        fi
+    else
+        echo "  ${DIM}- Engine: system voice (say)${RESET}"
+    fi
+
+    echo ""
     info "Commands:"
-    echo "  ${CYAN}cn voice on${RESET}          Enable for all tools"
-    echo "  ${CYAN}cn voice on claude${RESET}   Enable for Claude only"
-    echo "  ${CYAN}cn voice off${RESET}         Disable all"
-    echo "  ${CYAN}cn voice off codex${RESET}   Disable for Codex only"
+    echo "  ${CYAN}cn voice on${RESET}              Enable for all tools"
+    echo "  ${CYAN}cn voice on claude${RESET}       Enable for Claude only"
+    echo "  ${CYAN}cn voice off${RESET}             Disable all"
+    echo "  ${CYAN}cn voice off codex${RESET}       Disable for Codex only"
+    echo "  ${CYAN}cn voice engine elevenlabs${RESET}  Switch to ElevenLabs cloud voice"
+    echo "  ${CYAN}cn voice elevenlabs${RESET}      Configure ElevenLabs (key, voice, model)"
 }
 
 # ============================================

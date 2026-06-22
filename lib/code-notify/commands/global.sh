@@ -1025,7 +1025,9 @@ show_elevenlabs_status() {
     fi
 
     if [[ -n "$key" ]]; then
-        echo "  ${CHECK_MARK} API key: ${GREEN}set${RESET} (****${key: -4})"
+        local key_source="config"
+        [[ -n "${ELEVENLABS_API_KEY:-}" ]] && key_source="ELEVENLABS_API_KEY env"
+        echo "  ${CHECK_MARK} API key: ${GREEN}set${RESET} (****${key: -4}, from $key_source)"
     else
         echo "  ${MUTE} API key: ${DIM}not set${RESET}"
     fi

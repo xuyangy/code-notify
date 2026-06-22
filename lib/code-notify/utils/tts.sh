@@ -143,6 +143,13 @@ tts_set_engine() {
 }
 
 tts_elevenlabs_key() {
+    # An exported ELEVENLABS_API_KEY wins over the stored config, so the secret
+    # can live in the shell environment instead of plaintext in tts.json. The
+    # hook inherits this from the process that launched the CLI.
+    if [[ -n "${ELEVENLABS_API_KEY:-}" ]]; then
+        printf '%s\n' "$ELEVENLABS_API_KEY"
+        return 0
+    fi
     tts_get_value "elevenlabs.api_key" 2>/dev/null || true
 }
 

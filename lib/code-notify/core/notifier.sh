@@ -889,19 +889,21 @@ case "$OS" in
     macos)
         send_macos_notification
         # Voice and sound run detached so the hook exits right after the
-        # banner — `say` alone blocks for seconds. Ordering inside the
-        # subshell keeps voice before sound.
+        # banner — `say` alone blocks for seconds. Sound goes first so the
+        # short alert chime starts before speech; `play_sound` backgrounds
+        # afplay, and the natural TTS startup delay (synthesis round-trip,
+        # or `say` warm-up) means the chime is done before speech is audible.
         (
+            # Sound notification first if enabled (separate from voice)
+            if should_play_sound; then
+                play_sound "$(get_notification_sound_file)"
+            fi
             # Voice notification if enabled
             if should_speak; then
                 VOICE=$(get_voice_setting)
                 if [[ -n "$VOICE" ]]; then
                     speak_notification "$VOICE_MESSAGE" "$VOICE"
                 fi
-            fi
-            # Sound notification if enabled (separate from voice)
-            if should_play_sound; then
-                play_sound "$(get_notification_sound_file)"
             fi
         ) > /dev/null 2>&1 &
         disown 2>/dev/null || true

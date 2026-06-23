@@ -768,6 +768,206 @@ PY
     return $?
 }
 
+run_test_codex_tui_preservation() {
+    local test_dir=$(mktemp -d)
+    trap "rm -rf $test_dir" RETURN
+
+    export HOME="$test_dir"
+    export CODEX_HOME="$test_dir/.codex"
+    mkdir -p "$CODEX_HOME" "$HOME/.claude/notifications"
+
+    (
+        source "$SCRIPT_DIR/../lib/code-notify/core/config.sh"
+
+        echo ""
+        echo "=== Testing Codex TUI notification preservation ==="
+
+        cat > "$CODEX_CONFIG_FILE" << 'EOF'
+[tui]
+notifications = ["agent-turn-complete"]
+
+[features]
+multi_agent = true
+EOF
+
+        if ! enable_codex_hooks; then
+            echo "❌ Failed to enable Codex hooks"
+            exit 1
+        fi
+
+        if ! grep -q '^notifications = false' "$CODEX_CONFIG_FILE"; then
+            echo "❌ enable did not disable Codex TUI notifications"
+            cat "$CODEX_CONFIG_FILE"
+            exit 1
+        fi
+        if ! grep -qF '# Code-Notify-saved: notifications = ["agent-turn-complete"]' "$CODEX_CONFIG_FILE"; then
+            echo "❌ enable did not preserve the original TUI notifications value"
+            cat "$CODEX_CONFIG_FILE"
+            exit 1
+        fi
+        echo "✅ enable disables TUI notifications and saves the original value"
+
+        # Re-enable must remain idempotent and keep the single saved original.
+        if ! enable_codex_hooks; then
+            echo "❌ Failed to re-enable Codex hooks"
+            exit 1
+        fi
+        if [[ $(grep -cF '# Code-Notify-saved:' "$CODEX_CONFIG_FILE") -ne 1 ]]; then
+            echo "❌ re-enable duplicated or dropped the saved original"
+            cat "$CODEX_CONFIG_FILE"
+            exit 1
+        fi
+        echo "✅ re-enable keeps exactly one saved original"
+
+        if ! disable_codex_hooks; then
+            echo "❌ Failed to disable Codex hooks"
+            exit 1
+        fi
+
+        if ! grep -qF 'notifications = ["agent-turn-complete"]' "$CODEX_CONFIG_FILE"; then
+            echo "❌ disable did not restore the original TUI notifications value"
+            cat "$CODEX_CONFIG_FILE"
+            exit 1
+        fi
+        if grep -q '^# Code-Notify' "$CODEX_CONFIG_FILE" || grep -q '^notifications = false' "$CODEX_CONFIG_FILE"; then
+            echo "❌ disable left managed Code-Notify TUI lines behind"
+            cat "$CODEX_CONFIG_FILE"
+            exit 1
+        fi
+        if ! grep -q '^multi_agent = true' "$CODEX_CONFIG_FILE"; then
+            echo "❌ disable did not preserve unrelated TOML content"
+            cat "$CODEX_CONFIG_FILE"
+            exit 1
+        fi
+        echo "✅ disable restores the user's original TUI notifications value"
+    )
+
+    return $?
+}
+
+run_test_codex_tui_multiline_array() {
+    local test_dir=$(mktemp -d)
+    trap "rm -rf $test_dir" RETURN
+
+    export HOME="$test_dir"
+    export CODEX_HOME="$test_dir/.codex"
+    mkdir -p "$CODEX_HOME" "$HOME/.claude/notifications"
+
+    (
+        source "$SCRIPT_DIR/../lib/code-notify/core/config.sh"
+
+        echo ""
+        echo "=== Testing Codex TUI multi-line array preservation ==="
+
+        cat > "$CODEX_CONFIG_FILE" << 'EOF'
+[tui]
+notifications = [
+  "agent-turn-complete",
+]
+
+[features]
+multi_agent = true
+EOF
+
+        if ! enable_codex_hooks; then
+            echo "❌ Failed to enable Codex hooks"
+            exit 1
+        fi
+
+        if ! grep -q '^notifications = false' "$CODEX_CONFIG_FILE"; then
+            echo "❌ enable did not disable Codex TUI notifications"
+            cat "$CODEX_CONFIG_FILE"
+            exit 1
+        fi
+        # The array body must not be left behind as bare (non-comment) lines.
+        if grep -qE '^[[:space:]]*"agent-turn-complete"' "$CODEX_CONFIG_FILE" \
+            || grep -qE '^[[:space:]]*\][[:space:]]*$' "$CODEX_CONFIG_FILE"; then
+            echo "❌ enable left stray multi-line array body in config.toml"
+            cat "$CODEX_CONFIG_FILE"
+            exit 1
+        fi
+        if command -v python3 &> /dev/null; then
+            if ! python3 - "$CODEX_CONFIG_FILE" << 'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as fh:
+    data = tomllib.load(fh)
+assert data.get("tui", {}).get("notifications") is False, data
+assert data.get("features", {}).get("multi_agent") is True, data
+PY
+            then
+                echo "❌ config.toml is not valid TOML after enable"
+                cat "$CODEX_CONFIG_FILE"
+                exit 1
+            fi
+            echo "✅ enable produces valid TOML with TUI notifications disabled"
+        fi
+
+        if ! disable_codex_hooks; then
+            echo "❌ Failed to disable Codex hooks"
+            exit 1
+        fi
+
+        if command -v python3 &> /dev/null; then
+            if ! python3 - "$CODEX_CONFIG_FILE" << 'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as fh:
+    data = tomllib.load(fh)
+assert data.get("tui", {}).get("notifications") == ["agent-turn-complete"], data
+assert data.get("features", {}).get("multi_agent") is True, data
+PY
+            then
+                echo "❌ disable did not restore the multi-line array as valid TOML"
+                cat "$CODEX_CONFIG_FILE"
+                exit 1
+            fi
+            echo "✅ disable restores the multi-line array value as valid TOML"
+        fi
+
+        if grep -q '^# Code-Notify' "$CODEX_CONFIG_FILE"; then
+            echo "❌ disable left managed Code-Notify lines behind"
+            cat "$CODEX_CONFIG_FILE"
+            exit 1
+        fi
+        echo "✅ disable removes all managed Code-Notify markers"
+    )
+
+    return $?
+}
+
+run_test_codex_hooks_invalid_json() {
+    local test_dir=$(mktemp -d)
+    trap "rm -rf $test_dir" RETURN
+
+    export HOME="$test_dir"
+    export CODEX_HOME="$test_dir/.codex"
+    mkdir -p "$CODEX_HOME" "$HOME/.claude/notifications"
+
+    (
+        source "$SCRIPT_DIR/../lib/code-notify/core/config.sh"
+
+        echo ""
+        echo "=== Testing Codex hooks invalid-JSON fail-closed ==="
+
+        local malformed='{ "hooks": { "Stop": [ { "hooks": [ }'
+        printf '%s' "$malformed" > "$CODEX_HOOKS_FILE"
+
+        if enable_codex_hooks 2>/dev/null; then
+            echo "❌ enable_codex_hooks should fail on malformed hooks JSON"
+            exit 1
+        fi
+        echo "✅ enable_codex_hooks fails closed on malformed JSON"
+
+        if [[ "$(cat "$CODEX_HOOKS_FILE")" != "$malformed" ]]; then
+            echo "❌ malformed hooks file was modified instead of left intact"
+            cat "$CODEX_HOOKS_FILE"
+            exit 1
+        fi
+        echo "✅ malformed hooks file is left unchanged"
+    )
+
+    return $?
+}
+
 run_test_legacy_claude_hooks_repair() {
     local test_dir=$(mktemp -d)
     trap "rm -rf $test_dir" RETURN
@@ -1012,6 +1212,15 @@ done
 
 # Test 8: Codex hook configuration and legacy notify cleanup
 run_test_codex_hook_config || fail "Codex hook configuration test failed"
+
+# Test 8b: Codex TUI notification value is preserved and restored
+run_test_codex_tui_preservation || fail "Codex TUI preservation test failed"
+
+# Test 8b2: Multi-line TUI notifications array survives a round-trip as valid TOML
+run_test_codex_tui_multiline_array || fail "Codex TUI multi-line array test failed"
+
+# Test 8c: Malformed Codex hooks JSON is never silently overwritten
+run_test_codex_hooks_invalid_json || fail "Codex hooks invalid-JSON test failed"
 
 # Test 9: Legacy claude-notify hook configs are repaired in place
 run_test_legacy_claude_hooks_repair || fail "Legacy Claude hook repair test failed"

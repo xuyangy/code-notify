@@ -184,6 +184,7 @@ function Disable-CodexTuiNotifications {
     param([string]$Path)
 
     $commentLine = "# Code-Notify: Codex notifications are handled by hooks"
+    $savedPrefix = "# Code-Notify-saved: "
     $settingLine = "notifications = false"
 
     if (Test-Path $Path) {
@@ -193,18 +194,35 @@ function Disable-CodexTuiNotifications {
     }
 
     $result = New-Object System.Collections.Generic.List[string]
+    $orig = New-Object System.Collections.Generic.List[string]
     $inTui = $false
     $sawTui = $false
     $wrote = $false
+    $managed = $false
+    $capturing = $false
+    $depth = 0
 
     for ($i = 0; $i -lt $lines.Count; $i++) {
         $line = [string]$lines[$i]
         if ($line -match '^\s*# Code-Notify: Codex notifications are handled by hooks\s*$') {
+            if ($inTui) { $managed = $true }
+            continue
+        }
+        if ($inTui -and $line -match '^\s*# Code-Notify-saved: ') {
+            $orig.Add(($line -replace '^\s*# Code-Notify-saved: ', ''))
+            continue
+        }
+        if ($inTui -and $capturing) {
+            # Continuation lines of a multi-line user value being captured.
+            $orig.Add($line)
+            $depth += ([regex]::Matches($line, '\[')).Count - ([regex]::Matches($line, '\]')).Count
+            if ($depth -le 0) { $capturing = $false }
             continue
         }
         if ($line -match '^\s*\[') {
             if ($inTui -and -not $wrote) {
                 $result.Add($commentLine)
+                foreach ($o in $orig) { $result.Add($savedPrefix + $o) }
                 $result.Add($settingLine)
                 $wrote = $true
             }
@@ -212,22 +230,31 @@ function Disable-CodexTuiNotifications {
             if ($inTui) {
                 $sawTui = $true
             }
+            $managed = $false
             $result.Add($line)
             continue
         }
         if ($inTui -and $line -match '^\s*notifications\s*=') {
-            if (-not $wrote) {
-                $result.Add($commentLine)
-                $result.Add($settingLine)
-                $wrote = $true
+            # Our managed false (preceded by the managed comment) is dropped; a
+            # user-authored value is captured verbatim so disable can restore it.
+            # The value may be a multi-line array, so keep consuming lines until
+            # the brackets balance.
+            if ($managed) {
+                $managed = $false
+            } else {
+                $orig.Add($line)
+                $depth = ([regex]::Matches($line, '\[')).Count - ([regex]::Matches($line, '\]')).Count
+                if ($depth -gt 0) { $capturing = $true }
             }
             continue
         }
+        $managed = $false
         $result.Add($line)
     }
 
     if ($inTui -and -not $wrote) {
         $result.Add($commentLine)
+        foreach ($o in $orig) { $result.Add($savedPrefix + $o) }
         $result.Add($settingLine)
         $wrote = $true
     }
@@ -251,18 +278,24 @@ function Remove-CodexTuiNotificationsOverride {
     }
 
     $result = New-Object System.Collections.Generic.List[string]
-    $skipNextNotifications = $false
+    $managed = $false
     foreach ($line in @(Get-Content $Path)) {
         $lineText = [string]$line
         if ($lineText -match '^\s*# Code-Notify: Codex notifications are handled by hooks\s*$') {
-            $skipNextNotifications = $true
+            $managed = $true
             continue
         }
-        if ($skipNextNotifications -and $lineText -match '^\s*notifications\s*=\s*false\s*$') {
-            $skipNextNotifications = $false
+        if ($managed -and $lineText -match '^\s*# Code-Notify-saved: ') {
+            # Restore the user's original setting captured at enable time (may be
+            # multiple lines for a multi-line array value).
+            $result.Add(($lineText -replace '^\s*# Code-Notify-saved: ', ''))
             continue
         }
-        $skipNextNotifications = $false
+        if ($managed -and $lineText -match '^\s*notifications\s*=\s*false\s*$') {
+            $managed = $false
+            continue
+        }
+        $managed = $false
         $result.Add($lineText)
     }
 
@@ -277,7 +310,21 @@ function Update-CodexHooksFile {
     )
 
     if (Test-Path $Path) {
-        $settings = Get-Content $Path -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
+        $raw = Get-Content $Path -Raw
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            # Missing/empty content starts from a fresh object (nothing to lose).
+            $settings = [PSCustomObject]@{}
+        } else {
+            try {
+                $settings = $raw | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                # Fail closed: never overwrite a user-owned but malformed hooks
+                # file. Mirrors the bash implementation, which errors on invalid
+                # JSON instead of replacing it.
+                Write-Error "Failed to parse Codex hooks JSON at $Path; leaving it unchanged. ($($_.Exception.Message))"
+                return $false
+            }
+        }
     } else {
         $settings = [PSCustomObject]@{}
     }
@@ -343,6 +390,7 @@ function Update-CodexHooksFile {
     }
 
     $settings | ConvertTo-Json -Depth 20 | Set-Content $Path -Encoding UTF8
+    return $true
 }
 
 function Test-GitInstalled {
@@ -1036,13 +1084,19 @@ function Enable-Notifications {
             Write-Host "[>] Enabling Codex notifications globally" -ForegroundColor Cyan
             New-Item -ItemType Directory -Path $script:CodexHome -Force | Out-Null
             Backup-ConfigFile $script:CodexHooksFile
+
+            # Install the hooks first (the step that can fail closed); only
+            # suppress Codex's built-in TUI notifications once our hooks are in
+            # place, so a failure never leaves Codex silenced with no hooks.
+            if (-not (Update-CodexHooksFile -Path $script:CodexHooksFile -NotifyScript $notifyScript)) {
+                return
+            }
             if (Test-Path $script:CodexConfigFile) {
                 Backup-ConfigFile $script:CodexConfigFile
                 Remove-CodexNotifyConfig -Path $script:CodexConfigFile
             }
             Disable-CodexTuiNotifications -Path $script:CodexConfigFile
 
-            Update-CodexHooksFile -Path $script:CodexHooksFile -NotifyScript $notifyScript
             Write-Success "Codex notifications enabled!"
             Write-Info "Config: $script:CodexHooksFile"
             Send-Notification -Title "Code-Notify" -Message "Codex notifications enabled!" -Type "success"
@@ -1172,7 +1226,9 @@ function Disable-Notifications {
 
             if (Test-Path $script:CodexHooksFile) {
                 Backup-ConfigFile $script:CodexHooksFile
-                Update-CodexHooksFile -Path $script:CodexHooksFile -NotifyScript $notifyScript -Disable
+                if (-not (Update-CodexHooksFile -Path $script:CodexHooksFile -NotifyScript $notifyScript -Disable)) {
+                    return
+                }
             }
             if (Test-Path $script:CodexConfigFile) {
                 Backup-ConfigFile $script:CodexConfigFile

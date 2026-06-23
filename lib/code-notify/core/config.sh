@@ -1358,41 +1358,86 @@ disable_codex_tui_notifications() {
                 in_tui = 0
                 saw_tui = 0
                 wrote = 0
+                managed = 0
+                capturing = 0
+                depth = 0
+                norig = 0
                 comment = "# Code-Notify: Codex notifications are handled by hooks"
+                saved_prefix = "# Code-Notify-saved: "
                 setting = "notifications = false"
             }
+            function bracket_delta(s,   t, o, c) {
+                t = s; o = gsub(/\[/, "", t)
+                t = s; c = gsub(/\]/, "", t)
+                return o - c
+            }
+            function emit_managed(   i) {
+                print comment
+                for (i = 1; i <= norig; i++) {
+                    print saved_prefix orig[i]
+                }
+                print setting
+                wrote = 1
+            }
             /^[[:space:]]*# Code-Notify: Codex notifications are handled by hooks[[:space:]]*$/ {
+                if (in_tui) {
+                    managed = 1
+                }
+                next
+            }
+            in_tui && /^[[:space:]]*# Code-Notify-saved: / {
+                line = $0
+                sub(/^[[:space:]]*# Code-Notify-saved: /, "", line)
+                norig++
+                orig[norig] = line
+                next
+            }
+            # Continuation lines of a multi-line user value being captured.
+            in_tui && capturing {
+                norig++
+                orig[norig] = $0
+                depth += bracket_delta($0)
+                if (depth <= 0) {
+                    capturing = 0
+                }
                 next
             }
             /^[[:space:]]*\[/ {
                 if (in_tui && !wrote) {
-                    print comment
-                    print setting
-                    wrote = 1
+                    emit_managed()
                 }
                 in_tui = ($0 ~ /^[[:space:]]*\[tui\][[:space:]]*$/)
                 if (in_tui) {
                     saw_tui = 1
                 }
+                managed = 0
                 print
                 next
             }
             in_tui && /^[[:space:]]*notifications[[:space:]]*=/ {
-                if (!wrote) {
-                    print comment
-                    print setting
-                    wrote = 1
+                # Our managed false (preceded by the managed comment) is dropped;
+                # a user-authored value is captured verbatim so disable can
+                # restore it. The value may be a multi-line array, so keep
+                # consuming lines until the brackets balance.
+                if (managed) {
+                    managed = 0
+                } else {
+                    norig++
+                    orig[norig] = $0
+                    depth = bracket_delta($0)
+                    if (depth > 0) {
+                        capturing = 1
+                    }
                 }
                 next
             }
             {
+                managed = 0
                 print
             }
             END {
                 if (in_tui && !wrote) {
-                    print comment
-                    print setting
-                    wrote = 1
+                    emit_managed()
                 }
                 if (!saw_tui) {
                     print ""
@@ -1428,15 +1473,21 @@ remove_codex_tui_notifications_override() {
 
     awk '
         /^[[:space:]]*# Code-Notify: Codex notifications are handled by hooks[[:space:]]*$/ {
-            skip_next_notifications = 1
+            managed = 1
             next
         }
-        skip_next_notifications && /^[[:space:]]*notifications[[:space:]]*=[[:space:]]*false[[:space:]]*$/ {
-            skip_next_notifications = 0
+        managed && /^[[:space:]]*# Code-Notify-saved: / {
+            line = $0
+            sub(/^[[:space:]]*# Code-Notify-saved: /, "", line)
+            print line
+            next
+        }
+        managed && /^[[:space:]]*notifications[[:space:]]*=[[:space:]]*false[[:space:]]*$/ {
+            managed = 0
             next
         }
         {
-            skip_next_notifications = 0
+            managed = 0
             print
         }
     ' "$file" > "$tmp_file" || {
@@ -1715,17 +1766,20 @@ is_codex_enabled() {
 enable_codex_hooks() {
     mkdir -p "$CODEX_HOME"
 
+    # Install the hooks first: this is the step that can fail closed (e.g. a
+    # malformed hooks.json). Only suppress Codex's built-in TUI notifications
+    # once our hooks are actually in place, so a failure never leaves Codex
+    # silenced with no Code-Notify hooks to replace it.
+    if [[ -f "$CODEX_HOOKS_FILE" ]]; then
+        backup_config "$CODEX_HOOKS_FILE" || true
+    fi
+    update_codex_hooks_file "enable" "$CODEX_HOOKS_FILE" || return 1
+
     if [[ -f "$CODEX_CONFIG_FILE" ]]; then
         backup_config "$CODEX_CONFIG_FILE" || true
         remove_codex_notify_config "$CODEX_CONFIG_FILE" || return 1
     fi
     disable_codex_tui_notifications "$CODEX_CONFIG_FILE" || return 1
-
-    if [[ -f "$CODEX_HOOKS_FILE" ]]; then
-        backup_config "$CODEX_HOOKS_FILE" || true
-    fi
-
-    update_codex_hooks_file "enable" "$CODEX_HOOKS_FILE"
 }
 
 # Disable Codex notifications

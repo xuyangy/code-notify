@@ -934,6 +934,98 @@ PY
     return $?
 }
 
+run_test_codex_multiline_notify_removal() {
+    local test_dir=$(mktemp -d)
+    trap "rm -rf $test_dir" RETURN
+
+    export HOME="$test_dir"
+    export CODEX_HOME="$test_dir/.codex"
+    mkdir -p "$CODEX_HOME" "$HOME/.claude/notifications"
+
+    (
+        source "$SCRIPT_DIR/../lib/code-notify/core/config.sh"
+
+        echo ""
+        echo "=== Testing legacy multi-line notify removal ==="
+
+        cat > "$CODEX_CONFIG_FILE" << 'EOF'
+notify = [
+  "/Users/someone/.code-notify/lib/code-notify/core/notifier.sh",
+  "codex",
+]
+
+[features]
+multi_agent = true
+EOF
+
+        if ! enable_codex_hooks; then
+            echo "❌ Failed to enable Codex hooks"
+            exit 1
+        fi
+
+        if grep -qE '^[[:space:]]*notify[[:space:]]*=' "$CODEX_CONFIG_FILE" \
+            || grep -q 'code-notify/lib/code-notify/core/notifier.sh' "$CODEX_CONFIG_FILE"; then
+            echo "❌ legacy multi-line notify array was not fully removed"
+            cat "$CODEX_CONFIG_FILE"
+            exit 1
+        fi
+        echo "✅ legacy multi-line notify array removed in full"
+
+        if command -v python3 &> /dev/null; then
+            if ! python3 - "$CODEX_CONFIG_FILE" << 'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as fh:
+    data = tomllib.load(fh)
+assert "notify" not in data, data
+assert data.get("features", {}).get("multi_agent") is True, data
+PY
+            then
+                echo "❌ config.toml is not valid TOML after notify removal"
+                cat "$CODEX_CONFIG_FILE"
+                exit 1
+            fi
+            echo "✅ config.toml remains valid TOML with unrelated content intact"
+        fi
+    )
+
+    return $?
+}
+
+run_test_codex_unrelated_notify_preserved() {
+    local test_dir=$(mktemp -d)
+    trap "rm -rf $test_dir" RETURN
+
+    export HOME="$test_dir"
+    export CODEX_HOME="$test_dir/.codex"
+    mkdir -p "$CODEX_HOME" "$HOME/.claude/notifications"
+
+    (
+        source "$SCRIPT_DIR/../lib/code-notify/core/config.sh"
+
+        echo ""
+        echo "=== Testing unrelated notify is preserved ==="
+
+        # A user's own notify program (not Code-Notify) must survive.
+        cat > "$CODEX_CONFIG_FILE" << 'EOF'
+notify = ["/usr/local/bin/my-own-notifier"]
+EOF
+
+        if ! enable_codex_hooks; then
+            echo "❌ Failed to enable Codex hooks"
+            exit 1
+        fi
+
+        if ! grep -q '/usr/local/bin/my-own-notifier' "$CODEX_CONFIG_FILE"; then
+            echo "❌ unrelated user notify program was incorrectly removed"
+            cat "$CODEX_CONFIG_FILE"
+            exit 1
+        fi
+        echo "✅ unrelated user notify program preserved"
+    )
+
+    return $?
+}
+
 run_test_codex_hooks_invalid_json() {
     local test_dir=$(mktemp -d)
     trap "rm -rf $test_dir" RETURN
@@ -1221,6 +1313,12 @@ run_test_codex_tui_multiline_array || fail "Codex TUI multi-line array test fail
 
 # Test 8c: Malformed Codex hooks JSON is never silently overwritten
 run_test_codex_hooks_invalid_json || fail "Codex hooks invalid-JSON test failed"
+
+# Test 8d: Legacy multi-line notify array is fully removed
+run_test_codex_multiline_notify_removal || fail "Codex multi-line notify removal test failed"
+
+# Test 8e: A user's unrelated notify program is preserved
+run_test_codex_unrelated_notify_preserved || fail "Codex unrelated notify preservation test failed"
 
 # Test 9: Legacy claude-notify hook configs are repaired in place
 run_test_legacy_claude_hooks_repair || fail "Legacy Claude hook repair test failed"

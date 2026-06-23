@@ -172,12 +172,57 @@ function Remove-CodexNotifyConfig {
         return
     }
 
-    $content = @(Get-Content $Path | Where-Object {
-        $_ -notmatch '^\s*# Code-Notify: Desktop notifications\s*$' -and
-        -not ($_ -match '^\s*notify\s*=' -and $_ -match '(code-notify|notifier\.sh|notify\.(sh|ps1))' -and $_ -match 'codex')
-    })
+    $result = New-Object System.Collections.Generic.List[string]
+    $buffer = New-Object System.Collections.Generic.List[string]
+    $buffering = $false
+    $depth = 0
 
-    $content | Set-Content $Path -Encoding UTF8
+    $flushNotify = {
+        $block = ($buffer -join "`n")
+        $buffer.Clear()
+        # Drop only when the whole assignment points at our notifier and passes
+        # the codex argument; otherwise restore it untouched.
+        if ($block -match '(code-notify|notifier\.sh|notify\.(sh|ps1))' -and $block -match 'codex') {
+            return
+        }
+        foreach ($l in ($block -split "`n")) { $result.Add($l) }
+    }
+
+    foreach ($line in @(Get-Content $Path)) {
+        $lineText = [string]$line
+        if ($lineText -match '^\s*# Code-Notify: Desktop notifications\s*$') {
+            continue
+        }
+        if ($buffering) {
+            $buffer.Add($lineText)
+            $depth += ([regex]::Matches($lineText, '\[')).Count - ([regex]::Matches($lineText, '\]')).Count
+            if ($depth -le 0) {
+                & $flushNotify
+                $buffering = $false
+            }
+            continue
+        }
+        if ($lineText -match '^\s*notify\s*=') {
+            # notify may be a single line or a multi-line array; buffer the whole
+            # assignment so a managed multi-line notify is removed in full.
+            $buffer.Add($lineText)
+            $depth = ([regex]::Matches($lineText, '\[')).Count - ([regex]::Matches($lineText, '\]')).Count
+            if ($depth -gt 0) {
+                $buffering = $true
+                continue
+            }
+            & $flushNotify
+            continue
+        }
+        $result.Add($lineText)
+    }
+
+    if ($buffering) {
+        # Unterminated array (malformed TOML): preserve what we buffered.
+        foreach ($l in $buffer) { $result.Add($l) }
+    }
+
+    $result | Set-Content $Path -Encoding UTF8
 }
 
 function Disable-CodexTuiNotifications {

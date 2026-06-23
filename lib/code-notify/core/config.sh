@@ -1324,16 +1324,53 @@ remove_codex_notify_config() {
     tmp_file=$(mktemp "${dir_path}/.tmp.XXXXXX") || return 1
 
     awk '
+        function bracket_delta(s,   t, o, c) {
+            t = s; o = gsub(/\[/, "", t)
+            t = s; c = gsub(/\]/, "", t)
+            return o - c
+        }
+        function flush_notify(   block) {
+            block = notify_buf
+            notify_buf = ""
+            buffering = 0
+            # Drop only when the whole assignment points at our notifier and
+            # passes the codex argument; otherwise restore it untouched.
+            if (block ~ /(code-notify|notifier\.sh|notify\.(sh|ps1))/ && block ~ /codex/) {
+                return
+            }
+            print block
+        }
         /^[[:space:]]*# Code-Notify: Desktop notifications[[:space:]]*$/ {
             next
         }
-        /^[[:space:]]*notify[[:space:]]*=/ &&
-            $0 ~ /(code-notify|notifier\.sh|notify\.(sh|ps1))/ &&
-            $0 ~ /codex/ {
+        buffering {
+            notify_buf = notify_buf "\n" $0
+            depth += bracket_delta($0)
+            if (depth <= 0) {
+                flush_notify()
+            }
+            next
+        }
+        /^[[:space:]]*notify[[:space:]]*=/ {
+            # notify may be a single line or a multi-line array; buffer the whole
+            # assignment so a managed multi-line notify is removed in full.
+            notify_buf = $0
+            depth = bracket_delta($0)
+            if (depth > 0) {
+                buffering = 1
+                next
+            }
+            flush_notify()
             next
         }
         {
             print
+        }
+        END {
+            if (buffering) {
+                # Unterminated array (malformed TOML): preserve what we buffered.
+                print notify_buf
+            }
         }
     ' "$file" > "$tmp_file" || {
         rm -f "$tmp_file"

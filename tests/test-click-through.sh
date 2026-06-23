@@ -29,6 +29,10 @@ mkdir -p "$HOME/.code-notify" "$HOME/.claude/notifications" "$HOME/.claude/logs"
 
 cat > "$fake_bin/terminal-notifier" <<EOF
 #!/bin/bash
+if [[ "\${1:-}" == "-help" ]]; then
+    echo "       -focus                    Focus the originating terminal/tmux pane when the user clicks the notification."
+    exit 0
+fi
 printf '%s\n' "\$*" >> "$notification_log"
 EOF
 chmod +x "$fake_bin/terminal-notifier"
@@ -84,6 +88,7 @@ TERM_PROGRAM="fake_term" \
 bash "$NOTIFIER" test >/dev/null 2>&1
 
 grep -q -- "-activate com.example.fakecodex" "$notification_log" || fail "notifier should activate the configured bundle ID"
+grep -q -- "-focus" "$notification_log" || fail "notifier should use terminal-notifier -focus when available"
 
 remove_output=$(printf ' \n' | HOME="$HOME" "$ROOT_DIR/bin/code-notify" click-through remove 2>&1)
 printf '%s' "$remove_output" | grep -q "Removed 1 mapping" || fail "interactive remove should delete the selected mapping"
@@ -107,6 +112,7 @@ CODE_NOTIFY_CLICK_THROUGH_APP_PATH="$phpstorm_app" \
 bash "$NOTIFIER" test >/dev/null 2>&1
 
 grep -q -- "-activate com.jetbrains.PhpStorm" "$notification_log" || fail "empty TERM_PROGRAM should still honor configured embedded-terminal mappings"
+grep -q -- "-focus" "$notification_log" || fail "embedded-terminal notification should use terminal-notifier -focus when available"
 
 rm -f "$config_file"
 jetbrains_add_output=$(

@@ -56,6 +56,7 @@ alerter_log="$log_dir/alerter.log"
 if [[ "$os_name" == "Darwin" ]]; then
     cat > "$fake_bin/terminal-notifier" <<EOF
 #!/bin/bash
+if [[ "\${1:-}" == "-help" ]]; then exit 0; fi
 printf '%s\n' "\$*" >> "$banner_log"
 EOF
     cat > "$fake_bin/alerter" <<EOF

@@ -796,6 +796,10 @@ send_macos_alerter_notification() {
     disown 2>/dev/null || true
 }
 
+terminal_notifier_supports_focus() {
+    terminal-notifier -help 2>&1 | grep -q -- "-focus"
+}
+
 # Function to send notification on macOS
 send_macos_notification() {
     local bundle_id focus_cmd
@@ -813,8 +817,6 @@ send_macos_notification() {
             focus_cmd=$(printf 'open -b %q' "$bundle_id")
         fi
         send_macos_alerter_notification "$focus_cmd" "$(persist_get_timeout_seconds)"
-    elif [[ -n "$focus_cmd" ]] && command -v alerter &> /dev/null; then
-        send_macos_alerter_notification "$focus_cmd"
     elif command -v terminal-notifier &> /dev/null; then
         # Keep desktop notifications silent and let play_sound() own audio playback.
         # That avoids double audio and preserves custom sound files.
@@ -825,10 +827,18 @@ send_macos_notification() {
             -group "code-notify-$TOOL_NAME-$PROJECT_NAME"
             -activate "$bundle_id"
         )
-        if [[ -n "$focus_cmd" ]]; then
+        # Show the originating tool's icon when known (claude/codex/gemini).
+        if [[ -n "$TOOL_NAME" ]]; then
+            tn_args+=(-appIcon "$TOOL_NAME")
+        fi
+        if terminal_notifier_supports_focus; then
+            tn_args+=(-focus)
+        elif [[ -n "$focus_cmd" ]]; then
             tn_args+=(-execute "$focus_cmd")
         fi
         terminal-notifier "${tn_args[@]}" 2>/dev/null
+    elif [[ -n "$focus_cmd" ]] && command -v alerter &> /dev/null; then
+        send_macos_alerter_notification "$focus_cmd"
     else
         # osascript doesn't support click-to-activate, but we can use a workaround.
         # Keep this silent too so custom/default sound playback stays single-sourced.

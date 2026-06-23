@@ -51,6 +51,7 @@ EOF
     if [[ "$mode" == "terminal-notifier" ]]; then
         cat > "$fake_bin/terminal-notifier" <<EOF
 #!/bin/bash
+if [[ "\${1:-}" == "-help" ]]; then exit 0; fi
 printf '%s\n' "\$@" >> "$log_dir/terminal-notifier.log"
 EOF
         chmod +x "$fake_bin/terminal-notifier"

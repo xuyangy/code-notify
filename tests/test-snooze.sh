@@ -45,6 +45,7 @@ case "$(uname -s)" in
         notification_log="$log_dir/terminal-notifier.log"
         cat > "$fake_bin/terminal-notifier" <<EOF
 #!/bin/bash
+if [[ "\${1:-}" == "-help" ]]; then exit 0; fi
 printf '%s\n' "\$*" >> "$notification_log"
 EOF
         ;;

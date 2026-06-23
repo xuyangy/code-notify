@@ -104,6 +104,7 @@ case "$(uname -s)" in
         sound_log="$log_dir/afplay.log"
         cat > "$fake_bin/terminal-notifier" <<EOF
 #!/bin/bash
+if [[ "\${1:-}" == "-help" ]]; then exit 0; fi
 printf '%s\n' "\$*" >> "$notification_log"
 EOF
         cat > "$fake_bin/afplay" <<EOF

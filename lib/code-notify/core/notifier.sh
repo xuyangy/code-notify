@@ -1038,20 +1038,37 @@ case "$OS" in
         ;;
 esac
 
-# Log the notification
-channels_deliver "$TITLE" "$MESSAGE" "$TOOL_NAME" "$PROJECT_NAME" "${CODE_NOTIFY_USAGE_CONTEXT:-}" || true
+# Post-banner bookkeeping: channel delivery (logs/webhooks), the usage check,
+# and the log line. The usage check makes a network curl (up to
+# CODE_NOTIFY_USAGE_TIMEOUT_SECONDS, default 5s) and channel webhooks can also
+# touch the network, so none of this should keep the hook process alive — while
+# a Stop/Notification hook runs, Claude Code treats the session as still
+# working, which is what made notifications feel seconds late.
+run_post_banner_tail() {
+    channels_deliver "$TITLE" "$MESSAGE" "$TOOL_NAME" "$PROJECT_NAME" "${CODE_NOTIFY_USAGE_CONTEXT:-}" || true
 
-if [[ "${CODE_NOTIFY_SKIP_USAGE_CHECK:-}" != "1" ]]; then
-    case "$TOOL_NAME" in
-        "codex"|"claude")
-            usage_check_with_lock "$TOOL_NAME" >/dev/null 2>&1 || true
-            ;;
-    esac
-fi
+    if [[ "${CODE_NOTIFY_SKIP_USAGE_CHECK:-}" != "1" ]]; then
+        case "$TOOL_NAME" in
+            "codex"|"claude")
+                usage_check_with_lock "$TOOL_NAME" >/dev/null 2>&1 || true
+                ;;
+        esac
+    fi
 
-LOG_DIR="$HOME/.claude/logs"
-if [[ -d "$LOG_DIR" ]]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$TOOL_NAME] [$PROJECT_NAME] $MESSAGE" >> "$LOG_DIR/notifications.log"
+    local log_dir="$HOME/.claude/logs"
+    if [[ -d "$log_dir" ]]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$TOOL_NAME] [$PROJECT_NAME] $MESSAGE" >> "$log_dir/notifications.log"
+    fi
+}
+
+# Default: detach so the hook returns immediately. Tests set
+# CODE_NOTIFY_TAIL_SYNC=1 to keep the tail synchronous (deterministic log/curl
+# assertions and clean temp-dir teardown).
+if [[ "${CODE_NOTIFY_TAIL_SYNC:-}" == "1" ]]; then
+    run_post_banner_tail
+else
+    run_post_banner_tail > /dev/null 2>&1 &
+    disown 2>/dev/null || true
 fi
 
 exit 0

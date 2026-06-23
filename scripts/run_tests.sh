@@ -4,6 +4,11 @@
 
 set -e
 
+# Run the notifier's post-banner tail (channels, usage check, logging)
+# synchronously so log/curl assertions are deterministic and temp HOMEs tear
+# down cleanly. Production leaves it detached for a faster-returning hook.
+export CODE_NOTIFY_TAIL_SYNC=1
+
 # Colors for output
 GREEN='\033[0;32m'
 RED='\033[0;31m'

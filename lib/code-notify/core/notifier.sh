@@ -535,100 +535,171 @@ elif is_claude_event_hook; then
     update_rate_limit "$(get_event_rate_limit_key)"
 fi
 
+choose_random_message() {
+    local messages=("$@")
+    local count="${#messages[@]}"
+
+    if [[ "$count" -eq 0 ]]; then
+        return 0
+    fi
+
+    printf '%s\n' "${messages[$((RANDOM % count))]}"
+}
+
 # Set notification parameters based on hook type and tool
 case "$HOOK_TYPE" in
     "stop")
-        TITLE="$TOOL_DISPLAY ✅"
+        TITLE="$TOOL_DISPLAY 🏁"
         SUBTITLE="Task Complete"
-        MESSAGE="$TOOL_DISPLAY completed the task"
-        VOICE_MESSAGE="$TOOL_DISPLAY completed the task"
+        MESSAGE=$(choose_random_message \
+            "$TOOL_DISPLAY completed the task" \
+            "$TOOL_DISPLAY finished the task" \
+            "$TOOL_DISPLAY is done" \
+            "$TOOL_DISPLAY wrapped up")
+        VOICE_MESSAGE="$MESSAGE"
         SOUND="Glass"
         ;;
     "notification")
-        TITLE="$TOOL_DISPLAY 🔔"
+        TITLE="$TOOL_DISPLAY 👋"
         SUBTITLE="Input Required"
         SOUND="Ping"
         case "$NOTIFICATION_SUBTYPE" in
             "idle_prompt")
-                MESSAGE="$TOOL_DISPLAY is idle"
+                MESSAGE=$(choose_random_message \
+                    "$TOOL_DISPLAY is idle" \
+                    "$TOOL_DISPLAY is waiting" \
+                    "$TOOL_DISPLAY is ready for you" \
+                    "$TOOL_DISPLAY paused for input")
                 ;;
             "permission_prompt")
-                MESSAGE="$TOOL_DISPLAY needs your approval"
+                MESSAGE=$(choose_random_message \
+                    "$TOOL_DISPLAY needs your approval" \
+                    "$TOOL_DISPLAY is waiting for approval" \
+                    "$TOOL_DISPLAY needs permission to continue" \
+                    "$TOOL_DISPLAY has an approval request")
                 ;;
             "elicitation_dialog")
-                MESSAGE="$TOOL_DISPLAY needs MCP tool input"
+                MESSAGE=$(choose_random_message \
+                    "$TOOL_DISPLAY needs MCP tool input" \
+                    "$TOOL_DISPLAY is waiting for MCP input" \
+                    "$TOOL_DISPLAY needs a tool response" \
+                    "$TOOL_DISPLAY has an MCP prompt")
                 ;;
             "auth_success")
                 SUBTITLE="Authentication"
-                MESSAGE="$TOOL_DISPLAY authentication succeeded"
+                MESSAGE=$(choose_random_message \
+                    "$TOOL_DISPLAY authentication succeeded" \
+                    "$TOOL_DISPLAY signed in successfully" \
+                    "$TOOL_DISPLAY authentication is complete" \
+                    "$TOOL_DISPLAY is authenticated")
                 ;;
             *)
-                MESSAGE="$TOOL_DISPLAY needs your input"
+                MESSAGE=$(choose_random_message \
+                    "$TOOL_DISPLAY needs your input" \
+                    "$TOOL_DISPLAY is waiting for you" \
+                    "$TOOL_DISPLAY needs a response" \
+                    "$TOOL_DISPLAY has something for you")
                 ;;
         esac
         VOICE_MESSAGE="$MESSAGE"
         ;;
     "SubagentStart")
-        TITLE="$TOOL_DISPLAY 🤖"
+        TITLE="$TOOL_DISPLAY 🌱"
         SUBTITLE="Subagent Started"
-        MESSAGE="$TOOL_DISPLAY started a subagent"
-        VOICE_MESSAGE="$TOOL_DISPLAY started a subagent"
+        MESSAGE=$(choose_random_message \
+            "$TOOL_DISPLAY started a subagent" \
+            "$TOOL_DISPLAY launched a subagent" \
+            "$TOOL_DISPLAY delegated work to a subagent" \
+            "$TOOL_DISPLAY spun up a subagent")
+        VOICE_MESSAGE="$MESSAGE"
         SOUND="Pop"
         ;;
     "SubagentStop")
-        TITLE="$TOOL_DISPLAY ✅"
+        TITLE="$TOOL_DISPLAY 🍃"
         SUBTITLE="Subagent Complete"
-        MESSAGE="$TOOL_DISPLAY subagent completed"
-        VOICE_MESSAGE="$TOOL_DISPLAY subagent completed"
+        MESSAGE=$(choose_random_message \
+            "$TOOL_DISPLAY subagent completed" \
+            "$TOOL_DISPLAY subagent finished" \
+            "$TOOL_DISPLAY subagent is done" \
+            "$TOOL_DISPLAY subagent wrapped up")
+        VOICE_MESSAGE="$MESSAGE"
         SOUND="Glass"
         ;;
     "TeammateIdle")
-        TITLE="$TOOL_DISPLAY 🔔"
+        TITLE="$TOOL_DISPLAY 💤"
         SUBTITLE="Teammate Idle"
-        MESSAGE="$TOOL_DISPLAY teammate is waiting for input"
-        VOICE_MESSAGE="$TOOL_DISPLAY teammate is waiting for input"
+        MESSAGE=$(choose_random_message \
+            "$TOOL_DISPLAY teammate is waiting for input" \
+            "$TOOL_DISPLAY teammate is idle" \
+            "$TOOL_DISPLAY teammate needs your response" \
+            "$TOOL_DISPLAY teammate paused for input")
+        VOICE_MESSAGE="$MESSAGE"
         SOUND="Ping"
         ;;
     "TaskCreated")
-        TITLE="$TOOL_DISPLAY 📌"
+        TITLE="$TOOL_DISPLAY 🆕"
         SUBTITLE="Task Created"
-        MESSAGE="$TOOL_DISPLAY agent-team task was created"
-        VOICE_MESSAGE="$TOOL_DISPLAY task created"
+        MESSAGE=$(choose_random_message \
+            "$TOOL_DISPLAY agent-team task was created" \
+            "$TOOL_DISPLAY created an agent-team task" \
+            "$TOOL_DISPLAY added a team task" \
+            "$TOOL_DISPLAY opened a new agent-team task")
+        VOICE_MESSAGE="$MESSAGE"
         SOUND="Pop"
         ;;
     "TaskCompleted")
-        TITLE="$TOOL_DISPLAY ✅"
+        TITLE="$TOOL_DISPLAY 🎯"
         SUBTITLE="Task Complete"
-        MESSAGE="$TOOL_DISPLAY agent-team task completed"
-        VOICE_MESSAGE="$TOOL_DISPLAY task completed"
+        MESSAGE=$(choose_random_message \
+            "$TOOL_DISPLAY agent-team task completed" \
+            "$TOOL_DISPLAY completed a team task" \
+            "$TOOL_DISPLAY finished an agent-team task" \
+            "$TOOL_DISPLAY team task is done")
+        VOICE_MESSAGE="$MESSAGE"
         SOUND="Glass"
         ;;
     "error"|"failed")
-        TITLE="$TOOL_DISPLAY ❌"
+        TITLE="$TOOL_DISPLAY 🧨"
         SUBTITLE="Error"
-        MESSAGE="An error occurred in $TOOL_DISPLAY"
-        VOICE_MESSAGE="An error occurred in $TOOL_DISPLAY"
+        MESSAGE=$(choose_random_message \
+            "An error occurred in $TOOL_DISPLAY" \
+            "$TOOL_DISPLAY hit an error" \
+            "$TOOL_DISPLAY ran into a problem" \
+            "$TOOL_DISPLAY reported a failure")
+        VOICE_MESSAGE="$MESSAGE"
         SOUND="Basso"
         ;;
     "test")
-        TITLE="Code-Notify Test ✅"
+        TITLE="Code-Notify Test 🧪"
         SUBTITLE="$PROJECT_NAME"
-        MESSAGE="Notifications are working!"
-        VOICE_MESSAGE="Notifications are working"
+        MESSAGE=$(choose_random_message \
+            "Notifications are working!" \
+            "Code-Notify is working!" \
+            "Test notification delivered!" \
+            "Notification delivery is working!")
+        VOICE_MESSAGE="$MESSAGE"
         SOUND="Glass"
         ;;
     "usage")
         TITLE="${CODE_NOTIFY_USAGE_TITLE:-$TOOL_DISPLAY usage alert}"
         SUBTITLE="Usage Alert"
-        MESSAGE="${CODE_NOTIFY_USAGE_MESSAGE:-$TOOL_DISPLAY usage changed}"
-        VOICE_MESSAGE="${CODE_NOTIFY_USAGE_VOICE_MESSAGE:-$TOOL_DISPLAY usage alert}"
+        MESSAGE="${CODE_NOTIFY_USAGE_MESSAGE:-$(choose_random_message \
+            "$TOOL_DISPLAY usage changed" \
+            "$TOOL_DISPLAY usage has an update" \
+            "$TOOL_DISPLAY usage needs attention" \
+            "$TOOL_DISPLAY usage crossed a threshold")}"
+        VOICE_MESSAGE="${CODE_NOTIFY_USAGE_VOICE_MESSAGE:-$MESSAGE}"
         SOUND="Ping"
         ;;
     "usage_reset")
         TITLE="${CODE_NOTIFY_USAGE_TITLE:-$TOOL_DISPLAY tokens reset}"
         SUBTITLE="Tokens Reset"
-        MESSAGE="${CODE_NOTIFY_USAGE_MESSAGE:-$TOOL_DISPLAY tokens have reset. Usage is back to 100%.}"
-        VOICE_MESSAGE="${CODE_NOTIFY_USAGE_VOICE_MESSAGE:-$TOOL_DISPLAY tokens have reset}"
+        MESSAGE="${CODE_NOTIFY_USAGE_MESSAGE:-$(choose_random_message \
+            "$TOOL_DISPLAY tokens have reset. Usage is back to 100%." \
+            "$TOOL_DISPLAY token window reset" \
+            "$TOOL_DISPLAY usage is back to full" \
+            "$TOOL_DISPLAY tokens are available again")}"
+        VOICE_MESSAGE="${CODE_NOTIFY_USAGE_VOICE_MESSAGE:-$MESSAGE}"
         SOUND="Hero"
         ;;
     "PreToolUse")
@@ -648,7 +719,7 @@ except Exception:
 ' 2>/dev/null)
         fi
 
-        TITLE="$TOOL_DISPLAY ❓"
+        TITLE="$TOOL_DISPLAY 🙋"
         SUBTITLE="Question"
         if [[ -n "$ASK_QUESTION_TEXT" ]]; then
             MESSAGE=$(printf '%s\n' "$ASK_QUESTION_TEXT" | head -c 150 | tr '\n' ' ')
@@ -656,17 +727,26 @@ except Exception:
             if [[ ${#ASK_QUESTION_TEXT} -gt 150 ]]; then
                 MESSAGE="${MESSAGE}..."
             fi
+            VOICE_MESSAGE="$TOOL_DISPLAY is asking a question"
         else
-            MESSAGE="$TOOL_DISPLAY is asking a question"
+            MESSAGE=$(choose_random_message \
+                "$TOOL_DISPLAY is asking a question" \
+                "$TOOL_DISPLAY has a question" \
+                "$TOOL_DISPLAY needs an answer" \
+                "$TOOL_DISPLAY is waiting on a question")
+            VOICE_MESSAGE="$MESSAGE"
         fi
-        VOICE_MESSAGE="$TOOL_DISPLAY is asking a question"
         SOUND="Ping"
         ;;
     *)
         TITLE="$TOOL_DISPLAY 📢"
         SUBTITLE="Status Update"
-        MESSAGE="$TOOL_DISPLAY: $HOOK_TYPE"
-        VOICE_MESSAGE="$TOOL_DISPLAY status update"
+        MESSAGE=$(choose_random_message \
+            "$TOOL_DISPLAY: $HOOK_TYPE" \
+            "$TOOL_DISPLAY sent a status update" \
+            "$TOOL_DISPLAY reported $HOOK_TYPE" \
+            "$TOOL_DISPLAY has an update")
+        VOICE_MESSAGE="$MESSAGE"
         SOUND="Pop"
         ;;
 esac

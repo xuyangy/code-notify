@@ -2449,56 +2449,178 @@ if (-not $ProjectName) {
     $ProjectName = Get-ProjectNameForNotification
 }
 
+function Select-RandomMessage {
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$Messages
+    )
+
+    if (-not $Messages -or $Messages.Count -eq 0) {
+        return ""
+    }
+
+    return ($Messages | Get-Random)
+}
+
 # Set notification content based on hook type
 switch ($HookType.ToLower()) {
     "stop" {
         $Title = "$ToolDisplay - Task Complete"
-        $Message = "$ToolDisplay completed the task in $ProjectName"
-        $VoiceMessage = "$ToolDisplay completed the task in $ProjectName"
+        $Message = Select-RandomMessage `
+            "$ToolDisplay completed the task in $ProjectName" `
+            "$ToolDisplay finished the task in $ProjectName" `
+            "$ToolDisplay is done in $ProjectName" `
+            "$ToolDisplay wrapped up in $ProjectName"
+        $VoiceMessage = $Message
     }
     "notification" {
         $Title = "$ToolDisplay - Input Required"
         switch (Get-NotificationSubtype) {
-            "idle_prompt" { $Message = "$ToolDisplay is idle in $ProjectName" }
-            "permission_prompt" { $Message = "$ToolDisplay needs your approval in $ProjectName" }
-            "elicitation_dialog" { $Message = "$ToolDisplay needs MCP tool input in $ProjectName" }
+            "idle_prompt" {
+                $Message = Select-RandomMessage `
+                    "$ToolDisplay is idle in $ProjectName" `
+                    "$ToolDisplay is waiting in $ProjectName" `
+                    "$ToolDisplay is ready for you in $ProjectName" `
+                    "$ToolDisplay paused for input in $ProjectName"
+            }
+            "permission_prompt" {
+                $Message = Select-RandomMessage `
+                    "$ToolDisplay needs your approval in $ProjectName" `
+                    "$ToolDisplay is waiting for approval in $ProjectName" `
+                    "$ToolDisplay needs permission to continue in $ProjectName" `
+                    "$ToolDisplay has an approval request in $ProjectName"
+            }
+            "elicitation_dialog" {
+                $Message = Select-RandomMessage `
+                    "$ToolDisplay needs MCP tool input in $ProjectName" `
+                    "$ToolDisplay is waiting for MCP input in $ProjectName" `
+                    "$ToolDisplay needs a tool response in $ProjectName" `
+                    "$ToolDisplay has an MCP prompt in $ProjectName"
+            }
             "auth_success" {
                 $Title = "$ToolDisplay - Authentication"
-                $Message = "$ToolDisplay authentication succeeded in $ProjectName"
+                $Message = Select-RandomMessage `
+                    "$ToolDisplay authentication succeeded in $ProjectName" `
+                    "$ToolDisplay signed in successfully in $ProjectName" `
+                    "$ToolDisplay authentication is complete in $ProjectName" `
+                    "$ToolDisplay is authenticated in $ProjectName"
             }
-            default { $Message = "$ToolDisplay needs your input in $ProjectName" }
+            default {
+                $Message = Select-RandomMessage `
+                    "$ToolDisplay needs your input in $ProjectName" `
+                    "$ToolDisplay is waiting for you in $ProjectName" `
+                    "$ToolDisplay needs a response in $ProjectName" `
+                    "$ToolDisplay has something for you in $ProjectName"
+            }
         }
         $VoiceMessage = $Message
     }
     "pretooluse" {
         $Title = "$ToolDisplay - Command Approval"
-        $Message = "$ToolDisplay wants to run a command in $ProjectName"
-        $VoiceMessage = "$ToolDisplay wants to run a command in $ProjectName"
+        $Message = Select-RandomMessage `
+            "$ToolDisplay wants to run a command in $ProjectName" `
+            "$ToolDisplay is asking to run a command in $ProjectName" `
+            "$ToolDisplay needs command approval in $ProjectName" `
+            "$ToolDisplay has a command approval request in $ProjectName"
+        $VoiceMessage = $Message
     }
-    "error" {
+    "subagentstart" {
+        $Title = "$ToolDisplay - Subagent Started"
+        $Message = Select-RandomMessage `
+            "$ToolDisplay started a subagent in $ProjectName" `
+            "$ToolDisplay launched a subagent in $ProjectName" `
+            "$ToolDisplay delegated work to a subagent in $ProjectName" `
+            "$ToolDisplay spun up a subagent in $ProjectName"
+        $VoiceMessage = $Message
+    }
+    "subagentstop" {
+        $Title = "$ToolDisplay - Subagent Complete"
+        $Message = Select-RandomMessage `
+            "$ToolDisplay subagent completed in $ProjectName" `
+            "$ToolDisplay subagent finished in $ProjectName" `
+            "$ToolDisplay subagent is done in $ProjectName" `
+            "$ToolDisplay subagent wrapped up in $ProjectName"
+        $VoiceMessage = $Message
+    }
+    "teammateidle" {
+        $Title = "$ToolDisplay - Teammate Idle"
+        $Message = Select-RandomMessage `
+            "$ToolDisplay teammate is waiting for input in $ProjectName" `
+            "$ToolDisplay teammate is idle in $ProjectName" `
+            "$ToolDisplay teammate needs your response in $ProjectName" `
+            "$ToolDisplay teammate paused for input in $ProjectName"
+        $VoiceMessage = $Message
+    }
+    "taskcreated" {
+        $Title = "$ToolDisplay - Task Created"
+        $Message = Select-RandomMessage `
+            "$ToolDisplay agent-team task was created in $ProjectName" `
+            "$ToolDisplay created an agent-team task in $ProjectName" `
+            "$ToolDisplay added a team task in $ProjectName" `
+            "$ToolDisplay opened a new agent-team task in $ProjectName"
+        $VoiceMessage = $Message
+    }
+    "taskcompleted" {
+        $Title = "$ToolDisplay - Task Complete"
+        $Message = Select-RandomMessage `
+            "$ToolDisplay agent-team task completed in $ProjectName" `
+            "$ToolDisplay completed a team task in $ProjectName" `
+            "$ToolDisplay finished an agent-team task in $ProjectName" `
+            "$ToolDisplay team task is done in $ProjectName"
+        $VoiceMessage = $Message
+    }
+    { $_ -in "error", "failed" } {
         $Title = "$ToolDisplay - Error"
-        $Message = "An error occurred in $ProjectName"
-        $VoiceMessage = "An error occurred in $ProjectName"
+        $Message = Select-RandomMessage `
+            "An error occurred in $ProjectName" `
+            "$ToolDisplay hit an error in $ProjectName" `
+            "$ToolDisplay ran into a problem in $ProjectName" `
+            "$ToolDisplay reported a failure in $ProjectName"
+        $VoiceMessage = $Message
     }
     "test" {
         $Title = "Code-Notify Test"
-        $Message = "Notifications are working correctly!"
-        $VoiceMessage = "Test notification successful"
+        $Message = Select-RandomMessage `
+            "Notifications are working correctly!" `
+            "Code-Notify is working!" `
+            "Test notification delivered!" `
+            "Notification delivery is working!"
+        $VoiceMessage = $Message
     }
     "usage" {
         $Title = if ($env:CODE_NOTIFY_USAGE_TITLE) { $env:CODE_NOTIFY_USAGE_TITLE } else { "$ToolDisplay usage alert" }
-        $Message = if ($env:CODE_NOTIFY_USAGE_MESSAGE) { $env:CODE_NOTIFY_USAGE_MESSAGE } else { "$ToolDisplay usage changed" }
-        $VoiceMessage = if ($env:CODE_NOTIFY_USAGE_VOICE_MESSAGE) { $env:CODE_NOTIFY_USAGE_VOICE_MESSAGE } else { "$ToolDisplay usage alert" }
+        $Message = if ($env:CODE_NOTIFY_USAGE_MESSAGE) {
+            $env:CODE_NOTIFY_USAGE_MESSAGE
+        } else {
+            Select-RandomMessage `
+                "$ToolDisplay usage changed" `
+                "$ToolDisplay usage has an update" `
+                "$ToolDisplay usage needs attention" `
+                "$ToolDisplay usage crossed a threshold"
+        }
+        $VoiceMessage = if ($env:CODE_NOTIFY_USAGE_VOICE_MESSAGE) { $env:CODE_NOTIFY_USAGE_VOICE_MESSAGE } else { $Message }
     }
     "usage_reset" {
         $Title = if ($env:CODE_NOTIFY_USAGE_TITLE) { $env:CODE_NOTIFY_USAGE_TITLE } else { "$ToolDisplay token limit reset" }
-        $Message = if ($env:CODE_NOTIFY_USAGE_MESSAGE) { $env:CODE_NOTIFY_USAGE_MESSAGE } else { "$ToolDisplay tokens have reset. Usage is back to 100%." }
-        $VoiceMessage = if ($env:CODE_NOTIFY_USAGE_VOICE_MESSAGE) { $env:CODE_NOTIFY_USAGE_VOICE_MESSAGE } else { "$ToolDisplay token limit reset" }
+        $Message = if ($env:CODE_NOTIFY_USAGE_MESSAGE) {
+            $env:CODE_NOTIFY_USAGE_MESSAGE
+        } else {
+            Select-RandomMessage `
+                "$ToolDisplay tokens have reset. Usage is back to 100%." `
+                "$ToolDisplay token window reset" `
+                "$ToolDisplay usage is back to full" `
+                "$ToolDisplay tokens are available again"
+        }
+        $VoiceMessage = if ($env:CODE_NOTIFY_USAGE_VOICE_MESSAGE) { $env:CODE_NOTIFY_USAGE_VOICE_MESSAGE } else { $Message }
     }
     default {
         $Title = $ToolDisplay
-        $Message = "Status update: $HookType"
-        $VoiceMessage = "Status update from $ProjectName"
+        $Message = Select-RandomMessage `
+            "$ToolDisplay status update: $HookType in $ProjectName" `
+            "$ToolDisplay sent a status update in $ProjectName" `
+            "$ToolDisplay reported $HookType in $ProjectName" `
+            "$ToolDisplay has an update in $ProjectName"
+        $VoiceMessage = $Message
     }
 }
 

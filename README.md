@@ -60,7 +60,7 @@ cn usage status
 - **ElevenLabs voices** - Optional high-quality cloud TTS for voice announcements (macOS)
 - **Slack/Discord/ntfy delivery** - Mirror notifications to webhooks or your phone
 - **Usage alerts** - Opt-in Codex/Claude 20%, 10%, and reset notifications
-- **Tool-specific messages** - "Claude completed the task", "Codex completed the task"
+- **Rotating tool-specific messages** - "Claude is idle", "Codex wrapped up", and other short variants are chosen randomly per event
 - **Project-specific settings** - Different configs per project
 - **Quick aliases** - `cn` and `cnp` for fast access
 
@@ -220,6 +220,8 @@ Alert-type matching applies to Claude Code notification hooks and Gemini CLI not
 
 Agent-team and subagent workflows can be noisy if `permission_prompt` is enabled. If you only want idle pings, run `cn alerts remove permission_prompt && cn on`. Codex currently uses completion events from `notify`, so `permission_prompt` and `idle_prompt` settings do not change Codex behavior.
 
+For each delivered event, Code-Notify randomly chooses from a small set of short messages for that event. For example, an `idle_prompt` may say `Claude is idle`, `Claude is waiting`, `Claude is ready for you`, or `Claude paused for input`.
+
 ### Persistent Notifications
 
 By default, desktop notifications auto-hide after a few seconds. You can mark specific alert types as persistent so they stay visible until you close them, or until a timeout you choose (default 12 hours):
@@ -282,7 +284,7 @@ Notes:
 
 - ElevenLabs voice applies on macOS. If a call fails (no key, network error, or quota exhausted), Code-Notify automatically falls back to the built-in `say` voice so you still hear the announcement. `cn voice elevenlabs test` reports the specific API error when it fails.
 - `cn voice elevenlabs list` shows each voice's category and plan. Voices marked `paid only` (ElevenLabs `professional`/`library` voices) require a paid ElevenLabs plan; voices marked `free ok` (e.g. `premade`) work on the free tier.
-- Synthesized audio is cached in `~/.cache/code-notify/tts/`, so repeated messages (for example "Claude completed the task") do not make repeat API calls.
+- Synthesized audio is cached in `~/.cache/code-notify/tts/`, so repeated selected phrases do not make repeat API calls.
 - Your API key is stored locally in `~/.config/code-notify/tts.json` (permissions `600`) and is redacted in `cn voice status`.
 - `eleven_flash_v2_5` is the default model — it is the fastest and cheapest, which suits short notification phrases. Use `eleven_multilingual_v2` for higher quality.
 

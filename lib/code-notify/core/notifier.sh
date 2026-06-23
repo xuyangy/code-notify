@@ -5,7 +5,10 @@
 
 # Get arguments:
 #   Claude/Gemini: notify.sh <hook_type> <tool_name> [project_name]
-#   Codex:         notify.sh codex <payload_json>
+#   Codex (hooks): notify.sh <hook_type> codex      (payload JSON on stdin)
+#   Codex (legacy notify=): notify.sh codex <payload_json>
+# The legacy form is retained for users upgrading from the config.toml notify
+# integration who have not yet re-run `cn on codex`.
 RAW_ARG1="${1:-}"
 RAW_ARG2="${2:-}"
 RAW_ARG3="${3:-}"

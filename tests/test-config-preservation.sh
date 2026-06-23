@@ -602,21 +602,24 @@ run_test_project_hooks_special_chars() {
     return $?
 }
 
-run_test_codex_toml_placement() {
+run_test_codex_hook_config() {
     local test_dir=$(mktemp -d)
     trap "rm -rf $test_dir" RETURN
 
     export HOME="$test_dir"
     export CODEX_HOME="$test_dir/.codex"
-    mkdir -p "$CODEX_HOME"
+    mkdir -p "$CODEX_HOME" "$HOME/.claude/notifications"
 
     (
         source "$SCRIPT_DIR/../lib/code-notify/core/config.sh"
 
         echo ""
-        echo "=== Testing Codex TOML placement ==="
+        echo "=== Testing Codex hook configuration ==="
 
         cat > "$CODEX_CONFIG_FILE" << 'EOF'
+# Code-Notify: Desktop notifications
+notify = ["/tmp/code-notify/lib/code-notify/core/notifier.sh", "codex"]
+
 [notice.model_migrations]
 "gpt-5.1-codex-max" = "gpt-5.2-codex"
 
@@ -628,56 +631,124 @@ command = "npx"
 multi_agent = true
 EOF
 
+        cat > "$CODEX_HOOKS_FILE" << 'EOF'
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/true"
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF
+
         if ! enable_codex_hooks; then
             echo "❌ Failed to enable Codex hooks"
             exit 1
         fi
 
-        local notify_line
-        local first_table_line
-        notify_line=$(grep -nE '^notify\s*=' "$CODEX_CONFIG_FILE" | head -n1 | cut -d: -f1)
-        first_table_line=$(grep -nE '^\s*\[' "$CODEX_CONFIG_FILE" | head -n1 | cut -d: -f1)
-
-        if [[ -z "$notify_line" || -z "$first_table_line" || "$notify_line" -ge "$first_table_line" ]]; then
-            echo "❌ notify was not inserted before the first TOML table"
+        if grep -qE '^notify\s*=' "$CODEX_CONFIG_FILE" || grep -q '^# Code-Notify: Desktop notifications' "$CODEX_CONFIG_FILE"; then
+            echo "❌ legacy Codex notify config was not removed"
             cat "$CODEX_CONFIG_FILE"
             exit 1
         fi
-        echo "✅ notify inserted before the first TOML table"
+        echo "✅ legacy Codex notify config removed"
 
         if ! is_codex_enabled; then
-            echo "❌ is_codex_enabled did not detect the repaired config"
+            echo "❌ is_codex_enabled did not detect managed hooks"
             exit 1
         fi
-        echo "✅ is_codex_enabled only accepts top-level notify"
+        echo "✅ is_codex_enabled detects managed hooks"
 
         if command -v python3 &> /dev/null; then
-            if ! python3 - "$CODEX_CONFIG_FILE" << 'PY'
-import sys, tomllib
+            if ! python3 - "$CODEX_CONFIG_FILE" "$CODEX_HOOKS_FILE" << 'PY'
+import json
+import sys
+import tomllib
 
-with open(sys.argv[1], "rb") as fh:
+config_path, hooks_path = sys.argv[1:3]
+
+with open(config_path, "rb") as fh:
     data = tomllib.load(fh)
 
-assert "notify" in data, data
-assert "notify" not in data.get("features", {}), data
-assert data["notify"][1] == "codex", data["notify"]
+assert "notify" not in data, data
+assert data.get("features", {}).get("multi_agent") is True, data
+assert data.get("tui", {}).get("notifications") is False, data
+
+with open(hooks_path, "r", encoding="utf-8") as fh:
+    hooks_data = json.load(fh)
+
+hooks = hooks_data["hooks"]
+stop_commands = [
+    hook["command"]
+    for entry in hooks["Stop"]
+    for hook in entry.get("hooks", [])
+    if hook.get("type") == "command"
+]
+assert "/usr/bin/true" in stop_commands, stop_commands
+assert sum(command.endswith(" stop codex") for command in stop_commands) == 1, stop_commands
+assert "PermissionRequest" not in hooks, hooks
 PY
             then
-                echo "❌ TOML parser still sees notify under a table"
-                cat "$CODEX_CONFIG_FILE"
+                echo "❌ Codex hook config did not preserve expected state"
+                cat "$CODEX_HOOKS_FILE"
                 exit 1
             fi
-            echo "✅ TOML parser sees notify at top-level"
+            echo "✅ Stop hook installed and unrelated hooks preserved"
         fi
+
+        if ! enable_codex_hooks; then
+            echo "❌ Failed to re-enable Codex hooks"
+            exit 1
+        fi
+
+        if [[ $(grep -c '"command": .* stop codex' "$CODEX_HOOKS_FILE") -ne 1 ]]; then
+            echo "❌ Re-enable left duplicate Stop hooks"
+            cat "$CODEX_HOOKS_FILE"
+            exit 1
+        fi
+        echo "✅ Re-enable repairs managed hooks without duplicates"
+
+        set_notify_types "permission_prompt"
+        if ! enable_codex_hooks; then
+            echo "❌ Failed to enable Codex permission hook"
+            exit 1
+        fi
+
+        if ! grep -q '"PermissionRequest"' "$CODEX_HOOKS_FILE" || ! grep -q 'notification codex' "$CODEX_HOOKS_FILE"; then
+            echo "❌ permission_prompt did not install PermissionRequest hook"
+            cat "$CODEX_HOOKS_FILE"
+            exit 1
+        fi
+        echo "✅ permission_prompt installs PermissionRequest hook"
+
+        set_notify_types "idle_prompt"
+        if ! enable_codex_hooks; then
+            echo "❌ Failed to remove Codex permission hook after alert reset"
+            exit 1
+        fi
+
+        if grep -q '"PermissionRequest"' "$CODEX_HOOKS_FILE"; then
+            echo "❌ PermissionRequest hook remained after permission_prompt was disabled"
+            cat "$CODEX_HOOKS_FILE"
+            exit 1
+        fi
+        echo "✅ disabling permission_prompt removes PermissionRequest hook"
 
         if ! disable_codex_hooks; then
             echo "❌ Failed to disable Codex hooks"
             exit 1
         fi
 
-        if grep -qE '^notify\s*=' "$CODEX_CONFIG_FILE" || grep -q '^# Code-Notify: Desktop notifications' "$CODEX_CONFIG_FILE"; then
-            echo "❌ disable_codex_hooks did not remove Code-Notify lines"
-            cat "$CODEX_CONFIG_FILE"
+        if grep -q ' stop codex' "$CODEX_HOOKS_FILE" || grep -q ' notification codex' "$CODEX_HOOKS_FILE"; then
+            echo "❌ disable_codex_hooks did not remove managed hooks"
+            cat "$CODEX_HOOKS_FILE"
             exit 1
         fi
 
@@ -686,42 +757,12 @@ PY
             cat "$CODEX_CONFIG_FILE"
             exit 1
         fi
-        echo "✅ disable_codex_hooks preserves existing TOML content"
-
-        cat > "$CODEX_CONFIG_FILE" << 'EOF'
-[features]
-multi_agent = true
-
-# Code-Notify: Desktop notifications
-notify = ["/tmp/notifier", "codex"]
-EOF
-
-        if is_codex_enabled; then
-            echo "❌ Misplaced notify should not count as enabled"
-            exit 1
-        fi
-        echo "✅ Misplaced notify is not treated as enabled"
-
-        if ! enable_codex_hooks; then
-            echo "❌ Failed to repair misplaced notify"
-            exit 1
-        fi
-
-        notify_line=$(grep -nE '^notify\s*=' "$CODEX_CONFIG_FILE" | head -n1 | cut -d: -f1)
-        first_table_line=$(grep -nE '^\s*\[' "$CODEX_CONFIG_FILE" | head -n1 | cut -d: -f1)
-
-        if [[ -z "$notify_line" || -z "$first_table_line" || "$notify_line" -ge "$first_table_line" ]]; then
-            echo "❌ Re-enable did not move notify back to top-level"
+        if grep -q '^# Code-Notify: Codex notifications are handled by hooks' "$CODEX_CONFIG_FILE" || grep -q '^notifications = false' "$CODEX_CONFIG_FILE"; then
+            echo "❌ disable_codex_hooks did not remove managed Codex TUI notification override"
             cat "$CODEX_CONFIG_FILE"
             exit 1
         fi
-
-        if [[ $(grep -cE '^notify\s*=' "$CODEX_CONFIG_FILE") -ne 1 ]]; then
-            echo "❌ Re-enable left duplicate notify entries"
-            cat "$CODEX_CONFIG_FILE"
-            exit 1
-        fi
-        echo "✅ Re-enable repairs misplaced notify without duplicates"
+        echo "✅ disable_codex_hooks preserves existing config and unrelated hooks"
     )
 
     return $?
@@ -969,8 +1010,8 @@ for test_case in "space" "semicolon" "quote"; do
     fi
 done
 
-# Test 8: Codex TOML placement and repair
-run_test_codex_toml_placement || fail "Codex TOML placement test failed"
+# Test 8: Codex hook configuration and legacy notify cleanup
+run_test_codex_hook_config || fail "Codex hook configuration test failed"
 
 # Test 9: Legacy claude-notify hook configs are repaired in place
 run_test_legacy_claude_hooks_repair || fail "Legacy Claude hook repair test failed"

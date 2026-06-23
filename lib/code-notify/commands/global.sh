@@ -444,7 +444,7 @@ enable_single_tool() {
     local config_file
     case "$tool" in
         "claude") config_file="$GLOBAL_SETTINGS_FILE" ;;
-        "codex") config_file="$CODEX_CONFIG_FILE" ;;
+        "codex") config_file="$CODEX_HOOKS_FILE" ;;
         "gemini") config_file="$GEMINI_SETTINGS_FILE" ;;
     esac
 
@@ -565,8 +565,14 @@ show_status() {
     if is_tool_installed "codex"; then
         if is_tool_enabled "codex"; then
             echo "  ${CHECK_MARK} Codex: ${GREEN}ENABLED${RESET}"
-            echo "     Config: $CODEX_CONFIG_FILE"
-            echo "     Events: completion-only via Codex notify payloads"
+            echo "     Config: $CODEX_HOOKS_FILE"
+            echo "     Events: completion via Stop hook"
+            echo "     Codex TUI notifications: disabled to avoid duplicate toasts"
+            if is_notify_type_enabled "permission_prompt"; then
+                echo "     Approval alerts: ENABLED via PermissionRequest hook"
+            else
+                echo "     Approval alerts: disabled (run 'cn alerts add permission_prompt && cn on codex')"
+            fi
         else
             echo "  ${MUTE} Codex: ${DIM}DISABLED${RESET}"
         fi
@@ -1379,9 +1385,9 @@ show_alerts_status() {
     echo "  ${CYAN}cn alerts remove permission_prompt${RESET} # Stop permission notifications"
     echo "  ${CYAN}cn alerts reset${RESET}                   # Back to idle_prompt only"
     echo ""
-    dim "Alert-type matching applies to Claude Code and Gemini CLI hooks."
+    dim "Alert-type matching applies to Claude Code, Codex PermissionRequest, and Gemini CLI hooks."
     dim "Claude agent/team events are separate hooks and are opt-in."
-    dim "Codex currently exposes completion events through notify, so permission_prompt/idle_prompt settings do not change Codex behavior."
+    dim "For Codex, permission_prompt controls approval/edit PermissionRequest hooks; idle_prompt does not apply."
     echo ""
     dim "After changing, run 'cn on' to apply the new settings."
 }

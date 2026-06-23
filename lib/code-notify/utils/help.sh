@@ -67,8 +67,9 @@ ${BOLD}ALERT TYPES:${RESET}
 
     Notification types: ${CYAN}idle_prompt${RESET} (default), ${CYAN}permission_prompt${RESET}, ${CYAN}auth_success${RESET}, ${CYAN}elicitation_dialog${RESET}, ${CYAN}ask_user${RESET}
     Claude events: ${CYAN}SubagentStart${RESET}, ${CYAN}SubagentStop${RESET}, ${CYAN}TeammateIdle${RESET}, ${CYAN}TaskCreated${RESET}, ${CYAN}TaskCompleted${RESET}
-    Note: alert-type matching applies to Claude Code and Gemini CLI hooks.
-          Codex currently exposes completion events through its notify payload.
+    Note: alert-type matching applies to Claude Code, Codex PermissionRequest,
+          and Gemini CLI hooks. Codex TUI notifications are disabled while
+          Code-Notify owns Codex delivery.
 
 ${BOLD}VOICE COMMANDS:${RESET}
     ${GREEN}voice on${RESET}            Enable voice for all tools

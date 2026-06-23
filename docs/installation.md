@@ -12,7 +12,7 @@ Code-Notify adds desktop notifications to Claude Code, Codex, and Gemini CLI. Yo
 - Slack or Discord webhook messages when channels are configured
 - Codex or Claude usage crosses configured thresholds or resets
 
-Codex currently exposes completion notifications through its `notify` hook. Approval and `request_permissions` prompts do not currently trigger Code-Notify through Codex.
+Codex notifications use `~/.codex/hooks.json`: task completion is handled through the `Stop` hook, and approval/edit requests are handled through the `PermissionRequest` hook when `permission_prompt` is enabled. Code-Notify also disables Codex TUI notifications in `~/.codex/config.toml` while enabled so notification delivery is owned by Code-Notify.
 
 Supported upgrade paths also repair stale `claude-notify`-style Claude hooks automatically when they are detected.
 

@@ -117,12 +117,14 @@ $script:SettingsFile = if (-not $env:CLAUDE_HOME -and -not (Test-Path $script:De
     $script:DefaultSettingsFile
 }
 $script:NotificationsDir = "$script:ClaudeHome\notifications"
+$script:NotifyTypesFile = "$script:NotificationsDir\notify-types"
 $script:VoiceFile = "$script:NotificationsDir\voice-enabled"
 $script:SoundEnabledFile = "$script:NotificationsDir\sound-enabled"
 $script:SoundCustomFile = "$script:NotificationsDir\sound-custom"
 $script:DefaultSoundFile = "C:\Windows\Media\chimes.wav"
 $script:CodexHome = "$env:USERPROFILE\.codex"
 $script:CodexConfigFile = "$script:CodexHome\config.toml"
+$script:CodexHooksFile = "$script:CodexHome\hooks.json"
 $script:GeminiHome = "$env:USERPROFILE\.gemini"
 $script:GeminiSettingsFile = "$script:GeminiHome\settings.json"
 $script:CodeNotifyConfigDir = "$env:USERPROFILE\.config\code-notify"
@@ -163,58 +165,184 @@ function Backup-ConfigFile {
     Copy-Item $Path (Join-Path $backupDir "$safeName.$timestamp.bak") -ErrorAction SilentlyContinue
 }
 
-function Test-TomlTopLevelKey {
-    param(
-        [string]$Path,
-        [string]$Key
-    )
+function Remove-CodexNotifyConfig {
+    param([string]$Path)
 
     if (-not (Test-Path $Path)) {
-        return $false
+        return
     }
 
-    $content = Get-Content $Path -Raw
-    $match = [regex]::Match($content, '(?m)^\s*\[')
-    $prefix = if ($match.Success) { $content.Substring(0, $match.Index) } else { $content }
+    $content = @(Get-Content $Path | Where-Object {
+        $_ -notmatch '^\s*# Code-Notify: Desktop notifications\s*$' -and
+        -not ($_ -match '^\s*notify\s*=' -and $_ -match '(code-notify|notifier\.sh|notify\.(sh|ps1))' -and $_ -match 'codex')
+    })
 
-    return [bool]([regex]::IsMatch($prefix, "(?m)^\\s*$([regex]::Escape($Key))\\s*="))
+    $content | Set-Content $Path -Encoding UTF8
 }
 
-function Set-CodexNotifyConfig {
-    param(
-        [string]$Path,
-        [string]$NotifyLine
-    )
+function Disable-CodexTuiNotifications {
+    param([string]$Path)
 
-    $commentLine = "# Code-Notify: Desktop notifications"
+    $commentLine = "# Code-Notify: Codex notifications are handled by hooks"
+    $settingLine = "notifications = false"
 
     if (Test-Path $Path) {
-        $content = Get-Content $Path -Raw
+        $lines = @(Get-Content $Path)
     } else {
-        $content = "# Codex CLI Configuration`n# https://developers.openai.com/codex/config-reference/"
+        $lines = @()
     }
 
-    $content = (($content -split "`r?`n") | Where-Object {
-        $_ -notmatch '^\s*# Code-Notify: Desktop notifications\s*$' -and $_ -notmatch '^\s*notify\s*='
-    }) -join "`n"
-    $content = $content.TrimEnd()
+    $result = New-Object System.Collections.Generic.List[string]
+    $inTui = $false
+    $sawTui = $false
+    $wrote = $false
 
-    $tableMatch = [regex]::Match($content, '(?m)^\s*\[')
-    if ($tableMatch.Success) {
-        $prefix = $content.Substring(0, $tableMatch.Index).TrimEnd()
-        $suffix = $content.Substring($tableMatch.Index)
-        if ($prefix) {
-            $content = "$prefix`n`n$commentLine`n$NotifyLine`n`n$suffix"
-        } else {
-            $content = "$commentLine`n$NotifyLine`n`n$suffix"
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = [string]$lines[$i]
+        if ($line -match '^\s*# Code-Notify: Codex notifications are handled by hooks\s*$') {
+            continue
         }
-    } elseif ($content) {
-        $content = "$content`n`n$commentLine`n$NotifyLine"
-    } else {
-        $content = "$commentLine`n$NotifyLine"
+        if ($line -match '^\s*\[') {
+            if ($inTui -and -not $wrote) {
+                $result.Add($commentLine)
+                $result.Add($settingLine)
+                $wrote = $true
+            }
+            $inTui = ($line -match '^\s*\[tui\]\s*$')
+            if ($inTui) {
+                $sawTui = $true
+            }
+            $result.Add($line)
+            continue
+        }
+        if ($inTui -and $line -match '^\s*notifications\s*=') {
+            if (-not $wrote) {
+                $result.Add($commentLine)
+                $result.Add($settingLine)
+                $wrote = $true
+            }
+            continue
+        }
+        $result.Add($line)
     }
 
-    Set-Content $Path -Value $content -Encoding UTF8
+    if ($inTui -and -not $wrote) {
+        $result.Add($commentLine)
+        $result.Add($settingLine)
+        $wrote = $true
+    }
+    if (-not $sawTui) {
+        if ($result.Count -gt 0 -and $result[$result.Count - 1] -ne "") {
+            $result.Add("")
+        }
+        $result.Add("[tui]")
+        $result.Add($commentLine)
+        $result.Add($settingLine)
+    }
+
+    $result | Set-Content $Path -Encoding UTF8
+}
+
+function Remove-CodexTuiNotificationsOverride {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    $result = New-Object System.Collections.Generic.List[string]
+    $skipNextNotifications = $false
+    foreach ($line in @(Get-Content $Path)) {
+        $lineText = [string]$line
+        if ($lineText -match '^\s*# Code-Notify: Codex notifications are handled by hooks\s*$') {
+            $skipNextNotifications = $true
+            continue
+        }
+        if ($skipNextNotifications -and $lineText -match '^\s*notifications\s*=\s*false\s*$') {
+            $skipNextNotifications = $false
+            continue
+        }
+        $skipNextNotifications = $false
+        $result.Add($lineText)
+    }
+
+    $result | Set-Content $Path -Encoding UTF8
+}
+
+function Update-CodexHooksFile {
+    param(
+        [string]$Path,
+        [string]$NotifyScript,
+        [switch]$Disable
+    )
+
+    if (Test-Path $Path) {
+        $settings = Get-Content $Path -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
+    } else {
+        $settings = [PSCustomObject]@{}
+    }
+
+    if (-not $settings) {
+        $settings = [PSCustomObject]@{}
+    }
+
+    if ($null -eq $settings.PSObject.Properties['hooks'] -or $null -eq $settings.hooks) {
+        $settings | Add-Member -Force -NotePropertyName hooks -NotePropertyValue ([PSCustomObject]@{})
+    } elseif ($settings.hooks -isnot [pscustomobject] -and $settings.hooks -isnot [hashtable]) {
+        $settings.PSObject.Properties.Remove("hooks")
+        $settings | Add-Member -Force -NotePropertyName hooks -NotePropertyValue ([PSCustomObject]@{})
+    }
+
+    $stopCommand = Get-CodexStopCommand -NotifyScript $NotifyScript
+    $permissionCommand = Get-CodexPermissionCommand -NotifyScript $NotifyScript
+    $pattern = Get-ManagedCodexHookPattern
+
+    $stopEntries = Remove-ManagedClaudeHookEntries -Entries @($settings.hooks.Stop) -ExactCommand $stopCommand -Pattern $pattern
+    $permissionEntries = Remove-ManagedClaudeHookEntries -Entries @($settings.hooks.PermissionRequest) -ExactCommand $permissionCommand -Pattern $pattern
+
+    if (-not $Disable) {
+        $stopEntries += [PSCustomObject]@{
+            hooks = @(
+                [PSCustomObject]@{
+                    type = "command"
+                    command = $stopCommand
+                    timeout = 5
+                    statusMessage = "Notifying task completion"
+                }
+            )
+        }
+        if (Test-NotifyTypeEnabled -Type "permission_prompt") {
+            $permissionEntries += [PSCustomObject]@{
+                matcher = "*"
+                hooks = @(
+                    [PSCustomObject]@{
+                        type = "command"
+                        command = $permissionCommand
+                        timeout = 5
+                        statusMessage = "Notifying approval request"
+                    }
+                )
+            }
+        }
+    }
+
+    if ($stopEntries.Count -gt 0) {
+        $settings.hooks | Add-Member -Force -NotePropertyName Stop -NotePropertyValue $stopEntries
+    } else {
+        $settings.hooks.PSObject.Properties.Remove("Stop")
+    }
+
+    if ($permissionEntries.Count -gt 0) {
+        $settings.hooks | Add-Member -Force -NotePropertyName PermissionRequest -NotePropertyValue $permissionEntries
+    } else {
+        $settings.hooks.PSObject.Properties.Remove("PermissionRequest")
+    }
+
+    if ((Get-ObjectPropertyNames $settings.hooks).Count -eq 0) {
+        $settings.PSObject.Properties.Remove("hooks")
+    }
+
+    $settings | ConvertTo-Json -Depth 20 | Set-Content $Path -Encoding UTF8
 }
 
 function Test-GitInstalled {
@@ -548,12 +676,49 @@ function Get-ClaudeStopCommand {
     return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" stop claude"
 }
 
+function Get-CodexStopCommand {
+    param([string]$NotifyScript)
+    return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" stop codex"
+}
+
+function Get-CodexPermissionCommand {
+    param([string]$NotifyScript)
+    return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" notification codex"
+}
+
 function Get-ManagedClaudeNotificationPattern {
     return '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(notification|PreToolUse)(?:\s|$)'
 }
 
 function Get-ManagedClaudeStopPattern {
     return '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*stop(?:\s|$)'
+}
+
+function Get-ManagedCodexHookPattern {
+    return '(code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(stop|notification)\s+codex(?:\s|$)'
+}
+
+# Mirror of the bash is_notify_type_enabled: the alert types live in the
+# pipe-delimited notify-types file and default to idle_prompt when absent, so
+# permission_prompt is off unless the user explicitly enabled it.
+function Test-NotifyTypeEnabled {
+    param([string]$Type)
+
+    $current = "idle_prompt"
+    if (Test-Path $script:NotifyTypesFile) {
+        $raw = (Get-Content $script:NotifyTypesFile -Raw -ErrorAction SilentlyContinue)
+        if ($raw) {
+            $current = $raw.Trim()
+        }
+    }
+
+    foreach ($item in ($current -split '\|')) {
+        if ($item.Trim() -eq $Type) {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 function Test-HookEntriesContainCommand {
@@ -781,11 +946,18 @@ function Test-NotificationsEnabled {
 
     switch ($Tool.ToLower()) {
         "codex" {
-            if ($Project -or -not (Test-Path $script:CodexConfigFile)) {
+            if ($Project -or -not (Test-Path $script:CodexHooksFile)) {
                 return $false
             }
 
-            return Test-TomlTopLevelKey -Path $script:CodexConfigFile -Key "notify"
+            $settings = Get-Content $script:CodexHooksFile -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
+            if (-not $settings -or -not $settings.hooks) {
+                return $false
+            }
+
+            $notifyScript = Get-NotifyScript
+            $stopCommand = Get-CodexStopCommand -NotifyScript $notifyScript
+            return Test-HookEntriesContainCommand -Entries @($settings.hooks.Stop) -Matcher "" -Command $stopCommand
         }
         "gemini" {
             if ($Project -or -not (Test-Path $script:GeminiSettingsFile)) {
@@ -863,13 +1035,16 @@ function Enable-Notifications {
         "codex" {
             Write-Host "[>] Enabling Codex notifications globally" -ForegroundColor Cyan
             New-Item -ItemType Directory -Path $script:CodexHome -Force | Out-Null
-            Backup-ConfigFile $script:CodexConfigFile
+            Backup-ConfigFile $script:CodexHooksFile
+            if (Test-Path $script:CodexConfigFile) {
+                Backup-ConfigFile $script:CodexConfigFile
+                Remove-CodexNotifyConfig -Path $script:CodexConfigFile
+            }
+            Disable-CodexTuiNotifications -Path $script:CodexConfigFile
 
-            $escapedNotifyScript = $notifyScript -replace '\\', '\\\\'
-            $notifyLine = 'notify = ["powershell", "-ExecutionPolicy", "Bypass", "-File", "' + $escapedNotifyScript + '", "codex"]'
-            Set-CodexNotifyConfig -Path $script:CodexConfigFile -NotifyLine $notifyLine
+            Update-CodexHooksFile -Path $script:CodexHooksFile -NotifyScript $notifyScript
             Write-Success "Codex notifications enabled!"
-            Write-Info "Config: $script:CodexConfigFile"
+            Write-Info "Config: $script:CodexHooksFile"
             Send-Notification -Title "Code-Notify" -Message "Codex notifications enabled!" -Type "success"
             return
         }
@@ -990,16 +1165,20 @@ function Disable-Notifications {
     switch ($tool) {
         "codex" {
             Write-Host "[>] Disabling Codex notifications globally" -ForegroundColor Cyan
-            if (-not (Test-Path $script:CodexConfigFile)) {
+            if (-not (Test-Path $script:CodexHooksFile) -and -not (Test-Path $script:CodexConfigFile)) {
                 Write-Warning "Codex notifications are already disabled"
                 return
             }
 
-            Backup-ConfigFile $script:CodexConfigFile
-            $content = @(Get-Content $script:CodexConfigFile | Where-Object {
-                $_ -notmatch '^\s*# Code-Notify: Desktop notifications' -and $_ -notmatch '^\s*notify\s*='
-            })
-            $content | Set-Content $script:CodexConfigFile -Encoding UTF8
+            if (Test-Path $script:CodexHooksFile) {
+                Backup-ConfigFile $script:CodexHooksFile
+                Update-CodexHooksFile -Path $script:CodexHooksFile -NotifyScript $notifyScript -Disable
+            }
+            if (Test-Path $script:CodexConfigFile) {
+                Backup-ConfigFile $script:CodexConfigFile
+                Remove-CodexNotifyConfig -Path $script:CodexConfigFile
+                Remove-CodexTuiNotificationsOverride -Path $script:CodexConfigFile
+            }
             Write-Success "Codex notifications disabled!"
             return
         }
@@ -1087,7 +1266,7 @@ function Show-Status {
         foreach ($currentTool in $toolsToShow) {
             $displayName = Get-ToolDisplayName $currentTool
             $configPath = switch ($currentTool) {
-                "codex" { $script:CodexConfigFile }
+                "codex" { $script:CodexHooksFile }
                 "gemini" { $script:GeminiSettingsFile }
                 default { $script:SettingsFile }
             }

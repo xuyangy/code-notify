@@ -49,6 +49,7 @@ CLAUDE_EVENT_ALERT_TYPES="SubagentStart|SubagentStop|TeammateIdle|TaskCreated|Ta
 # Codex paths
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 CODEX_CONFIG_FILE="$CODEX_HOME/config.toml"
+CODEX_HOOKS_FILE="$CODEX_HOME/hooks.json"
 
 # Gemini CLI paths
 GEMINI_HOME="${GEMINI_HOME:-$HOME/.gemini}"
@@ -281,6 +282,14 @@ get_project_claude_pre_tool_use_command() {
     printf '%s PreToolUse claude %s\n' "$(shell_quote "$(get_notify_script)")" "$(shell_quote "$project_name")"
 }
 
+get_global_codex_stop_command() {
+    printf '%s stop codex\n' "$(get_notify_script)"
+}
+
+get_global_codex_permission_command() {
+    printf '%s notification codex\n' "$(get_notify_script)"
+}
+
 get_managed_claude_event_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(SubagentStart|SubagentStop|TeammateIdle|TaskCreated|TaskCompleted)(?:\s|$)'
 }
@@ -295,6 +304,10 @@ get_managed_claude_notification_pattern() {
 
 get_managed_claude_stop_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*stop(?:\s|$)'
+}
+
+get_managed_codex_hook_pattern() {
+    printf '%s\n' '(code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(stop|notification)\s+codex(?:\s|$)'
 }
 
 has_claude_hooks_for_commands() {
@@ -1218,7 +1231,7 @@ enable_hooks_in_settings() {
         "$(get_global_claude_stop_command)" \
         "enable" \
         "$(get_notify_script) " \
-        " claude"
+        " claude" || return 1
 
     # Register PreToolUse hook for AskUserQuestion if ask_user alert type is enabled
     register_ask_user_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_pre_tool_use_command)"
@@ -1237,7 +1250,7 @@ disable_hooks_in_settings() {
         "$(get_global_claude_stop_command)" \
         "disable" \
         "$(get_notify_script) " \
-        " claude"
+        " claude" || return 1
 
     # Remove PreToolUse hook for AskUserQuestion
     unregister_ask_user_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_pre_tool_use_command)"
@@ -1260,7 +1273,7 @@ disable_project_hooks_in_settings() {
         "$(get_project_claude_stop_command "$project_name")" \
         "disable" \
         "$(shell_quote "$(get_notify_script)") " \
-        " claude $(shell_quote "$project_name")"
+        " claude $(shell_quote "$project_name")" || return 1
 
     # Remove PreToolUse hook for AskUserQuestion
     unregister_ask_user_hook "$project_settings" "$(get_project_claude_pre_tool_use_command "$project_name")"
@@ -1283,7 +1296,7 @@ enable_project_hooks_in_settings() {
         "$(get_project_claude_stop_command "$project_name")" \
         "enable" \
         "$(shell_quote "$(get_notify_script)") " \
-        " claude $(shell_quote "$project_name")"
+        " claude $(shell_quote "$project_name")" || return 1
 
     # Register PreToolUse hook for AskUserQuestion if ask_user alert type is enabled
     register_ask_user_hook "$project_settings" "$(get_project_claude_pre_tool_use_command "$project_name")"
@@ -1300,53 +1313,433 @@ is_enabled_project_settings() {
 # Codex Configuration
 # ============================================
 
+remove_codex_notify_config() {
+    local file="$1"
+    local dir_path
+    local tmp_file
+
+    [[ -f "$file" ]] || return 0
+
+    dir_path=$(dirname "$file")
+    tmp_file=$(mktemp "${dir_path}/.tmp.XXXXXX") || return 1
+
+    awk '
+        /^[[:space:]]*# Code-Notify: Desktop notifications[[:space:]]*$/ {
+            next
+        }
+        /^[[:space:]]*notify[[:space:]]*=/ &&
+            $0 ~ /(code-notify|notifier\.sh|notify\.(sh|ps1))/ &&
+            $0 ~ /codex/ {
+            next
+        }
+        {
+            print
+        }
+    ' "$file" > "$tmp_file" || {
+        rm -f "$tmp_file"
+        return 1
+    }
+
+    mv "$tmp_file" "$file"
+}
+
+disable_codex_tui_notifications() {
+    local file="$1"
+    local dir_path
+    local tmp_file
+
+    dir_path=$(dirname "$file")
+    mkdir -p "$dir_path"
+    tmp_file=$(mktemp "${dir_path}/.tmp.XXXXXX") || return 1
+
+    if [[ -f "$file" ]]; then
+        awk '
+            BEGIN {
+                in_tui = 0
+                saw_tui = 0
+                wrote = 0
+                comment = "# Code-Notify: Codex notifications are handled by hooks"
+                setting = "notifications = false"
+            }
+            /^[[:space:]]*# Code-Notify: Codex notifications are handled by hooks[[:space:]]*$/ {
+                next
+            }
+            /^[[:space:]]*\[/ {
+                if (in_tui && !wrote) {
+                    print comment
+                    print setting
+                    wrote = 1
+                }
+                in_tui = ($0 ~ /^[[:space:]]*\[tui\][[:space:]]*$/)
+                if (in_tui) {
+                    saw_tui = 1
+                }
+                print
+                next
+            }
+            in_tui && /^[[:space:]]*notifications[[:space:]]*=/ {
+                if (!wrote) {
+                    print comment
+                    print setting
+                    wrote = 1
+                }
+                next
+            }
+            {
+                print
+            }
+            END {
+                if (in_tui && !wrote) {
+                    print comment
+                    print setting
+                    wrote = 1
+                }
+                if (!saw_tui) {
+                    print ""
+                    print "[tui]"
+                    print comment
+                    print setting
+                }
+            }
+        ' "$file" > "$tmp_file" || {
+            rm -f "$tmp_file"
+            return 1
+        }
+    else
+        cat > "$tmp_file" << 'EOF'
+[tui]
+# Code-Notify: Codex notifications are handled by hooks
+notifications = false
+EOF
+    fi
+
+    mv "$tmp_file" "$file"
+}
+
+remove_codex_tui_notifications_override() {
+    local file="$1"
+    local dir_path
+    local tmp_file
+
+    [[ -f "$file" ]] || return 0
+
+    dir_path=$(dirname "$file")
+    tmp_file=$(mktemp "${dir_path}/.tmp.XXXXXX") || return 1
+
+    awk '
+        /^[[:space:]]*# Code-Notify: Codex notifications are handled by hooks[[:space:]]*$/ {
+            skip_next_notifications = 1
+            next
+        }
+        skip_next_notifications && /^[[:space:]]*notifications[[:space:]]*=[[:space:]]*false[[:space:]]*$/ {
+            skip_next_notifications = 0
+            next
+        }
+        {
+            skip_next_notifications = 0
+            print
+        }
+    ' "$file" > "$tmp_file" || {
+        rm -f "$tmp_file"
+        return 1
+    }
+
+    mv "$tmp_file" "$file"
+}
+
+has_current_codex_hooks() {
+    local file="${1:-$CODEX_HOOKS_FILE}"
+    local stop_cmd permission_cmd pattern
+    stop_cmd="$(get_global_codex_stop_command)"
+    permission_cmd="$(get_global_codex_permission_command)"
+    pattern="$(get_managed_codex_hook_pattern)"
+
+    [[ -f "$file" ]] || return 1
+
+    if has_jq; then
+        jq -e \
+            --arg stop "$stop_cmd" \
+            --arg permission "$permission_cmd" \
+            --arg pattern "$pattern" \
+            --argjson permission_enabled "$(is_notify_type_enabled "permission_prompt" && echo true || echo false)" '
+            def command_matches($exact):
+                . == $exact or test($pattern);
+
+            any((.hooks.Stop // [])[]?.hooks[]?.command?; command_matches($stop)) and
+            (
+                ($permission_enabled | not) or
+                any((.hooks.PermissionRequest // [])[]?.hooks[]?.command?; command_matches($permission))
+            )
+        ' "$file" &>/dev/null
+        return $?
+    fi
+
+    if has_python3; then
+        python3 - "$file" "$stop_cmd" "$permission_cmd" "$pattern" "$(is_notify_type_enabled "permission_prompt" && echo true || echo false)" << 'PYTHON' 2>/dev/null
+import json
+import re
+import sys
+
+file_path, stop_cmd, permission_cmd, pattern, permission_enabled = sys.argv[1:6]
+
+try:
+    with open(file_path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+
+hooks = data.get("hooks", {})
+if not isinstance(hooks, dict):
+    raise SystemExit(1)
+
+regex = re.compile(pattern)
+
+def has_command(event, exact):
+    entries = hooks.get(event, [])
+    if not isinstance(entries, list):
+        return False
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for hook in entry.get("hooks", []):
+            if not isinstance(hook, dict):
+                continue
+            command = hook.get("command", "")
+            if command == exact or regex.search(command):
+                return True
+    return False
+
+if not has_command("Stop", stop_cmd):
+    raise SystemExit(1)
+if permission_enabled == "true" and not has_command("PermissionRequest", permission_cmd):
+    raise SystemExit(1)
+PYTHON
+        return $?
+    fi
+
+    grep -qE '"Stop"|"PermissionRequest"' "$file" &&
+        grep -qE 'code-notify|notifier\.sh|notify\.(sh|ps1)' "$file" &&
+        grep -q 'codex' "$file"
+}
+
+update_codex_hooks_file() {
+    local mode="$1"
+    local file="$2"
+    local stop_cmd permission_cmd pattern permission_enabled
+    stop_cmd="$(get_global_codex_stop_command)"
+    permission_cmd="$(get_global_codex_permission_command)"
+    pattern="$(get_managed_codex_hook_pattern)"
+    permission_enabled="$(is_notify_type_enabled "permission_prompt" && echo true || echo false)"
+
+    if has_jq; then
+        safe_jq_update "$file" '
+            def array_or_empty:
+                if type == "array" then . else [] end;
+
+            def strip_managed($stop; $permission; $pattern):
+                array_or_empty
+                | map(
+                    if ((.hooks | type) == "array") then
+                        .hooks = (
+                            .hooks
+                            | map(select(
+                                (
+                                    (.type // "") == "command" and
+                                    (
+                                        (.command // "") == $stop or
+                                        (.command // "") == $permission or
+                                        ((.command // "") | test($pattern))
+                                    )
+                                ) | not
+                            ))
+                        )
+                    else
+                        .
+                    end
+                )
+                | map(select(((.hooks | type) != "array") or ((.hooks | length) > 0)));
+
+            .hooks = (if (.hooks | type) == "object" then .hooks else {} end) |
+            .hooks.Stop = (.hooks.Stop | strip_managed($stop; $permission; $pattern)) |
+            .hooks.PermissionRequest = (.hooks.PermissionRequest | strip_managed($stop; $permission; $pattern)) |
+            if (.hooks.Stop | length) == 0 then del(.hooks.Stop) else . end |
+            if (.hooks.PermissionRequest | length) == 0 then del(.hooks.PermissionRequest) else . end |
+            if $mode == "enable" then
+                .hooks.Stop = ((.hooks.Stop // []) + [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": $stop,
+                        "timeout": 5,
+                        "statusMessage": "Notifying task completion"
+                    }]
+                }]) |
+                if $permission_enabled then
+                    .hooks.PermissionRequest = ((.hooks.PermissionRequest // []) + [{
+                        "matcher": "*",
+                        "hooks": [{
+                            "type": "command",
+                            "command": $permission,
+                            "timeout": 5,
+                            "statusMessage": "Notifying approval request"
+                        }]
+                    }])
+                else
+                    .
+                end
+            else
+                .
+            end |
+            if (.hooks | length) == 0 then del(.hooks) else . end
+        ' --arg mode "$mode" \
+          --arg stop "$stop_cmd" \
+          --arg permission "$permission_cmd" \
+          --arg pattern "$pattern" \
+          --argjson permission_enabled "$permission_enabled"
+        return $?
+    fi
+
+    if has_python3; then
+        local tmp_json
+        tmp_json=$(mktemp "$(dirname "$file")/.tmp.XXXXXX") || return 1
+        python3 - "$file" "$mode" "$stop_cmd" "$permission_cmd" "$pattern" "$permission_enabled" "$tmp_json" << 'PYTHON' || {
+import json
+import os
+import re
+import sys
+
+file_path, mode, stop_cmd, permission_cmd, pattern, permission_enabled, tmp_path = sys.argv[1:8]
+
+try:
+    with open(file_path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except FileNotFoundError:
+    data = {}
+except Exception as exc:
+    print(f"Error: Failed to parse Codex hooks JSON: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+if not isinstance(data, dict):
+    data = {}
+
+hooks = data.get("hooks")
+if not isinstance(hooks, dict):
+    hooks = {}
+else:
+    hooks = dict(hooks)
+
+regex = re.compile(pattern)
+
+def strip_managed(entries):
+    if not isinstance(entries, list):
+        return []
+    cleaned = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            cleaned.append(entry)
+            continue
+        entry = dict(entry)
+        entry_hooks = entry.get("hooks")
+        if isinstance(entry_hooks, list):
+            filtered = []
+            for hook in entry_hooks:
+                if not isinstance(hook, dict):
+                    filtered.append(hook)
+                    continue
+                command = hook.get("command", "")
+                if (
+                    hook.get("type") == "command"
+                    and (command == stop_cmd or command == permission_cmd or regex.search(command))
+                ):
+                    continue
+                filtered.append(hook)
+            entry["hooks"] = filtered
+            if not filtered:
+                continue
+        cleaned.append(entry)
+    return cleaned
+
+hooks["Stop"] = strip_managed(hooks.get("Stop", []))
+hooks["PermissionRequest"] = strip_managed(hooks.get("PermissionRequest", []))
+if not hooks["Stop"]:
+    hooks.pop("Stop", None)
+if not hooks.get("PermissionRequest"):
+    hooks.pop("PermissionRequest", None)
+
+if mode == "enable":
+    hooks["Stop"] = list(hooks.get("Stop", [])) + [{
+        "hooks": [{
+            "type": "command",
+            "command": stop_cmd,
+            "timeout": 5,
+            "statusMessage": "Notifying task completion",
+        }],
+    }]
+    if permission_enabled == "true":
+        hooks["PermissionRequest"] = list(hooks.get("PermissionRequest", [])) + [{
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": permission_cmd,
+                "timeout": 5,
+                "statusMessage": "Notifying approval request",
+            }],
+        }]
+
+if hooks:
+    data["hooks"] = hooks
+else:
+    data.pop("hooks", None)
+
+with open(tmp_path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\n")
+
+os.replace(tmp_path, file_path)
+PYTHON
+            rm -f "$tmp_json"
+            return 1
+        }
+        return 0
+    fi
+
+    echo "Error: jq or python3 required to safely update Codex hooks" >&2
+    return 1
+}
+
 # Check if Codex notifications are enabled
 is_codex_enabled() {
-    toml_has_top_level_key "$CODEX_CONFIG_FILE" "notify"
+    has_current_codex_hooks "$CODEX_HOOKS_FILE"
 }
 
 # Enable Codex notifications
 enable_codex_hooks() {
-    local notify_script=$(get_notify_script)
-    local escaped_notify_script
-    local notify_line
-
-    # Ensure .codex directory exists
     mkdir -p "$CODEX_HOME"
 
-    escaped_notify_script=$(toml_escape_string "$notify_script")
-    notify_line="notify = [\"$escaped_notify_script\", \"codex\"]"
-
-    # Check if config.toml exists
     if [[ -f "$CODEX_CONFIG_FILE" ]]; then
-        # Backup existing config
-        backup_config "$CODEX_CONFIG_FILE"
-
-        upsert_codex_notify_config "$CODEX_CONFIG_FILE" "$notify_line"
-    else
-        # Create new config.toml
-        cat > "$CODEX_CONFIG_FILE" << EOF
-# Codex CLI Configuration
-# https://developers.openai.com/codex/config-reference/
-
-# Code-Notify: Desktop notifications
-notify = ["$escaped_notify_script", "codex"]
-EOF
+        backup_config "$CODEX_CONFIG_FILE" || true
+        remove_codex_notify_config "$CODEX_CONFIG_FILE" || return 1
     fi
+    disable_codex_tui_notifications "$CODEX_CONFIG_FILE" || return 1
+
+    if [[ -f "$CODEX_HOOKS_FILE" ]]; then
+        backup_config "$CODEX_HOOKS_FILE" || true
+    fi
+
+    update_codex_hooks_file "enable" "$CODEX_HOOKS_FILE"
 }
 
 # Disable Codex notifications
 disable_codex_hooks() {
-    if [[ ! -f "$CODEX_CONFIG_FILE" ]]; then
-        return 0
+    if [[ -f "$CODEX_HOOKS_FILE" ]]; then
+        backup_config "$CODEX_HOOKS_FILE" || true
+        update_codex_hooks_file "disable" "$CODEX_HOOKS_FILE" || return 1
     fi
 
-    # Backup before modifying
-    backup_config "$CODEX_CONFIG_FILE"
-
-    # Remove notify line and comment (BSD sed compatible)
-    sed -i '' '/^# Code-Notify/d' "$CODEX_CONFIG_FILE" 2>/dev/null || sed -i '/^# Code-Notify/d' "$CODEX_CONFIG_FILE"
-    sed -i '' '/^notify.*=/d' "$CODEX_CONFIG_FILE" 2>/dev/null || sed -i '/^notify.*=/d' "$CODEX_CONFIG_FILE"
+    if [[ -f "$CODEX_CONFIG_FILE" ]]; then
+        backup_config "$CODEX_CONFIG_FILE" || true
+        remove_codex_notify_config "$CODEX_CONFIG_FILE" || return 1
+        remove_codex_tui_notifications_override "$CODEX_CONFIG_FILE" || return 1
+    fi
 }
 
 # ============================================

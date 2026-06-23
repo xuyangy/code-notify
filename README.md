@@ -59,6 +59,7 @@ cn usage status
 - **Voice announcements** - Hear when tasks complete (macOS, Windows)
 - **ElevenLabs voices** - Optional high-quality cloud TTS for voice announcements (macOS)
 - **Slack/Discord/ntfy delivery** - Mirror notifications to webhooks or your phone
+- **Codex hook ownership** - Handles Codex completion and approval/edit requests through Codex hooks while disabling duplicate Codex TUI toasts
 - **Usage alerts** - Opt-in Codex/Claude 20%, 10%, and reset notifications
 - **Rotating tool-specific messages** - "Claude is idle", "Codex wrapped up", and other short variants are chosen randomly per event
 - **Project-specific settings** - Different configs per project
@@ -119,7 +120,7 @@ See [docs/installation.md](docs/installation.md) for more details.
 | `cn on`              | Enable notifications for all detected tools  |
 | `cn on all`          | Explicit alias for enabling all detected tools |
 | `cn on claude`       | Enable for Claude Code only                  |
-| `cn on codex`        | Enable for Codex only                        |
+| `cn on codex`        | Enable Codex hooks and suppress duplicate Codex TUI toasts |
 | `cn on gemini`       | Enable for Gemini CLI only                   |
 | `cn off`             | Disable notifications                        |
 | `cn off all`         | Explicit alias for disabling all tools       |
@@ -151,13 +152,12 @@ Project-scoped Claude hooks override the global mute file, so `cn off` will not 
 Code-Notify uses the hook systems built into AI coding tools:
 
 - **Claude Code**: `~/.claude/settings.json`
-- **Codex**: `~/.codex/config.toml`
+- **Codex**: `~/.codex/hooks.json`
 - **Gemini CLI**: `~/.gemini/settings.json`
 
-For Codex, Code-Notify configures `notify = ["/absolute/path/to/notifier.sh", "codex"]` and reads the JSON payload Codex appends on completion.
-Codex currently exposes completion events through `notify`; approval and `request_permissions` prompts do not currently arrive through this hook.
+For Codex, Code-Notify configures `~/.codex/hooks.json` with Codex lifecycle hooks and disables Codex TUI notifications in `~/.codex/config.toml` to avoid duplicate toasts. The `Stop` hook sends task-complete notifications. When `permission_prompt` is enabled, Code-Notify also adds a `PermissionRequest` hook for approval/edit requests.
 
-When enabled, it adds hooks that call the notification script when tasks complete:
+For Claude Code, it adds hooks like:
 
 ```json
 {
@@ -188,11 +188,41 @@ When enabled, it adds hooks that call the notification script when tasks complet
 }
 ```
 
+For Codex, it manages hooks like:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [{ "type": "command", "command": "notify.sh stop codex" }]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "notify.sh notification codex" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+And while Codex is enabled, Code-Notify owns notification delivery by writing this managed override:
+
+```toml
+[tui]
+# Code-Notify: Codex notifications are handled by hooks
+notifications = false
+```
+
 ### Alert Types
 
 <img src="assets/cn-status-v1.4.0.png" width="60%" alt="cn status showing alert types"/>
 
-By default, notifications only fire when the AI is idle and waiting for input (`idle_prompt`). You can customize this:
+By default, Claude/Gemini input alerts use `idle_prompt`, while Codex always uses its `Stop` hook for task completion. You can customize additional alert types:
 
 ```bash
 cn alerts                          # Show current config
@@ -216,9 +246,9 @@ cn alerts reset                    # Back to default (idle_prompt only)
 | `TaskCreated`        | Claude agent-team task was created             |
 | `TaskCompleted`      | Claude agent-team task completed               |
 
-Alert-type matching applies to Claude Code notification hooks and Gemini CLI notification hooks. `ask_user` is a Claude-only `PreToolUse` hook for `AskUserQuestion`; it is applied immediately when Claude notifications are already enabled. Claude Code agent/team events are separate hook events and are opt-in via `cn alerts add SubagentStop`, `cn alerts add TeammateIdle`, or `cn alerts add TaskCompleted`.
+Alert-type matching applies to Claude Code notification hooks, Codex `PermissionRequest` hooks, and Gemini CLI notification hooks. `ask_user` is a Claude-only `PreToolUse` hook for `AskUserQuestion`; it is applied immediately when Claude notifications are already enabled. Claude Code agent/team events are separate hook events and are opt-in via `cn alerts add SubagentStop`, `cn alerts add TeammateIdle`, or `cn alerts add TaskCompleted`. After changing alert types, run `cn on` or `cn on codex` again to rewrite the managed hooks.
 
-Agent-team and subagent workflows can be noisy if `permission_prompt` is enabled. If you only want idle pings, run `cn alerts remove permission_prompt && cn on`. Codex currently uses completion events from `notify`, so `permission_prompt` and `idle_prompt` settings do not change Codex behavior.
+Agent-team and subagent workflows can be noisy if `permission_prompt` is enabled. If you only want idle pings for Claude/Gemini and completion alerts for Codex, run `cn alerts remove permission_prompt && cn on`. Codex does not expose an `idle_prompt` hook through Code-Notify; `permission_prompt` controls Codex approval/edit alerts through `PermissionRequest`.
 
 For each delivered event, Code-Notify randomly chooses from a small set of short messages for that event. For example, an `idle_prompt` may say `Claude is idle`, `Claude is waiting`, `Claude is ready for you`, or `Claude paused for input`.
 

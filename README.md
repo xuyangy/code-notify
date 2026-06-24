@@ -89,6 +89,24 @@ cn update
 code-notify version
 ```
 
+**Install a specific version (advanced)**
+
+By default the installer pulls the latest `main`. Set `CODE_NOTIFY_REF` to install a
+specific branch, tag, or commit SHA instead — useful for pinning a known-good
+version or testing a branch:
+
+```bash
+# pin to a release tag
+curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | CODE_NOTIFY_REF=v1.10.0 bash
+
+# or a branch / commit SHA
+CODE_NOTIFY_REF=my-branch bash scripts/install.sh
+```
+
+Note: `CODE_NOTIFY_REF` selects the code that gets installed; the `install.sh` you pipe
+to `bash` is always fetched from `main`. The ref is ignored when installing from a local
+checkout (it copies your working tree).
+
 If you were using the older `claude-notify` hook layout, supported upgrades now repair those Claude hooks automatically. On Windows, that repair also covers older `notify.ps1` hook layouts and alternate Claude settings locations such as `%USERPROFILE%\.config\.claude\settings.json`. Existing unrelated Claude hooks are preserved during enable/disable operations.
 
 ### For AI Coding Agents

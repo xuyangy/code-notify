@@ -60,6 +60,11 @@ fake_bin="$test_dir/bin"
 log_dir="$test_dir/log"
 mkdir -p "$HOME/.claude/notifications" "$HOME/.claude/logs" "$fake_bin" "$log_dir"
 
+# The run_command approval banner is gated on the permission_prompt alert type
+# at runtime (the notifier reads this file directly). Enable it so the PreToolUse
+# approval scenarios below deliver a banner.
+printf '%s' "idle_prompt|permission_prompt" > "$HOME/.claude/notifications/notify-types"
+
 case "$(uname -s)" in
     Darwin)
         notification_log="$log_dir/terminal-notifier.log"
@@ -121,8 +126,19 @@ run_agy_notifier "$fake_path" "PostToolUse" \
 run_agy_notifier "$fake_path" "PreToolUse" \
     "{\"conversationId\":\"c-approve\",\"toolCall\":{\"name\":\"run_command\"},$(ws projApprove)}"
 
+# 6b) The core fix: a successful step arms the debounce, then a NON-run_command
+#     tool starts (PreToolUse for a slow read) in the same conversation. The
+#     agent is still working, so the PreToolUse must cancel the pending
+#     completion — and produce NO banner of its own (only run_command prompts).
+#     Without this, a tool outliving the debounce window fires a bogus complete.
+run_agy_notifier "$fake_path" "PostToolUse" \
+    "{\"conversationId\":\"c-busy\",\"error\":\"\",$(ws projBusy)}"
+run_agy_notifier "$fake_path" "PreToolUse" \
+    "{\"conversationId\":\"c-busy\",\"toolCall\":{\"name\":\"read_file\"},$(ws projBusy)}"
+
 # Five fire synchronously (projInput, projErr, projStop, projCancel error,
 # projApprove input); the debounced projDone complete arrives ~1s later -> six.
+# projBusy must produce nothing (silent cancel).
 wait_for_lines "$notification_log" 6 || fail "expected six Antigravity notification deliveries"
 # Give any (incorrectly) pending debounce watchers time to fire before asserting.
 sleep 2
@@ -149,6 +165,12 @@ grep -q "Task Complete - projCancel" "$notification_log" \
 # A PreToolUse (waiting for approval) must cancel the pending completion.
 grep -q "Task Complete - projApprove" "$notification_log" \
     && fail "PreToolUse did not cancel the pending debounced completion"
+# A non-run_command tool start must cancel the pending completion (the core fix).
+grep -q "Task Complete - projBusy" "$notification_log" \
+    && fail "non-run_command PreToolUse did not cancel the pending debounced completion"
+# ...and it must stay silent (no approval banner for non-run_command tools).
+grep -q "projBusy" "$notification_log" \
+    && fail "non-run_command PreToolUse emitted a notification (should be silent)"
 
 # 7) Regression (P1): error alerts must honour the kill switch (cn off). With the
 #    disabled marker present, a PostToolUse error must NOT be delivered.

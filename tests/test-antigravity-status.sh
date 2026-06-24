@@ -77,24 +77,24 @@ is_antigravity_enabled || fail "plugin should read as enabled after a successful
 [[ -f "$ANTIGRAVITY_IMPORTED_HOOKS_FILE" ]] || fail "managed hooks.json should exist after import"
 has_pre_tool_use "$ANTIGRAVITY_IMPORTED_HOOKS_FILE" || fail "managed copy should record the live PreToolUse hook"
 
-# 2) Update with permission_prompt OFF while the installer fails. The managed
-#    copy must stay untouched (still PreToolUse), even though staging now holds
-#    the attempted no-PreToolUse config that was never imported. This is the
-#    reported status bug — status reads the managed copy, not staging.
+# 2) A failed update must leave the managed copy (status ground truth) intact and
+#    report failure, even though the attempt rewrote staging. Status reads the
+#    managed copy, not staging — this is the reported status bug.
 PERMISSION_ENABLED=0
 AGY_FAIL_INSTALL=1 enable_antigravity_hooks 2>/dev/null \
     && fail "a failed update should report failure"
-has_pre_tool_use "$ANTIGRAVITY_HOOKS_FILE" \
-    && fail "staging should hold the attempted no-PreToolUse config"
+is_antigravity_enabled \
+    || fail "a failed update must not disable the previously-imported plugin"
 has_pre_tool_use "$ANTIGRAVITY_IMPORTED_HOOKS_FILE" \
-    || fail "managed copy must still reflect the IMPORTED (PreToolUse) plugin after a failed update"
+    || fail "managed copy must still reflect the IMPORTED plugin after a failed update"
 
-# 3) A successful update with permission_prompt OFF updates the managed copy to
-#    match what is now imported (no PreToolUse).
+# 3) PreToolUse is always installed now (it cancels the debounce on every tool
+#    start); the permission_prompt setting only gates the runtime approval banner,
+#    not hooks.json. A successful import with permission OFF still records it.
 PERMISSION_ENABLED=0
 AGY_FAIL_INSTALL=0 enable_antigravity_hooks || fail "update should succeed"
 has_pre_tool_use "$ANTIGRAVITY_IMPORTED_HOOKS_FILE" \
-    && fail "managed copy should drop PreToolUse after a successful permission-off import"
+    || fail "managed copy must keep PreToolUse regardless of the permission_prompt setting"
 
 # 4) `agy plugin disable` keeps the manifest entry but renames plugin.json, so a
 #    disabled plugin must NOT be reported as enabled (the reported detection bug)

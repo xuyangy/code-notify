@@ -2072,8 +2072,10 @@ PYTHON
 #   * agy passes NO argv to a hook command and reads the hook's stdout as
 #     protojson, so each hook is a fixed wrapper script that pipes agy's stdin
 #     payload into the notifier and prints nothing.
-# Mapping: PreToolUse -> "input needed" (permission); PostToolUse -> debounced
-# "task complete" plus immediate error alerts; Stop -> dormant "task complete".
+# Mapping: PreToolUse (every tool) -> cancel the pending debounce (still working)
+# plus a run_command-scoped "input needed" approval banner; PostToolUse ->
+# debounced "task complete" plus immediate error alerts; Stop -> dormant "task
+# complete".
 
 # Check if Antigravity notifications are enabled (plugin imported AND active).
 is_antigravity_enabled() {
@@ -2162,18 +2164,20 @@ EOF
     write_agy_hook_wrapper "$staging/hooks/posttooluse.sh" "PostToolUse" "$notify_script"
     write_agy_hook_wrapper "$staging/hooks/stop.sh"        "Stop"        "$notify_script"
 
-    # PreToolUse drives the "input needed" approval alert, so only register it
-    # when the permission_prompt alert type is enabled (matches Codex behaviour).
-    # It is scoped to run_command — the calls that actually pause for approval.
-    local pre_tool_use_block=""
-    if is_notify_type_enabled "permission_prompt"; then
-        pre_tool_use_block=$(cat <<EOF
+    # PreToolUse is always registered with an empty matcher (all tools). agy
+    # fires it before every tool call, which is code-notify's "agent is still
+    # working" signal: the notifier cancels any pending debounced completion so a
+    # tool that outlives the debounce window can't fire a premature "task
+    # complete". The notifier scopes the approval ("input needed") banner to
+    # run_command and to the permission_prompt alert type at runtime, so this
+    # hook no longer depends on the alert config at install time.
+    local pre_tool_use_block
+    pre_tool_use_block=$(cat <<EOF
     "PreToolUse": [
-      { "matcher": "run_command", "hooks": [ { "type": "command", "command": "$(agy_shell_quote "$staging/hooks/pretooluse.sh")" } ] }
+      { "matcher": "", "hooks": [ { "type": "command", "command": "$(agy_shell_quote "$staging/hooks/pretooluse.sh")" } ] }
     ],
 EOF
 )
-    fi
 
     # hooks.json. PostToolUse powers the debounced "task complete" plus error
     # alerts. Stop is included but currently inert in agy 1.0.11.

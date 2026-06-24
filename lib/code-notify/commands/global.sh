@@ -422,9 +422,9 @@ enable_single_tool() {
         needs_repair=0
     fi
 
-    # Check if already enabled. Antigravity is exempt: its hooks.json content
-    # depends on alert-type settings (e.g. permission_prompt), so re-running
-    # `cn on antigravity` must always rebuild and re-import the plugin.
+    # Check if already enabled. Antigravity is exempt: re-running
+    # `cn on antigravity` always rebuilds and re-imports the plugin so a
+    # code-notify upgrade (new hooks.json or wrapper scripts) takes effect.
     if [[ $needs_repair -ne 0 ]] && [[ "$tool" != "antigravity" ]] && is_tool_enabled "$tool"; then
         if [[ "$quiet" != "quiet" ]]; then
             warning "$tool notifications already enabled"
@@ -605,28 +605,17 @@ show_status() {
         if is_tool_enabled "antigravity"; then
             echo "  ${CHECK_MARK} Antigravity CLI: ${GREEN}ENABLED${RESET}"
             echo "     Plugin: $ANTIGRAVITY_HOOKS_FILE (imported via 'agy plugin install')"
-            # Report what agy actually runs by reading its managed copy of the
-            # plugin (ANTIGRAVITY_IMPORTED_HOOKS_FILE). We deliberately do NOT
-            # read the staging hooks.json: it can hold an edit that was never
-            # imported (e.g. a failed update), which would misreport the live
-            # state. If the managed copy isn't where we expect (non-default agy
-            # layout) the imported config is genuinely unknown — say so instead.
-            if [[ -f "$ANTIGRAVITY_IMPORTED_HOOKS_FILE" ]]; then
-                if grep -q '"PreToolUse"' "$ANTIGRAVITY_IMPORTED_HOOKS_FILE" 2>/dev/null; then
-                    echo "     Input needed: ENABLED via PreToolUse hook (approval prompts)"
-                    if ! is_notify_type_enabled "permission_prompt"; then
-                        echo "       (permission_prompt now disabled; run 'cn on antigravity' to remove the approval hook)"
-                    fi
-                else
-                    echo "     Input needed: disabled (run 'cn alerts add permission_prompt && cn on antigravity')"
-                    if is_notify_type_enabled "permission_prompt"; then
-                        echo "       (permission_prompt now enabled; run 'cn on antigravity' to install the approval hook)"
-                    fi
-                fi
+            # The PreToolUse hook is always imported now (it cancels the pending
+            # debounce on every tool start), so the approval banner is gated at
+            # runtime on the permission_prompt alert type rather than on hook
+            # presence. Report that alert config directly — it takes effect with
+            # no reinstall.
+            if is_notify_type_enabled "permission_prompt"; then
+                echo "     Input needed: ENABLED (run_command approval prompts via PreToolUse)"
             else
-                echo "     Input needed: unknown — run 'cn on antigravity' to refresh status"
+                echo "     Input needed: disabled (run 'cn alerts add permission_prompt')"
             fi
-            echo "     Task complete: debounced PostToolUse (agy 1.0.11 has no working Stop hook)"
+            echo "     Task complete: debounced PostToolUse, cancelled on next tool start (agy 1.0.11 has no working Stop hook)"
         else
             echo "  ${MUTE} Antigravity CLI: ${DIM}DISABLED${RESET}"
         fi
@@ -1442,9 +1431,9 @@ show_alerts_status() {
     dim "Alert-type matching applies to Claude Code, Codex PermissionRequest, Gemini CLI, and Antigravity PreToolUse hooks."
     dim "Claude agent/team events are separate hooks and are opt-in."
     dim "For Codex, permission_prompt controls approval/edit PermissionRequest hooks; idle_prompt does not apply."
-    dim "For Antigravity, permission_prompt controls whether the approval (PreToolUse) hook is installed."
+    dim "For Antigravity, permission_prompt controls the run_command approval banner (PreToolUse); it takes effect immediately, no reinstall."
     echo ""
-    dim "After changing, run 'cn on' (or 'cn on antigravity') to apply the new settings."
+    dim "After changing, run 'cn on' to apply the new settings (Antigravity alert changes apply immediately)."
 }
 
 # Show available alert types

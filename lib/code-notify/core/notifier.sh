@@ -235,6 +235,39 @@ get_agy_conversation_id() {
     printf '%s' "${cid:-default}"
 }
 
+# Tool name for the current tool event (.toolCall.name); empty for model-only
+# steps. Used to scope the approval ("input needed") banner to calls that
+# actually pause for the user (run_command).
+get_agy_tool_name() {
+    if has_jq; then
+        printf '%s' "$HOOK_DATA" | jq -r '(.toolCall.name // "")' 2>/dev/null
+        return 0
+    fi
+    if has_python3; then
+        printf '%s' "$HOOK_DATA" | python3 -c '
+import json, sys
+try:
+    tc = json.load(sys.stdin).get("toolCall") or {}
+    print(tc.get("name") or "", end="")
+except Exception:
+    print("", end="")
+' 2>/dev/null
+        return 0
+    fi
+    json_extract_string "$HOOK_DATA" "name"
+}
+
+# True when permission_prompt alerts are enabled. The notifier does not source
+# config.sh, so read the same notify-types file config.sh writes (normalized,
+# pipe-separated). Absent file means the default (idle_prompt only) — approval
+# prompts off — matching config.sh's DEFAULT_NOTIFY_TYPE.
+agy_permission_prompt_enabled() {
+    local types_file="$HOME/.claude/notifications/notify-types"
+    local current="idle_prompt"
+    [[ -f "$types_file" ]] && current="$(cat "$types_file" 2>/dev/null)"
+    [[ "$current" == *permission_prompt* ]]
+}
+
 # Debounce PostToolUse into a single "task complete": agy 1.0.11 fires no usable
 # Stop event, and PostToolUse fires after every step (including model-only
 # steps), so we treat the agent as done once step activity has been quiet for a
@@ -242,12 +275,16 @@ get_agy_conversation_id() {
 # most recent watcher (whose token is still current after the quiet period)
 # sends the notification.
 #
-# Heuristic caveat (no real turn-end event exists yet): a single long model
-# generation that exceeds the quiet window can fire early. The quiet window
-# (CODE_NOTIFY_AGY_DEBOUNCE_SECONDS, default 8s) plus the global stop rate limit
-# keep this in check; repeated completions are not cooled down per conversation,
-# because that would also swallow legitimate completions of quick back-to-back
-# turns in the same session.
+# Tool runs no longer trip this early: PreToolUse (empty matcher, every tool)
+# cancels the pending watcher when the next tool starts, so a tool that outlives
+# the quiet window can't fire a premature completion.
+#
+# Heuristic caveat (no real turn-end event exists yet): a single long *model*
+# generation that exceeds the quiet window with no following tool can still fire
+# early. The quiet window (CODE_NOTIFY_AGY_DEBOUNCE_SECONDS, default 8s) plus the
+# global stop rate limit keep this in check; repeated completions are not cooled
+# down per conversation, because that would also swallow legitimate completions
+# of quick back-to-back turns in the same session.
 
 # Path of the per-conversation debounce token. The token is the single source of
 # truth for "is a completion still pending": a newer step or an error overwrites
@@ -303,13 +340,23 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
     PROJECT_NAME="$(get_agy_project_name)"
     case "$AGY_EVENT" in
         PreToolUse)
-            # Fires while agy waits for the user to approve a tool call. The
-            # agent is about to do more work, so any pending "looks done" guess
-            # is wrong — cancel it (a slow approval can otherwise outlast the
-            # debounce window and fire a bogus "task complete").
-            HOOK_TYPE="notification"
-            AGY_FORCED_SUBTYPE="permission_prompt"
+            # agy 1.0.11 fires PreToolUse before EVERY tool call (registered
+            # with an empty matcher), so it is code-notify's "agent is still
+            # working" signal: a tool is about to run, therefore any pending
+            # "looks done" debounce from the previous step is wrong — cancel it.
+            # Without this, a tool that outlives the debounce window (e.g. a slow
+            # file read between two quick steps) lets the previous step's watcher
+            # fire a bogus "task complete" mid-turn.
             cancel_agy_debounced_stop
+            # The approval banner is only meaningful for calls that pause for the
+            # user (run_command) and only when permission_prompt alerts are on.
+            # Every other tool start is silent — it just cancelled the debounce.
+            if [[ "$(get_agy_tool_name)" == "run_command" ]] && agy_permission_prompt_enabled; then
+                HOOK_TYPE="notification"
+                AGY_FORCED_SUBTYPE="permission_prompt"
+            else
+                exit 0
+            fi
             ;;
         PostToolUse)
             if [[ -n "$(get_agy_error)" ]]; then

@@ -95,9 +95,11 @@ echo "Installing to: $INSTALL_DIR"
 
 mkdir -p "$HOME/.claude/notifications"
 
-# Source ref to install (branch or tag); override with CODE_NOTIFY_REF=<ref>.
+# Source ref to install; override with CODE_NOTIFY_REF=<branch|tag|sha>. The
+# generic tar.gz/<ref> endpoint resolves any of those (a hardcoded refs/heads/
+# prefix would reject tags and commit SHAs).
 CODE_NOTIFY_REF="${CODE_NOTIFY_REF:-main}"
-TARBALL_URL="https://codeload.github.com/xuyangy/code-notify/tar.gz/refs/heads/${CODE_NOTIFY_REF}"
+TARBALL_URL="https://codeload.github.com/xuyangy/code-notify/tar.gz/${CODE_NOTIFY_REF}"
 
 # Resolve the repo root from this script's real on-disk location. Only treat it
 # as a local checkout when the script is an actual file AND the repository

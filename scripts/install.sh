@@ -95,8 +95,9 @@ echo "Installing to: $INSTALL_DIR"
 
 mkdir -p "$HOME/.claude/notifications"
 
-# GitHub raw URL base
-GITHUB_RAW="https://raw.githubusercontent.com/xuyangy/code-notify/main"
+# Source ref to install (branch or tag); override with CODE_NOTIFY_REF=<ref>.
+CODE_NOTIFY_REF="${CODE_NOTIFY_REF:-main}"
+TARBALL_URL="https://codeload.github.com/xuyangy/code-notify/tar.gz/refs/heads/${CODE_NOTIFY_REF}"
 
 # Resolve the repo root from this script's real on-disk location. Only treat it
 # as a local checkout when the script is an actual file AND the repository
@@ -147,10 +148,14 @@ REQUIRED_FILES=(
 # live directory is only touched once a complete, validated tree is ready.
 STAGING_DIR="$(mktemp -d "${INSTALL_DIR}.tmp.XXXXXX")"
 BACKUP_DIR=""
+SRC_TGZ=""
+SRC_DIR=""
 INSTALL_ACTIVATED=0
 INSTALL_COMMITTED=0
 cleanup() {
     rm -rf "$STAGING_DIR"
+    [[ -n "$SRC_TGZ" ]] && rm -f "$SRC_TGZ"
+    [[ -n "$SRC_DIR" ]] && rm -rf "$SRC_DIR"
     if [[ "$INSTALL_COMMITTED" -eq 1 ]]; then
         # Every fallible step succeeded: drop the rollback copy.
         [[ -n "$BACKUP_DIR" ]] && rm -rf "$BACKUP_DIR"
@@ -181,18 +186,26 @@ mkdir -p "$STAGING_DIR/lib/code-notify/core"
 mkdir -p "$STAGING_DIR/lib/code-notify/utils"
 
 # Populate the staging dir from a local checkout when available, otherwise
-# download from GitHub.
+# download a release tarball from GitHub. The tarball carries whatever lib/
+# actually contains, so the file list never drifts; REQUIRED_FILES below is a
+# sanity gate, not a download manifest.
 if is_local_checkout; then
     echo "Installing from local files..."
     cp -r "$SOURCE_DIR/bin/." "$STAGING_DIR/bin/"
     cp -r "$SOURCE_DIR/lib/." "$STAGING_DIR/lib/"
 else
-    echo "Downloading files from GitHub..."
-    for rel in "${REQUIRED_FILES[@]}"; do
-        if ! curl -fsSL "$GITHUB_RAW/$rel" -o "$STAGING_DIR/$rel"; then
-            abort "failed to download $rel"
-        fi
-    done
+    command -v tar >/dev/null 2>&1 || abort "tar is required to install from GitHub"
+    echo "Downloading code-notify (${CODE_NOTIFY_REF})..."
+    # Download to a file (not curl | tar) so a failed/aborted transfer is caught
+    # explicitly rather than relying on tar choking on a truncated stream.
+    SRC_TGZ="$(mktemp "${INSTALL_DIR}.src.XXXXXX")"
+    SRC_DIR="$(mktemp -d "${INSTALL_DIR}.src.XXXXXX")"
+    curl -fsSL "$TARBALL_URL" -o "$SRC_TGZ" || abort "failed to download $TARBALL_URL"
+    # --strip-components=1 drops the version-named top dir (code-notify-<ref>/).
+    tar -xzf "$SRC_TGZ" -C "$SRC_DIR" --strip-components=1 || abort "failed to extract tarball"
+    [[ -d "$SRC_DIR/bin" && -d "$SRC_DIR/lib" ]] || abort "tarball missing bin/ or lib/"
+    cp -r "$SRC_DIR/bin/." "$STAGING_DIR/bin/"
+    cp -r "$SRC_DIR/lib/." "$STAGING_DIR/lib/"
 fi
 
 # Validate the staged tree before touching the live install.

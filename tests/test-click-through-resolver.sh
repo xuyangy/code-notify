@@ -65,6 +65,17 @@ TERM_PROGRAM="cursor"
 CODE_NOTIFY_CLICK_THROUGH_APP_PATH=""
 [[ "$(click_through_resolve_activation_bundle_id)" == "com.todesktop.230313mzl4w4u92" ]] || fail "activation resolution should fall back to built-in TERM_PROGRAM mappings"
 
+# Explicit override wins over everything, including a live TERM_PROGRAM. This is
+# the escape hatch for headless/daemon/background sessions with no detectable
+# terminal (otherwise resolution falls back to com.apple.Terminal).
+CODE_NOTIFY_CLICK_BUNDLE_ID="com.googlecode.iterm2"
+[[ "$(click_through_resolve_activation_bundle_id)" == "com.googlecode.iterm2" ]] || fail "explicit CODE_NOTIFY_CLICK_BUNDLE_ID should override all detection"
+# And it must still win when no terminal hints exist at all (the daemon case).
+TERM_PROGRAM=""
+[[ "$(click_through_resolve_activation_bundle_id)" == "com.googlecode.iterm2" ]] || fail "explicit override should win even with no terminal hints (daemon/background sessions)"
+unset CODE_NOTIFY_CLICK_BUNDLE_ID
+TERM_PROGRAM="cursor"
+
 TERM_PROGRAM="JetBrains-JediTerm"
 [[ "$(click_through_resolve_default_term_program "com.jetbrains.pycharm" "PyCharm")" == "JetBrains-JediTerm" ]] || fail "default TERM_PROGRAM should prefer the live runtime value"
 

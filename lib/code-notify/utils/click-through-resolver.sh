@@ -26,6 +26,16 @@ click_through_resolve_configured_bundle_id() {
 click_through_resolve_activation_bundle_id() {
     local term_prog bundle_id
 
+    # Explicit override wins over all detection. This is the escape hatch for
+    # contexts where process/env detection cannot work by design — headless,
+    # daemon, or background sessions (e.g. Claude's background runner detaches
+    # from the originating terminal, leaving no TERM_PROGRAM, no terminal app in
+    # the process tree, and resolution would otherwise fall back to Terminal).
+    if [[ -n "${CODE_NOTIFY_CLICK_BUNDLE_ID:-}" ]]; then
+        printf '%s\n' "${CODE_NOTIFY_CLICK_BUNDLE_ID}"
+        return 0
+    fi
+
     bundle_id=$(click_through_resolve_configured_bundle_id || true)
     if [[ -n "$bundle_id" ]]; then
         printf '%s\n' "$bundle_id"

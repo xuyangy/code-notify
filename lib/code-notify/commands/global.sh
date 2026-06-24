@@ -195,6 +195,9 @@ normalize_tool_argument() {
         ""|"all")
             printf '%s\n' ""
             ;;
+        "agy")
+            printf '%s\n' "antigravity"
+            ;;
         *)
             printf '%s\n' "$tool"
             ;;
@@ -379,7 +382,7 @@ enable_notifications_global() {
 
     if [[ -z "$installed_tools" ]]; then
         warning "No supported AI tools detected"
-        info "Supported tools: Claude Code, Codex, Gemini CLI"
+        info "Supported tools: Claude Code, Codex, Gemini CLI, Antigravity CLI"
         return 1
     fi
 
@@ -419,8 +422,10 @@ enable_single_tool() {
         needs_repair=0
     fi
 
-    # Check if already enabled
-    if [[ $needs_repair -ne 0 ]] && is_tool_enabled "$tool"; then
+    # Check if already enabled. Antigravity is exempt: its hooks.json content
+    # depends on alert-type settings (e.g. permission_prompt), so re-running
+    # `cn on antigravity` must always rebuild and re-import the plugin.
+    if [[ $needs_repair -ne 0 ]] && [[ "$tool" != "antigravity" ]] && is_tool_enabled "$tool"; then
         if [[ "$quiet" != "quiet" ]]; then
             warning "$tool notifications already enabled"
         fi
@@ -446,6 +451,7 @@ enable_single_tool() {
         "claude") config_file="$GLOBAL_SETTINGS_FILE" ;;
         "codex") config_file="$CODEX_HOOKS_FILE" ;;
         "gemini") config_file="$GEMINI_SETTINGS_FILE" ;;
+        "antigravity") config_file="$ANTIGRAVITY_HOOKS_FILE" ;;
     esac
 
     success "$tool: ENABLED"
@@ -476,8 +482,8 @@ disable_notifications_global() {
     # No tool specified - disable all enabled tools
     local disabled_count=0
 
-    for t in claude codex gemini; do
-        if is_tool_enabled "$t"; then
+    for t in claude codex gemini antigravity; do
+        if is_tool_disable_needed "$t"; then
             if disable_single_tool "$t" "quiet"; then
                 ((disabled_count++))
             fi
@@ -497,8 +503,10 @@ disable_single_tool() {
     local tool="$1"
     local quiet="${2:-}"
 
-    # Check if enabled
-    if ! is_tool_enabled "$tool"; then
+    # Check if there is anything to disable (for antigravity this includes a
+    # plugin deactivated out-of-band with `agy plugin disable`, which is still
+    # imported and must be uninstalled).
+    if ! is_tool_disable_needed "$tool"; then
         if [[ "$quiet" != "quiet" ]]; then
             warning "$tool notifications already disabled"
         fi
@@ -590,6 +598,40 @@ show_status() {
         fi
     else
         echo "  ${DIM}- Gemini CLI: not installed${RESET}"
+    fi
+
+    # Antigravity CLI (agy)
+    if is_tool_installed "antigravity"; then
+        if is_tool_enabled "antigravity"; then
+            echo "  ${CHECK_MARK} Antigravity CLI: ${GREEN}ENABLED${RESET}"
+            echo "     Plugin: $ANTIGRAVITY_HOOKS_FILE (imported via 'agy plugin install')"
+            # Report what agy actually runs by reading its managed copy of the
+            # plugin (ANTIGRAVITY_IMPORTED_HOOKS_FILE). We deliberately do NOT
+            # read the staging hooks.json: it can hold an edit that was never
+            # imported (e.g. a failed update), which would misreport the live
+            # state. If the managed copy isn't where we expect (non-default agy
+            # layout) the imported config is genuinely unknown — say so instead.
+            if [[ -f "$ANTIGRAVITY_IMPORTED_HOOKS_FILE" ]]; then
+                if grep -q '"PreToolUse"' "$ANTIGRAVITY_IMPORTED_HOOKS_FILE" 2>/dev/null; then
+                    echo "     Input needed: ENABLED via PreToolUse hook (approval prompts)"
+                    if ! is_notify_type_enabled "permission_prompt"; then
+                        echo "       (permission_prompt now disabled; run 'cn on antigravity' to remove the approval hook)"
+                    fi
+                else
+                    echo "     Input needed: disabled (run 'cn alerts add permission_prompt && cn on antigravity')"
+                    if is_notify_type_enabled "permission_prompt"; then
+                        echo "       (permission_prompt now enabled; run 'cn on antigravity' to install the approval hook)"
+                    fi
+                fi
+            else
+                echo "     Input needed: unknown — run 'cn on antigravity' to refresh status"
+            fi
+            echo "     Task complete: debounced PostToolUse (agy 1.0.11 has no working Stop hook)"
+        else
+            echo "  ${MUTE} Antigravity CLI: ${DIM}DISABLED${RESET}"
+        fi
+    else
+        echo "  ${DIM}- Antigravity CLI: not installed${RESET}"
     fi
 
     # Voice status
@@ -749,7 +791,18 @@ run_setup_wizard() {
         warning "Claude Code installation not detected"
         info "Code-Notify will create configuration at: $CLAUDE_HOME"
     fi
-    
+
+    # Report other detected AI coding tools so users know what will be enabled.
+    if is_tool_installed "codex"; then
+        success "Codex CLI detected"
+    fi
+    if is_tool_installed "gemini"; then
+        success "Gemini CLI detected"
+    fi
+    if is_tool_installed "antigravity"; then
+        success "Antigravity CLI (agy) detected"
+    fi
+
     # Check notification system
     echo ""
     info "Checking notification system..."
@@ -1063,12 +1116,13 @@ show_voice_status() {
     fi
 
     # Per-tool voice
-    for tool in claude codex gemini; do
+    for tool in claude codex gemini antigravity; do
         local tool_display
         case "$tool" in
             "claude") tool_display="Claude" ;;
             "codex") tool_display="Codex" ;;
             "gemini") tool_display="Gemini" ;;
+            "antigravity") tool_display="Antigravity" ;;
         esac
 
         if is_voice_enabled "tool" "$tool"; then
@@ -1385,11 +1439,12 @@ show_alerts_status() {
     echo "  ${CYAN}cn alerts remove permission_prompt${RESET} # Stop permission notifications"
     echo "  ${CYAN}cn alerts reset${RESET}                   # Back to idle_prompt only"
     echo ""
-    dim "Alert-type matching applies to Claude Code, Codex PermissionRequest, and Gemini CLI hooks."
+    dim "Alert-type matching applies to Claude Code, Codex PermissionRequest, Gemini CLI, and Antigravity PreToolUse hooks."
     dim "Claude agent/team events are separate hooks and are opt-in."
     dim "For Codex, permission_prompt controls approval/edit PermissionRequest hooks; idle_prompt does not apply."
+    dim "For Antigravity, permission_prompt controls whether the approval (PreToolUse) hook is installed."
     echo ""
-    dim "After changing, run 'cn on' to apply the new settings."
+    dim "After changing, run 'cn on' (or 'cn on antigravity') to apply the new settings."
 }
 
 # Show available alert types

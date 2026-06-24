@@ -57,6 +57,9 @@ run_disable_all_alias_test() {
         source "$SCRIPT_DIR/../lib/code-notify/commands/global.sh"
 
         is_tool_enabled() { return 0; }
+        # The disable path keys on is_tool_disable_needed (antigravity reports
+        # "imported" rather than "enabled"); simulate every tool needing disable.
+        is_tool_disable_needed() { return 0; }
         disable_tool() {
             echo "$1" >> "$HOME/disabled-tools"
             return 0
@@ -66,7 +69,7 @@ run_disable_all_alias_test() {
 
         local disabled_tools
         disabled_tools="$(sort "$HOME/disabled-tools" | tr '\n' ' ')"
-        [[ "$disabled_tools" == "claude codex gemini " ]] || fail "cn off all did not disable every enabled tool"
+        [[ "$disabled_tools" == "antigravity claude codex gemini " ]] || fail "cn off all did not disable every enabled tool"
     )
 
     rm -rf "$test_dir"

@@ -163,6 +163,30 @@ else
     test_fail "codex payload parsing failed"
 fi
 
+# Test 14b: Antigravity (agy) event payloads map to the right notifications
+test_start "antigravity payload parsing"
+if bash tests/test-antigravity-notify.sh >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "antigravity payload parsing failed"
+fi
+
+# Test 14c: Antigravity status reads agy's managed plugin copy as ground truth
+test_start "antigravity status source"
+if bash tests/test-antigravity-status.sh >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "antigravity status source failed"
+fi
+
+# Test 14d: Antigravity hook commands survive spaces in the staging/HOME path
+test_start "antigravity spaced paths"
+if bash tests/test-antigravity-spaces.sh >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "antigravity spaced paths failed"
+fi
+
 # Test 15: Windows PowerShell status regex stays .NET-safe
 test_start "delivery channels"
 if bash tests/test-channels.sh >/dev/null 2>&1; then

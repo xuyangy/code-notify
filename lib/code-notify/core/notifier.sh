@@ -72,6 +72,12 @@ print(value if isinstance(value, str) else "", end="")
         "cwd")
             printf '%s' "$json" | sed -nE 's/.*"cwd"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
             ;;
+        "conversationId")
+            # Needed so Antigravity debounce tokens stay per-conversation even
+            # without jq/python3; otherwise every session collapses onto the
+            # default token and concurrent turns cancel each other's completion.
+            printf '%s' "$json" | sed -nE 's/.*"conversationId"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
+            ;;
     esac
 }
 
@@ -150,12 +156,191 @@ get_codex_project_name() {
     fi
 }
 
+# --- Antigravity CLI (agy) payload helpers ---
+# agy hooks deliver a JSON payload on stdin and pass no argv; the calling
+# wrapper encodes the lifecycle event as the first arg ("agy:<Event>").
+
+# Absolute path to this notifier, used to re-invoke ourselves from the
+# debounce watcher (notifier.sh does not source config.sh / get_notify_script).
+SELF_NOTIFIER="$NOTIFIER_DIR/$(basename "${BASH_SOURCE[0]}")"
+
+# Project name from the first workspace path (falls back to cwd).
+get_agy_project_name() {
+    local ws=""
+    if has_jq; then
+        ws=$(printf '%s' "$HOOK_DATA" | jq -r '(.workspacePaths[0] // "")' 2>/dev/null)
+    elif has_python3; then
+        ws=$(printf '%s' "$HOOK_DATA" | python3 -c '
+import json, sys
+try:
+    paths = json.load(sys.stdin).get("workspacePaths") or []
+    print(paths[0] if paths else "", end="")
+except Exception:
+    print("", end="")
+' 2>/dev/null)
+    fi
+    if [[ -n "$ws" ]]; then
+        basename "$ws"
+    else
+        basename "$PWD"
+    fi
+}
+
+# Returns non-empty when the payload reports a tool failure. agy may send
+# `error` as a plain string OR as a structured HookErrorMessage object, so a
+# string-only check would misclassify real failures as success.
+get_agy_error() {
+    if has_jq; then
+        printf '%s' "$HOOK_DATA" | jq -r '
+            (.error // empty) as $e
+            | if   ($e | type) == "string" then $e
+              elif ($e | type) == "object" then (if ($e | length) > 0 then ($e.message // "error") else "" end)
+              elif ($e | type) == "null"   then ""
+              else ($e | tostring) end' 2>/dev/null
+        return 0
+    fi
+    if has_python3; then
+        printf '%s' "$HOOK_DATA" | python3 -c '
+import json, sys
+try:
+    e = json.load(sys.stdin).get("error")
+except Exception:
+    e = None
+if e is None:
+    print("", end="")
+elif isinstance(e, str):
+    print(e, end="")
+elif isinstance(e, dict):
+    print((e.get("message") or "error") if e else "", end="")
+else:
+    print(str(e), end="")
+' 2>/dev/null
+        return 0
+    fi
+    # Last resort (no jq/python): regex on the raw payload. An empty string
+    # error (`"error":""`) is success; a non-empty string or an object
+    # (`"error":{...}`) is a failure. Matching the empty form first avoids
+    # misreading a structured failure as success.
+    if printf '%s' "$HOOK_DATA" | grep -Eq '"error"[[:space:]]*:[[:space:]]*""'; then
+        return 0
+    fi
+    if printf '%s' "$HOOK_DATA" | grep -Eq '"error"[[:space:]]*:[[:space:]]*("[^"]|\{)'; then
+        printf '%s' "error"
+    fi
+}
+
+get_agy_conversation_id() {
+    local cid
+    cid=$(json_extract_string "$HOOK_DATA" "conversationId")
+    printf '%s' "${cid:-default}"
+}
+
+# Debounce PostToolUse into a single "task complete": agy 1.0.11 fires no usable
+# Stop event, and PostToolUse fires after every step (including model-only
+# steps), so we treat the agent as done once step activity has been quiet for a
+# few seconds. Each call stamps a token and arms a detached watcher; only the
+# most recent watcher (whose token is still current after the quiet period)
+# sends the notification.
+#
+# Heuristic caveat (no real turn-end event exists yet): a single long model
+# generation that exceeds the quiet window can fire early. The quiet window
+# (CODE_NOTIFY_AGY_DEBOUNCE_SECONDS, default 8s) plus the global stop rate limit
+# keep this in check; repeated completions are not cooled down per conversation,
+# because that would also swallow legitimate completions of quick back-to-back
+# turns in the same session.
+
+# Path of the per-conversation debounce token. The token is the single source of
+# truth for "is a completion still pending": a newer step or an error overwrites
+# it, which cancels any watcher still sleeping on the old value.
+agy_debounce_tokenfile() {
+    local state_dir cid_safe
+    state_dir="$HOME/.claude/notifications/agy"
+    mkdir -p "$state_dir"
+    # Inline sanitize: sanitize_rate_limit_key is defined later in this file
+    # than these helpers are invoked, so we can't rely on it here.
+    cid_safe="$(get_agy_conversation_id | tr -c 'A-Za-z0-9._-' '_')"
+    printf '%s/%s.token' "$state_dir" "$cid_safe"
+}
+
+# Cancel any pending debounced completion for this conversation. Used when a
+# later step reports an error: that error supersedes the earlier "looks done"
+# guess, so we must not also fire a "task complete".
+cancel_agy_debounced_stop() {
+    printf 'cancelled-%s-%s' "$(date +%s)" "$RANDOM" > "$(agy_debounce_tokenfile)" 2>/dev/null || true
+}
+
+schedule_agy_debounced_stop() {
+    local tokenfile token delay
+    tokenfile="$(agy_debounce_tokenfile)"
+    token="$(date +%s)-$$-$RANDOM"
+    printf '%s' "$token" > "$tokenfile"
+    delay="${CODE_NOTIFY_AGY_DEBOUNCE_SECONDS:-8}"
+
+    (
+        sleep "$delay"
+        # Only the latest activity wins; a newer step or an error overwrites the
+        # token, so earlier/cancelled watchers bail out here.
+        [[ "$(cat "$tokenfile" 2>/dev/null)" == "$token" ]] || exit 0
+        printf '%s' "$HOOK_DATA" | "$SELF_NOTIFIER" "agy:StopFinal" "antigravity" >/dev/null 2>&1
+    ) >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+}
+
+AGY_FORCED_SUBTYPE=""
 HOOK_DATA=""
 if [[ "$RAW_ARG1" == "codex" ]]; then
     TOOL_NAME="codex"
     HOOK_DATA="$RAW_ARG2"
     HOOK_TYPE=$(get_codex_hook_type)
     PROJECT_NAME="${RAW_ARG3:-$(get_codex_project_name)}"
+elif [[ "$RAW_ARG1" == agy:* ]]; then
+    # Antigravity CLI: "agy:<Event>" + payload on stdin.
+    TOOL_NAME="antigravity"
+    AGY_EVENT="${RAW_ARG1#agy:}"
+    if [[ ! -t 0 ]]; then
+        HOOK_DATA=$(cat 2>/dev/null || true)
+    fi
+    PROJECT_NAME="$(get_agy_project_name)"
+    case "$AGY_EVENT" in
+        PreToolUse)
+            # Fires while agy waits for the user to approve a tool call. The
+            # agent is about to do more work, so any pending "looks done" guess
+            # is wrong — cancel it (a slow approval can otherwise outlast the
+            # debounce window and fire a bogus "task complete").
+            HOOK_TYPE="notification"
+            AGY_FORCED_SUBTYPE="permission_prompt"
+            cancel_agy_debounced_stop
+            ;;
+        PostToolUse)
+            if [[ -n "$(get_agy_error)" ]]; then
+                # A failing step supersedes any earlier "looks done" guess, so
+                # cancel the pending debounce before raising the error alert.
+                HOOK_TYPE="error"
+                cancel_agy_debounced_stop
+            else
+                HOOK_TYPE="agy_debounce_stop"
+            fi
+            ;;
+        StopFinal)
+            # Emitted by our own debounce watcher once step activity went quiet.
+            # The completion it carries is already validated, so just deliver it.
+            # Do NOT cancel here: a PostToolUse for a newer turn may have armed a
+            # fresh watcher while this one was delivering, and cancelling would
+            # swallow that turn's legitimate completion.
+            HOOK_TYPE="stop"
+            ;;
+        Stop)
+            # Native lifecycle Stop (inert in agy 1.0.11, ready for when it
+            # lands). A real turn-end supersedes our PostToolUse guess, so cancel
+            # any pending debounced completion for this conversation to avoid a
+            # duplicate "task complete" from the watcher.
+            HOOK_TYPE="stop"
+            cancel_agy_debounced_stop
+            ;;
+        *)
+            HOOK_TYPE="stop"
+            ;;
+    esac
 else
     HOOK_TYPE=${CLAUDE_HOOK_TYPE:-$RAW_ARG1}
     TOOL_NAME="${RAW_ARG2:-""}"
@@ -167,6 +352,13 @@ else
     fi
 fi
 
+# Antigravity PostToolUse with no error: arm the debounced "task complete" and
+# return immediately (no banner for intermediate steps).
+if [[ "$HOOK_TYPE" == "agy_debounce_stop" ]]; then
+    schedule_agy_debounced_stop
+    exit 0
+fi
+
 # Get display name for tool
 get_tool_display_name() {
     local tool="$1"
@@ -174,6 +366,7 @@ get_tool_display_name() {
         "claude") echo "Claude" ;;
         "codex") echo "Codex" ;;
         "gemini") echo "Gemini" ;;
+        "antigravity") echo "Antigravity" ;;
         *) echo "AI" ;;
     esac
 }
@@ -485,7 +678,13 @@ should_suppress_notification() {
 # the dominant pre-banner cost).
 NOTIFICATION_SUBTYPE=""
 if [[ "$HOOK_TYPE" == "notification" ]]; then
-    NOTIFICATION_SUBTYPE=$(get_notification_subtype)
+    if [[ -n "$AGY_FORCED_SUBTYPE" ]]; then
+        # Antigravity hooks carry no type tokens in the payload, so the
+        # wrapper-declared subtype (e.g. permission_prompt) is authoritative.
+        NOTIFICATION_SUBTYPE="$AGY_FORCED_SUBTYPE"
+    else
+        NOTIFICATION_SUBTYPE=$(get_notification_subtype)
+    fi
 fi
 
 # Map the current event to the canonical key stored by `cn alerts persist add`.
@@ -520,8 +719,10 @@ notification_is_persistent() {
     [[ "$PERSIST_ACTIVE" == "1" ]]
 }
 
-# Check if notification should be suppressed
-if [[ "$HOOK_TYPE" == "stop" ]] || [[ "$HOOK_TYPE" == "notification" ]] || [[ "$HOOK_TYPE" == "PreToolUse" ]] || is_claude_event_hook; then
+# Check if notification should be suppressed. "error" is included so that the
+# kill switch (cn off) and snooze silence failure alerts too — they are still
+# notifications and must honour an explicit request for quiet.
+if [[ "$HOOK_TYPE" == "stop" ]] || [[ "$HOOK_TYPE" == "notification" ]] || [[ "$HOOK_TYPE" == "error" ]] || [[ "$HOOK_TYPE" == "PreToolUse" ]] || is_claude_event_hook; then
     if should_suppress_notification; then
         exit 0
     fi

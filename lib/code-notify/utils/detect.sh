@@ -121,6 +121,18 @@ detect_gemini_cli() {
     return 1
 }
 
+# Detect Antigravity CLI (agy) installation
+detect_antigravity() {
+    # Check if the agy command exists (Antigravity CLI, successor to Gemini CLI)
+    if command -v agy &> /dev/null; then
+        # Return config location
+        local config_dir="$HOME/.gemini/antigravity-cli"
+        echo "$config_dir"
+        return 0
+    fi
+    return 1
+}
+
 # Get list of all installed AI coding tools
 get_installed_tools() {
     local tools=()
@@ -135,6 +147,10 @@ get_installed_tools() {
 
     if detect_gemini_cli &> /dev/null; then
         tools+=("gemini")
+    fi
+
+    if detect_antigravity &> /dev/null; then
+        tools+=("antigravity")
     fi
 
     # Return space-separated list
@@ -154,6 +170,9 @@ is_tool_installed() {
             ;;
         "gemini")
             detect_gemini_cli &> /dev/null
+            ;;
+        "antigravity")
+            detect_antigravity &> /dev/null
             ;;
         *)
             return 1

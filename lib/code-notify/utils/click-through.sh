@@ -325,6 +325,14 @@ ${BOLD}EXAMPLES:${RESET}
     cn click-through remove
     cn click-through reset
 
+${BOLD}ENVIRONMENT:${RESET}
+    ${CYAN}CODE_NOTIFY_CLICK_BUNDLE_ID${RESET}   Force the bundle ID to activate on click,
+                                  overriding all detection. Use this for
+                                  headless/daemon/background sessions that have
+                                  no detectable terminal (e.g. export it in
+                                  ~/.zshenv as com.googlecode.iterm2). Without it,
+                                  such sessions fall back to com.apple.Terminal.
+
 EOF
 }
 

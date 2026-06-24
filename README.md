@@ -49,7 +49,7 @@ cn usage status
 
 ## Features
 
-- **Multi-tool support** - Claude Code, OpenAI Codex, Google Gemini CLI
+- **Multi-tool support** - Claude Code, OpenAI Codex, Google Gemini CLI, Google Antigravity CLI (`agy`)
 - **Works everywhere** - Terminal, VSCode, Cursor, or any editor
 - **Cross-platform** - macOS, Linux, Windows
 - **Native notifications** - Uses system notification APIs
@@ -122,6 +122,7 @@ See [docs/installation.md](docs/installation.md) for more details.
 | `cn on claude`       | Enable for Claude Code only                  |
 | `cn on codex`        | Enable Codex hooks and suppress duplicate Codex TUI toasts |
 | `cn on gemini`       | Enable for Gemini CLI only                   |
+| `cn on antigravity`  | Enable for Antigravity CLI (`agy`); `cn on agy` also works |
 | `cn off`             | Disable notifications                        |
 | `cn off all`         | Explicit alias for disabling all tools       |
 | `cn test`            | Send test notification                       |
@@ -154,8 +155,17 @@ Code-Notify uses the hook systems built into AI coding tools:
 - **Claude Code**: `~/.claude/settings.json`
 - **Codex**: `~/.codex/hooks.json`
 - **Gemini CLI**: `~/.gemini/settings.json`
+- **Antigravity CLI (`agy`)**: imported plugin at `~/.claude/notifications/agy-plugin/` (registered with `agy plugin install`)
 
 For Codex, Code-Notify configures `~/.codex/hooks.json` with Codex lifecycle hooks and disables Codex TUI notifications in `~/.codex/config.toml` to avoid duplicate toasts. The `Stop` hook sends task-complete notifications. When `permission_prompt` is enabled, Code-Notify also adds a `PermissionRequest` hook for approval/edit requests.
+
+For Antigravity CLI, Code-Notify builds a small plugin and registers it with `agy plugin install`. Antigravity hooks receive their payload on stdin and pass no arguments, so each event runs a tiny wrapper that pipes the payload into the notifier. The mapping reflects what `agy` actually executes today (tested against `agy` 1.0.11):
+
+- **Input needed** — a `PreToolUse` hook (scoped to `run_command`) fires while `agy` waits for you to approve a command. Registered only when the `permission_prompt` alert type is enabled.
+- **Task complete** — `agy` has no working `Stop`/lifecycle hook yet, so completion is inferred by debouncing `PostToolUse`: once tool activity has been quiet for a few seconds (`CODE_NOTIFY_AGY_DEBOUNCE_SECONDS`, default 8), a single "task complete" notification fires. A native `Stop` hook is also installed and will take over automatically if a future `agy` build runs it.
+- **Errors** — a failing `PostToolUse` (string or structured error) fires an immediate failure alert and cancels any pending "task complete" for that step.
+
+Disable everything with `cn off antigravity`, which runs `agy plugin uninstall code-notify`.
 
 For Claude Code, it adds hooks like:
 
@@ -246,7 +256,7 @@ cn alerts reset                    # Back to default (idle_prompt only)
 | `TaskCreated`        | Claude agent-team task was created             |
 | `TaskCompleted`      | Claude agent-team task completed               |
 
-Alert-type matching applies to Claude Code notification hooks, Codex `PermissionRequest` hooks, and Gemini CLI notification hooks. `ask_user` is a Claude-only `PreToolUse` hook for `AskUserQuestion`; it is applied immediately when Claude notifications are already enabled. Claude Code agent/team events are separate hook events and are opt-in via `cn alerts add SubagentStop`, `cn alerts add TeammateIdle`, or `cn alerts add TaskCompleted`. After changing alert types, run `cn on` or `cn on codex` again to rewrite the managed hooks.
+Alert-type matching applies to Claude Code notification hooks, Codex `PermissionRequest` hooks, Gemini CLI notification hooks, and the Antigravity CLI `PreToolUse` hook. For Antigravity, `permission_prompt` controls whether the approval (`PreToolUse`) alert is installed. `ask_user` is a Claude-only `PreToolUse` hook for `AskUserQuestion`; it is applied immediately when Claude notifications are already enabled. Claude Code agent/team events are separate hook events and are opt-in via `cn alerts add SubagentStop`, `cn alerts add TeammateIdle`, or `cn alerts add TaskCompleted`. After changing alert types, run `cn on` or `cn on codex` (or `cn on antigravity`) again to rewrite the managed hooks.
 
 Agent-team and subagent workflows can be noisy if `permission_prompt` is enabled. If you only want idle pings for Claude/Gemini and completion alerts for Codex, run `cn alerts remove permission_prompt && cn on`. Codex does not expose an `idle_prompt` hook through Code-Notify; `permission_prompt` controls Codex approval/edit alerts through `PermissionRequest`.
 
@@ -420,6 +430,12 @@ brew install terminal-notifier  # Better notifications (macOS)
 ```bash
 cn click-through add PhpStorm
 cn test
+```
+
+For headless, daemon, or background sessions (e.g. Claude Code's background runner) there is no terminal to detect, so clicks fall back to Apple Terminal. Force the target app by exporting its bundle ID — for example in `~/.zshenv` so the session inherits it:
+
+```bash
+export CODE_NOTIFY_CLICK_BUNDLE_ID=com.googlecode.iterm2   # overrides all detection
 ```
 
 **Updating?**

@@ -93,55 +93,140 @@ esac
 INSTALL_DIR="$HOME/.code-notify"
 echo "Installing to: $INSTALL_DIR"
 
-# Create directories
-mkdir -p "$INSTALL_DIR/bin"
-mkdir -p "$INSTALL_DIR/lib/code-notify/commands"
-mkdir -p "$INSTALL_DIR/lib/code-notify/core"
-mkdir -p "$INSTALL_DIR/lib/code-notify/utils"
 mkdir -p "$HOME/.claude/notifications"
 
 # GitHub raw URL base
 GITHUB_RAW="https://raw.githubusercontent.com/xuyangy/code-notify/main"
 
-# Check if running locally (repo exists) or via curl (need to download)
-if [[ -d "bin" ]] && [[ -d "lib" ]]; then
-    echo "Installing from local files..."
-    cp -r bin/* "$INSTALL_DIR/bin/"
-    cp -r lib/* "$INSTALL_DIR/lib/"
-else
-    echo "Downloading files from GitHub..."
-
-    # Download main script
-    curl -fsSL "$GITHUB_RAW/bin/code-notify" -o "$INSTALL_DIR/bin/code-notify"
-
-    # Download lib files
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/commands/global.sh" -o "$INSTALL_DIR/lib/code-notify/commands/global.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/commands/project.sh" -o "$INSTALL_DIR/lib/code-notify/commands/project.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/core/config.sh" -o "$INSTALL_DIR/lib/code-notify/core/config.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/core/notifier.sh" -o "$INSTALL_DIR/lib/code-notify/core/notifier.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/colors.sh" -o "$INSTALL_DIR/lib/code-notify/utils/colors.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/detect.sh" -o "$INSTALL_DIR/lib/code-notify/utils/detect.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/help.sh" -o "$INSTALL_DIR/lib/code-notify/utils/help.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/voice.sh" -o "$INSTALL_DIR/lib/code-notify/utils/voice.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/sound.sh" -o "$INSTALL_DIR/lib/code-notify/utils/sound.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/channels.sh" -o "$INSTALL_DIR/lib/code-notify/utils/channels.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/usage.sh" -o "$INSTALL_DIR/lib/code-notify/utils/usage.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/click-through.sh" -o "$INSTALL_DIR/lib/code-notify/utils/click-through.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/click-through-store.sh" -o "$INSTALL_DIR/lib/code-notify/utils/click-through-store.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/click-through-runtime.sh" -o "$INSTALL_DIR/lib/code-notify/utils/click-through-runtime.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/click-through-resolver.sh" -o "$INSTALL_DIR/lib/code-notify/utils/click-through-resolver.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/persist.sh" -o "$INSTALL_DIR/lib/code-notify/utils/persist.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/snooze.sh" -o "$INSTALL_DIR/lib/code-notify/utils/snooze.sh"
-    curl -fsSL "$GITHUB_RAW/lib/code-notify/utils/tmux.sh" -o "$INSTALL_DIR/lib/code-notify/utils/tmux.sh"
+# Resolve the repo root from this script's real on-disk location. Only treat it
+# as a local checkout when the script is an actual file AND the repository
+# markers are present below. This avoids false positives such as `curl | bash`
+# (BASH_SOURCE is empty) or `/tmp/install.sh` (SOURCE_DIR would resolve to /,
+# where /bin and /lib exist) wrongly copying unrelated system directories.
+SOURCE_DIR=""
+if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
+    SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 
-# Update paths in the main script
-sed -i.bak "s|\$(dirname \"\$SCRIPT_DIR\")/lib/code-notify|$INSTALL_DIR/lib/code-notify|g" "$INSTALL_DIR/bin/code-notify"
-rm "$INSTALL_DIR/bin/code-notify.bak"
+# True only when SOURCE_DIR is a genuine code-notify checkout.
+is_local_checkout() {
+    [[ -n "$SOURCE_DIR" \
+        && -f "$SOURCE_DIR/bin/code-notify" \
+        && -f "$SOURCE_DIR/lib/code-notify/core/notifier.sh" ]]
+}
 
-# Make executable
-chmod +x "$INSTALL_DIR/bin/code-notify"
-chmod +x "$INSTALL_DIR/lib/code-notify/core/notifier.sh"
+# Files that must be present and non-empty for a usable install. Keep this in
+# sync with lib/; the validation step below turns a missing entry into a hard
+# error instead of a silently broken install.
+REQUIRED_FILES=(
+    "bin/code-notify"
+    "lib/code-notify/commands/global.sh"
+    "lib/code-notify/commands/project.sh"
+    "lib/code-notify/core/config.sh"
+    "lib/code-notify/core/notifier.sh"
+    "lib/code-notify/utils/colors.sh"
+    "lib/code-notify/utils/detect.sh"
+    "lib/code-notify/utils/help.sh"
+    "lib/code-notify/utils/voice.sh"
+    "lib/code-notify/utils/tts.sh"
+    "lib/code-notify/utils/sound.sh"
+    "lib/code-notify/utils/channels.sh"
+    "lib/code-notify/utils/usage.sh"
+    "lib/code-notify/utils/click-through.sh"
+    "lib/code-notify/utils/click-through-store.sh"
+    "lib/code-notify/utils/click-through-runtime.sh"
+    "lib/code-notify/utils/click-through-resolver.sh"
+    "lib/code-notify/utils/persist.sh"
+    "lib/code-notify/utils/snooze.sh"
+    "lib/code-notify/utils/tmux.sh"
+)
+
+# Stage the new files in a temp dir on the SAME filesystem as the install
+# target, validate them, then atomically swap into place. A network failure or
+# interrupted copy can therefore never corrupt an existing installation: the
+# live directory is only touched once a complete, validated tree is ready.
+STAGING_DIR="$(mktemp -d "${INSTALL_DIR}.tmp.XXXXXX")"
+BACKUP_DIR=""
+INSTALL_ACTIVATED=0
+INSTALL_COMMITTED=0
+cleanup() {
+    rm -rf "$STAGING_DIR"
+    if [[ "$INSTALL_COMMITTED" -eq 1 ]]; then
+        # Every fallible step succeeded: drop the rollback copy.
+        [[ -n "$BACKUP_DIR" ]] && rm -rf "$BACKUP_DIR"
+        return 0
+    fi
+    # Failed somewhere (including after activation, e.g. symlink setup): undo any
+    # changes so the previous installation is left exactly as it was.
+    if [[ -n "$BACKUP_DIR" && -d "$BACKUP_DIR" ]]; then
+        rm -rf "$INSTALL_DIR"
+        mv "$BACKUP_DIR" "$INSTALL_DIR"
+    elif [[ "$INSTALL_ACTIVATED" -eq 1 ]]; then
+        # Fresh install with no prior tree to restore: remove the partial one.
+        rm -rf "$INSTALL_DIR"
+    fi
+    return 0
+}
+trap cleanup EXIT
+
+abort() {
+    echo -e "${RED}Error: $1${RESET}" >&2
+    echo "Your existing installation was left untouched." >&2
+    exit 1
+}
+
+mkdir -p "$STAGING_DIR/bin"
+mkdir -p "$STAGING_DIR/lib/code-notify/commands"
+mkdir -p "$STAGING_DIR/lib/code-notify/core"
+mkdir -p "$STAGING_DIR/lib/code-notify/utils"
+
+# Populate the staging dir from a local checkout when available, otherwise
+# download from GitHub.
+if is_local_checkout; then
+    echo "Installing from local files..."
+    cp -r "$SOURCE_DIR/bin/." "$STAGING_DIR/bin/"
+    cp -r "$SOURCE_DIR/lib/." "$STAGING_DIR/lib/"
+else
+    echo "Downloading files from GitHub..."
+    for rel in "${REQUIRED_FILES[@]}"; do
+        if ! curl -fsSL "$GITHUB_RAW/$rel" -o "$STAGING_DIR/$rel"; then
+            abort "failed to download $rel"
+        fi
+    done
+fi
+
+# Validate the staged tree before touching the live install.
+for rel in "${REQUIRED_FILES[@]}"; do
+    [[ -s "$STAGING_DIR/$rel" ]] || abort "$rel is missing or empty after staging"
+done
+
+# Catch a truncated download by syntax-checking the entrypoint.
+bash -n "$STAGING_DIR/bin/code-notify" || abort "staged code-notify failed syntax check"
+
+# Make executable.
+chmod +x "$STAGING_DIR/bin/code-notify"
+chmod +x "$STAGING_DIR/lib/code-notify/core/notifier.sh"
+
+# Carry over user data stored inside the install tree so the swap below (which
+# replaces the whole directory) does not discard it on update.
+PRESERVE_FILES=(
+    "click-through.conf"
+)
+for rel in "${PRESERVE_FILES[@]}"; do
+    if [[ -e "$INSTALL_DIR/$rel" ]]; then
+        mkdir -p "$STAGING_DIR/$(dirname "$rel")"
+        cp -p "$INSTALL_DIR/$rel" "$STAGING_DIR/$rel"
+    fi
+done
+
+# Atomically swap the validated tree into place.
+if [[ -e "$INSTALL_DIR" ]]; then
+    BACKUP_DIR="${INSTALL_DIR}.bak.$$"
+    rm -rf "$BACKUP_DIR"
+    mv "$INSTALL_DIR" "$BACKUP_DIR"
+fi
+mv "$STAGING_DIR" "$INSTALL_DIR" || abort "failed to activate new installation"
+INSTALL_ACTIVATED=1
 
 # Create symlinks in a directory that's likely in PATH
 if [[ -d "$HOME/.local/bin" ]]; then
@@ -157,6 +242,10 @@ fi
 ln -sf "$INSTALL_DIR/bin/code-notify" "$BIN_DIR/code-notify"
 ln -sf "$INSTALL_DIR/bin/code-notify" "$BIN_DIR/cn"
 ln -sf "$INSTALL_DIR/bin/code-notify" "$BIN_DIR/cnp"
+
+# All fallible installation steps have succeeded; the new tree is now the
+# committed installation and the rollback copy can be discarded on exit.
+INSTALL_COMMITTED=1
 
 # Repair stale Claude hooks from older claude-notify installs when present.
 "$INSTALL_DIR/bin/code-notify" repair-hooks --quiet || true

@@ -254,7 +254,14 @@ except Exception:
 ' 2>/dev/null
         return 0
     fi
-    json_extract_string "$HOOK_DATA" "name"
+    # sed fallback (no jq/python3): json_extract_string only knows top-level
+    # keys, and a bare "name" match could hit any other "name" key in the
+    # payload. Scope the match to the toolCall object instead; [^{}]* keeps it
+    # from crossing into a nested object, so an unmatched payload (name after a
+    # nested object, or pretty-printed across lines) yields "" — no banner,
+    # same as a model-only step.
+    printf '%s' "$HOOK_DATA" | sed -nE \
+        's/.*"toolCall"[[:space:]]*:[[:space:]]*\{[^{}]*"name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
 }
 
 # True when permission_prompt alerts are enabled. The notifier does not source

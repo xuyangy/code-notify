@@ -55,7 +55,7 @@ cn usage status
 - **Native notifications** - Uses system notification APIs
 - **macOS click-through control** - Choose which app notification clicks activate
 - **tmux click-to-focus** - Clicking a notification jumps to the exact tmux window/pane the tool runs in (macOS; uses [alerter](https://github.com/vjeantet/alerter) for persistent alerts when installed)
-- **tmux window badges** - The originating tmux window's name gets the event icon prepended ("🎯 zsh"), so pending work is visible in the status line; the badge clears when you visit the window or (macOS) click the notification, and renaming a badged window yourself keeps your name. Disable with `CODE_NOTIFY_TMUX_BADGE=false` or `touch ~/.claude/notifications/tmux-badge-disabled`
+- **tmux window badges** - The originating tmux window's name gets the event icon prepended ("🎯 zsh"), so pending work is visible in the status line; the badge clears the moment you switch to the window (manually, by clicking the notification, or via terminal-notifier `-focusLast`), and renaming a badged window yourself keeps your name. Disable with `CODE_NOTIFY_TMUX_BADGE=false` or `touch ~/.claude/notifications/tmux-badge-disabled`
 - **Sound notifications** - Play custom sounds on task completion
 - **Voice announcements** - Hear when tasks complete (macOS, Windows)
 - **ElevenLabs voices** - Optional high-quality cloud TTS for voice announcements (macOS)

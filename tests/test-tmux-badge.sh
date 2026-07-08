@@ -213,6 +213,102 @@ tmux_badge_sweep
 [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "sweep should unset options on the visited window"
 [[ -f "$state_dir/@5.@code_notify_orig_name" ]] || fail "sweep must not touch a badged window that is still hidden"
 pass "sweep clears visited windows only"
+rm -f "$state_dir/@5.@code_notify_orig_name"
+export FAKE_TMUX_WINDOWS=""
+
+# --- badge-set arms the focus-clear server hook ---
+: > "$log_file"
+tmux_badge_set "🎯" || fail "badge for hook-install test should succeed"
+grep -qF "set-hook -g session-window-changed[8471]" "$log_file" \
+    || fail "badge-set should install the session-window-changed focus hook"
+grep -qF "set-hook -g client-session-changed[8471]" "$log_file" \
+    || fail "badge-set should install the client-session-changed focus hook"
+grep -q "badge-sweep" "$log_file" || fail "focus hook should invoke badge-sweep"
+pass "badge-set arms the focus-clear hook"
+
+# --- the hook entry point (`tmux.sh badge-sweep`) clears from a subprocess ---
+# This is exactly what the tmux hook runs: a fresh `bash tmux.sh badge-sweep`,
+# with no TMUX_PANE. It must still clear the now-visible badged window.
+export FAKE_TMUX_WINDOWS=$'@2|1|zsh'
+env -u TMUX_PANE bash "$ROOT_DIR/lib/code-notify/utils/tmux.sh" badge-sweep
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "badge-sweep subcommand should clear the visited window (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] \
+    || fail "badge-sweep subcommand should drop the badge state"
+export FAKE_TMUX_WINDOWS=""
+pass "badge-sweep subcommand clears without TMUX_PANE"
+
+# --- sweep is a no-op with no tmux server (TMUX unset) ---
+tmux_badge_set "🎯" || fail "badge for no-server sweep should succeed"
+: > "$log_file"
+( unset TMUX; tmux_badge_sweep )
+grep -q "list-windows" "$log_file" && fail "sweep should not query tmux when TMUX is unset"
+tmux_badge_clear "@2"
+export FAKE_TMUX_WINDOWS=""
+pass "sweep no-ops without a tmux server"
+
+# --- sweep retires the focus hook once no badge remains ---
+tmux_badge_set "🎯" || fail "badge for hook-retire test should succeed"
+export FAKE_TMUX_WINDOWS=$'@2|1|zsh'   # the only badged window, now visible
+: > "$log_file"
+tmux_badge_sweep
+[[ "$(window_name)" == "zsh" ]] || fail "sweep should clear the last badge"
+grep -qF "set-hook -gu session-window-changed[8471]" "$log_file" \
+    || fail "sweep should retire the session hook when no badge remains"
+grep -qF "set-hook -gu client-session-changed[8471]" "$log_file" \
+    || fail "sweep should retire the client hook when no badge remains"
+export FAKE_TMUX_WINDOWS=""
+pass "sweep retires the focus hook when no badge remains"
+
+# --- sweep keeps the hook while a badged window is still hidden ---
+tmux_badge_set "🎯" || fail "badge for hook-keep test should succeed"
+printf '%s' "other" > "$state_dir/@5.@code_notify_orig_name"
+export FAKE_TMUX_WINDOWS=$'@2|1|zsh\n@5|0|other'   # @5 still hidden + badged
+: > "$log_file"
+tmux_badge_sweep
+grep -qF "set-hook -gu session-window-changed[8471]" "$log_file" \
+    && fail "sweep must not retire the hook while a badge is still pending"
+rm -f "$state_dir/@5.@code_notify_orig_name"
+export FAKE_TMUX_WINDOWS=""
+pass "sweep keeps the focus hook while a badge is still pending"
+
+# --- focus hook self-retires when the lib has been uninstalled ---
+# The hook payload embeds an absolute lib path that can outlive the install.
+# With the lib gone the guard must unset both hooks via the embedded tmux
+# binary + socket (run-shell guarantees neither PATH nor $TMUX) instead of
+# erroring on every window switch forever. Exercised exactly as tmux would:
+# the payload is pulled out of the recorded set-hook call and run with /bin/sh.
+lib_copy="$test_dir/lib-copy.sh"
+cp "$ROOT_DIR/lib/code-notify/utils/tmux.sh" "$lib_copy"
+saved_lib_path="$TMUX_BADGE_LIB_PATH"
+TMUX_BADGE_LIB_PATH="$lib_copy"
+: > "$log_file"
+tmux_badge_set "🎯" || fail "badge for self-retire test should succeed"
+grep -qF 'run-shell -b "if [ -f ' "$log_file" \
+    || fail "hook payload should guard on the lib file existing"
+payload=$(sed -n 's/^set-hook -g session-window-changed\[8471\] run-shell -b "\(.*\)"$/\1/p' "$log_file" | head -n 1)
+[[ -n "$payload" ]] || fail "hook payload should be extractable from the set-hook call"
+
+# lib still present: the payload's sweep branch clears the visible badge
+export FAKE_TMUX_WINDOWS=$'@2|1|zsh'
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "hook payload should run cleanly with the lib present"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "hook payload should sweep the badge while the lib exists (got: $(window_name))"
+export FAKE_TMUX_WINDOWS=""
+
+# lib gone: the payload unsets both hooks through the embedded tmux + socket
+tmux_badge_set "🎯" || fail "re-badge for self-retire test should succeed"
+rm -f "$lib_copy"
+: > "$log_file"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "hook payload should exit 0 with the lib missing"
+grep -qF -- "-S $test_dir/sock set-hook -gu session-window-changed[8471]" "$log_file" \
+    || fail "payload should self-retire the session hook when the lib is gone"
+grep -qF -- "-S $test_dir/sock set-hook -gu client-session-changed[8471]" "$log_file" \
+    || fail "payload should self-retire the client hook when the lib is gone"
+grep -q "list-windows" "$log_file" && fail "payload must not attempt a sweep when the lib is gone"
+tmux_badge_clear "@2"
+TMUX_BADGE_LIB_PATH="$saved_lib_path"
+pass "focus hook self-retires when the lib is gone"
 
 # --- clear command structure ---
 cmd=$(tmux_badge_build_clear_command) || fail "clear command should build inside tmux"

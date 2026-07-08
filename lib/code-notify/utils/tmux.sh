@@ -93,10 +93,19 @@ tmux_focus_build_command() {
 # from anywhere in the session. Badge state lives in tmux window options
 # (@code_notify_orig_name, @code_notify_autorename, @code_notify_badged_name)
 # so it survives across hook processes and clears from any of them:
-#   - clicking the notification (macOS only — the clear command rides the
-#     notifier's click handler; Linux notify-send has no click hook)
-#   - visiting the window (tmux_badge_sweep on the next notification, all
-#     platforms)
+#   - visiting the window: a server hook (session-window-changed /
+#     client-session-changed, installed lazily when the first badge is set)
+#     sweeps the moment the window becomes active — whether the user switched
+#     manually, clicked the notification, or used terminal-notifier -focusLast
+#     (all run select-window / switch-client, which fire the hook)
+#   - the next notification also sweeps, so badges converge even on a tmux
+#     server that predates the hook install
+#   - clicking the notification additionally rides the notifier's own click
+#     handler (macOS -execute); Linux notify-send has no click hook
+#
+# The hook is retired the moment the last badge clears, so idle window
+# switching (no badge pending — the common case) spawns nothing; the next badge
+# re-arms it. Cost is therefore paid only while a badge is actually outstanding.
 #
 # rename-window implicitly turns off automatic-rename for the window, so the
 # original setting is saved alongside the name and restored on clear.
@@ -112,8 +121,55 @@ tmux_focus_build_command() {
 
 TMUX_BADGE_DISABLED_FILE="$HOME/.claude/notifications/tmux-badge-disabled"
 
+# Absolute path to this library, so the tmux focus hook can re-invoke it as a
+# script (bash <this> badge-sweep). Resolved at source time.
+TMUX_BADGE_LIB_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+# Fixed array index for our server hooks: reusing one index means re-setting on
+# every badge overwrites in place (no stacking) while leaving the user's own
+# hooks at other indices untouched. Overridable only for tests.
+TMUX_BADGE_HOOK_INDEX="${CODE_NOTIFY_TMUX_HOOK_INDEX:-8471}"
+
 tmux_badge_enabled() {
     [[ "${CODE_NOTIFY_TMUX_BADGE:-}" != "false" ]] && [[ ! -f "$TMUX_BADGE_DISABLED_FILE" ]]
+}
+
+# Install the server hook that clears a window's badge the instant it becomes
+# active, so a manually switched-to (or focus-jumped) window sheds its badge
+# without waiting for the next notification. Idempotent: the fixed index makes
+# a repeat set overwrite rather than stack. session-window-changed covers
+# switching windows within a session; client-session-changed covers switching
+# between attached sessions. run-shell -b keeps tmux responsive.
+#
+# The hook embeds an absolute lib path that can outlive the install (uninstall
+# while a badge is pending), and a dangling hook would then error on every
+# window switch forever — the sweep that retires it can no longer run. So the
+# hook guards itself: if the lib is gone, it unsets both hooks and exits
+# silently. The tmux binary and socket are embedded for that self-retire
+# because run-shell's environment guarantees neither PATH nor $TMUX.
+tmux_badge_install_focus_hook() {
+    [[ -n "$TMUX_BADGE_LIB_PATH" ]] && [[ -f "$TMUX_BADGE_LIB_PATH" ]] || return 0
+    local tmux_bin socket_path q_lib q_tmux q_socket idx retire hook_cmd
+    tmux_bin=$(command -v tmux) || return 0
+    socket_path="${TMUX%%,*}"
+    [[ -n "$socket_path" ]] || return 0
+    q_lib=$(tmux_focus_shell_quote "$TMUX_BADGE_LIB_PATH")
+    q_tmux=$(tmux_focus_shell_quote "$tmux_bin")
+    q_socket=$(tmux_focus_shell_quote "$socket_path")
+    idx="$TMUX_BADGE_HOOK_INDEX"
+    retire="$q_tmux -S $q_socket set-hook -gu 'session-window-changed[$idx]'; "
+    retire+="$q_tmux -S $q_socket set-hook -gu 'client-session-changed[$idx]'"
+    hook_cmd="run-shell -b \"if [ -f $q_lib ]; then bash $q_lib badge-sweep; else $retire; fi\""
+    tmux set-hook -g "session-window-changed[$idx]" "$hook_cmd" 2>/dev/null
+    tmux set-hook -g "client-session-changed[$idx]" "$hook_cmd" 2>/dev/null
+}
+
+# Retire the focus hook. Called when the last badge clears, so idle window
+# switching (the common case — no badge pending) costs nothing until the next
+# badge re-arms it.
+tmux_badge_uninstall_focus_hook() {
+    tmux set-hook -gu "session-window-changed[$TMUX_BADGE_HOOK_INDEX]" 2>/dev/null
+    tmux set-hook -gu "client-session-changed[$TMUX_BADGE_HOOK_INDEX]" 2>/dev/null
 }
 
 # Whether a live window name is a badged form of the saved original: exactly
@@ -168,6 +224,9 @@ tmux_badge_set() {
     fi
     tmux rename-window -t "$window_id" "$icon $orig_name" 2>/dev/null || return 1
     tmux set-option -w -t "$window_id" @code_notify_badged_name "$icon $orig_name" 2>/dev/null
+    # A badge now exists, so arm the focus hook that clears it on the next
+    # visit. Cheap and idempotent, so setting it per badge is fine.
+    tmux_badge_install_focus_hook
 }
 
 # Restore a badged window: original name back, automatic-rename re-enabled if
@@ -205,14 +264,27 @@ tmux_badge_clear() {
 # tmux_badge_enabled — badges left over from before the feature was disabled
 # should still be cleaned up.
 tmux_badge_sweep() {
-    tmux_focus_available || return 0
-    local window_id visible orig
+    # Only needs to be inside a tmux server with a tmux binary; unlike badge-set
+    # it never touches the current pane, so it must not require TMUX_PANE (the
+    # focus hook's run-shell context may not set it).
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local window_id visible orig remaining=0
     while IFS='|' read -r window_id visible orig; do
         [[ -n "$orig" ]] || continue
-        [[ "$visible" == "1" ]] || continue
-        tmux_badge_clear "$window_id"
+        if [[ "$visible" == "1" ]]; then
+            tmux_badge_clear "$window_id"   # clear always drops the orig-name option
+        else
+            remaining=$((remaining + 1))    # badged but still hidden
+        fi
     done < <(tmux list-windows -a -F \
         '#{window_id}|#{&&:#{window_active},#{session_attached}}|#{@code_notify_orig_name}' 2>/dev/null)
+    # With no badge left anywhere, retire the focus hook so it stops spawning a
+    # sweep on every window switch until the next badge re-arms it. Kept as an
+    # explicit if (not `&& ...`) so the function still returns 0 when a badge
+    # remains — a trailing false would trip callers running under `set -e`.
+    if [[ "$remaining" -eq 0 ]]; then
+        tmux_badge_uninstall_focus_hook
+    fi
 }
 
 # Build the command a notifier click handler runs to clear the badge on the
@@ -267,3 +339,12 @@ tmux_badge_build_clear_command() {
 
     printf '%s' "$cmd"
 }
+
+# When run as a script (the tmux focus hook does `bash <this> badge-sweep`)
+# rather than sourced, dispatch the requested subcommand. Sourcing — the normal
+# path, where BASH_SOURCE[0] differs from $0 — skips this entirely.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    case "${1:-}" in
+        badge-sweep) tmux_badge_sweep ;;
+    esac
+fi

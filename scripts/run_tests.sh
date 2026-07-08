@@ -255,6 +255,14 @@ else
     test_fail "tmux click-to-focus failed"
 fi
 
+# Test: notifications badge the originating tmux window name with the event icon
+test_start "tmux window badge"
+if bash tests/test-tmux-badge.sh >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "tmux window badge failed"
+fi
+
 # Test 19: click-through commands persist mappings and drive notifier activation
 test_start "click-through commands"
 if bash tests/test-click-through.sh >/dev/null 2>&1; then

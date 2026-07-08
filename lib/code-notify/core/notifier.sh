@@ -797,10 +797,15 @@ choose_random_message() {
     printf '%s\n' "${messages[$((RANDOM % count))]}"
 }
 
-# Set notification parameters based on hook type and tool
+# Set notification parameters based on hook type and tool.
+# BADGE_ICON marks the originating tmux window's name (see tmux_badge_set);
+# events without one (usage alerts fire from the background watcher, not the
+# user's pane) skip the badge.
+BADGE_ICON=""
 case "$HOOK_TYPE" in
     "stop")
         TITLE="$TOOL_DISPLAY 🏁"
+        BADGE_ICON="🏁"
         SUBTITLE="Task Complete"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY completed the task" \
@@ -812,6 +817,7 @@ case "$HOOK_TYPE" in
         ;;
     "notification")
         TITLE="$TOOL_DISPLAY 👋"
+        BADGE_ICON="👋"
         SUBTITLE="Input Required"
         SOUND="Ping"
         case "$NOTIFICATION_SUBTYPE" in
@@ -856,6 +862,7 @@ case "$HOOK_TYPE" in
         ;;
     "SubagentStart")
         TITLE="$TOOL_DISPLAY 🌱"
+        BADGE_ICON="🌱"
         SUBTITLE="Subagent Started"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY started a subagent" \
@@ -867,6 +874,7 @@ case "$HOOK_TYPE" in
         ;;
     "SubagentStop")
         TITLE="$TOOL_DISPLAY 🍃"
+        BADGE_ICON="🍃"
         SUBTITLE="Subagent Complete"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY subagent completed" \
@@ -878,6 +886,7 @@ case "$HOOK_TYPE" in
         ;;
     "TeammateIdle")
         TITLE="$TOOL_DISPLAY 💤"
+        BADGE_ICON="💤"
         SUBTITLE="Teammate Idle"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY teammate is waiting for input" \
@@ -889,6 +898,7 @@ case "$HOOK_TYPE" in
         ;;
     "TaskCreated")
         TITLE="$TOOL_DISPLAY 🆕"
+        BADGE_ICON="🆕"
         SUBTITLE="Task Created"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY agent-team task was created" \
@@ -900,6 +910,7 @@ case "$HOOK_TYPE" in
         ;;
     "TaskCompleted")
         TITLE="$TOOL_DISPLAY 🎯"
+        BADGE_ICON="🎯"
         SUBTITLE="Task Complete"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY agent-team task completed" \
@@ -911,6 +922,7 @@ case "$HOOK_TYPE" in
         ;;
     "error"|"failed")
         TITLE="$TOOL_DISPLAY 🧨"
+        BADGE_ICON="🧨"
         SUBTITLE="Error"
         MESSAGE=$(choose_random_message \
             "An error occurred in $TOOL_DISPLAY" \
@@ -922,6 +934,7 @@ case "$HOOK_TYPE" in
         ;;
     "test")
         TITLE="Code-Notify Test 🧪"
+        BADGE_ICON="🧪"
         SUBTITLE="$PROJECT_NAME"
         MESSAGE=$(choose_random_message \
             "Notifications are working!" \
@@ -971,6 +984,7 @@ except Exception:
         fi
 
         TITLE="$TOOL_DISPLAY 🙋"
+        BADGE_ICON="🙋"
         SUBTITLE="Question"
         if [[ -n "$ASK_QUESTION_TEXT" ]]; then
             MESSAGE=$(printf '%s\n' "$ASK_QUESTION_TEXT" | head -c 150 | tr '\n' ' ')
@@ -991,6 +1005,7 @@ except Exception:
         ;;
     *)
         TITLE="$TOOL_DISPLAY 📢"
+        BADGE_ICON="📢"
         SUBTITLE="Status Update"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY: $HOOK_TYPE" \
@@ -1050,12 +1065,21 @@ terminal_notifier_supports_focus() {
 
 # Function to send notification on macOS
 send_macos_notification() {
-    local bundle_id focus_cmd
+    local bundle_id focus_cmd badge_clear_cmd
     bundle_id=$(get_terminal_bundle_id)
 
     # When running inside tmux, clicking the notification jumps back to the
     # originating tmux window/pane (in addition to activating the terminal).
     focus_cmd=$(tmux_focus_build_command "$bundle_id" 2>/dev/null) || focus_cmd=""
+
+    # Clicking also clears the window-name badge. Appended to focus_cmd so
+    # every click path (alerter, -execute) restores the name; the clear
+    # command re-checks the saved state at click time, so it is a no-op when
+    # no badge is set.
+    badge_clear_cmd=$(tmux_badge_build_clear_command 2>/dev/null) || badge_clear_cmd=""
+    if [[ -n "$badge_clear_cmd" ]] && [[ -n "$focus_cmd" ]]; then
+        focus_cmd="$focus_cmd; $badge_clear_cmd"
+    fi
 
     if notification_is_persistent && command -v alerter &> /dev/null; then
         # Persistent alert: stays visible until clicked/closed or until the
@@ -1080,7 +1104,12 @@ send_macos_notification() {
             tn_args+=(-appIcon "$TOOL_NAME")
         fi
         if terminal_notifier_supports_focus; then
+            # -focus and -execute run together on click, so the badge clear
+            # rides alongside the built-in focus handling.
             tn_args+=(-focus)
+            if [[ -n "$badge_clear_cmd" ]]; then
+                tn_args+=(-execute "$badge_clear_cmd")
+            fi
         elif [[ -n "$focus_cmd" ]]; then
             tn_args+=(-execute "$focus_cmd")
         fi
@@ -1223,6 +1252,14 @@ get_notification_sound_file() {
 
     get_sound
 }
+
+# Badge the originating tmux window's name with the event icon so the alert
+# stays visible in the status line. Sweep first so badges on windows the user
+# has since visited are restored before a new one lands.
+tmux_badge_sweep 2>/dev/null || true
+if [[ -n "$BADGE_ICON" ]]; then
+    tmux_badge_set "$BADGE_ICON" 2>/dev/null || true
+fi
 
 # Send notification based on OS
 OS=$(detect_os)

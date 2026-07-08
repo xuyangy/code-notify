@@ -85,3 +85,124 @@ tmux_focus_build_command() {
 
     printf '%s' "$cmd"
 }
+
+# --- tmux window badging ---------------------------------------------------
+#
+# When a notification fires, the originating tmux window's name gets the event
+# icon prepended ("🏁 zsh"), so pending work is visible in the status line
+# from anywhere in the session. Badge state lives in tmux window options
+# (@code_notify_orig_name, @code_notify_autorename) so it survives across hook
+# processes and clears from any of them:
+#   - clicking the notification (clear command runs from the click handler)
+#   - visiting the window (tmux_badge_sweep on the next notification)
+#
+# rename-window implicitly turns off automatic-rename for the window, so the
+# original setting is saved alongside the name and restored on clear.
+
+TMUX_BADGE_DISABLED_FILE="$HOME/.claude/notifications/tmux-badge-disabled"
+
+tmux_badge_enabled() {
+    [[ "${CODE_NOTIFY_TMUX_BADGE:-}" != "false" ]] && [[ ! -f "$TMUX_BADGE_DISABLED_FILE" ]]
+}
+
+# Prepend an icon to the originating window's name. Idempotent: a repeat
+# notification swaps the icon instead of stacking a second one. Windows the
+# user is currently looking at (active window of an attached session) are
+# skipped — the badge would be noise there.
+tmux_badge_set() {
+    local icon="$1"
+    [[ -n "$icon" ]] || return 1
+    tmux_badge_enabled || return 1
+    tmux_focus_available || return 1
+
+    # window_name goes last so embedded "|" cannot shift the other fields.
+    local info window_id autorename visible name
+    info=$(tmux display-message -p -t "$TMUX_PANE" \
+        '#{window_id}|#{automatic-rename}|#{&&:#{window_active},#{session_attached}}|#{window_name}' 2>/dev/null) || return 1
+    IFS='|' read -r window_id autorename visible name <<< "$info"
+
+    local window_re='^@[0-9]+$'
+    [[ "$window_id" =~ $window_re ]] || return 1
+    [[ "$visible" == "1" ]] && return 0
+
+    local orig_name
+    orig_name=$(tmux show-options -wqv -t "$window_id" @code_notify_orig_name 2>/dev/null)
+    if [[ -z "$orig_name" ]]; then
+        orig_name="$name"
+        tmux set-option -w -t "$window_id" @code_notify_orig_name "$orig_name" 2>/dev/null || return 1
+        tmux set-option -w -t "$window_id" @code_notify_autorename "${autorename:-off}" 2>/dev/null
+    fi
+    tmux rename-window -t "$window_id" "$icon $orig_name" 2>/dev/null
+}
+
+# Restore a badged window: original name back, automatic-rename re-enabled if
+# it was on, badge options removed. No-op when the window carries no badge.
+tmux_badge_clear() {
+    local window_id="$1"
+    local orig_name autorename
+    orig_name=$(tmux show-options -wqv -t "$window_id" @code_notify_orig_name 2>/dev/null)
+    [[ -n "$orig_name" ]] || return 0
+    autorename=$(tmux show-options -wqv -t "$window_id" @code_notify_autorename 2>/dev/null)
+    tmux rename-window -t "$window_id" "$orig_name" 2>/dev/null
+    if [[ "$autorename" == "on" ]]; then
+        tmux set-option -w -t "$window_id" automatic-rename on 2>/dev/null
+    fi
+    tmux set-option -wu -t "$window_id" @code_notify_orig_name 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_autorename 2>/dev/null
+}
+
+# Clear badges the user has implicitly acknowledged: any badged window that is
+# now the active window of an attached session was visited without clicking
+# the notification. Runs on every notification, so stale badges converge even
+# though no daemon watches window focus. Intentionally not gated on
+# tmux_badge_enabled — badges left over from before the feature was disabled
+# should still be cleaned up.
+tmux_badge_sweep() {
+    tmux_focus_available || return 0
+    local window_id visible orig
+    while IFS='|' read -r window_id visible orig; do
+        [[ -n "$orig" ]] || continue
+        [[ "$visible" == "1" ]] || continue
+        tmux_badge_clear "$window_id"
+    done < <(tmux list-windows -a -F \
+        '#{window_id}|#{&&:#{window_active},#{session_attached}}|#{@code_notify_orig_name}' 2>/dev/null)
+}
+
+# Build the command a notifier click handler runs to clear the badge on the
+# originating window. Same execution context as tmux_focus_build_command
+# (/bin/sh -c, minimal PATH, no attached client), so it embeds the absolute
+# tmux path and socket. Reads the saved state at click time, so it is a no-op
+# when the badge was already cleared (or never set).
+tmux_badge_build_clear_command() {
+    local target session_id window_id pane_id tmux_bin socket_path
+
+    target=$(tmux_focus_capture_target) || return 1
+    read -r session_id window_id pane_id <<< "$target"
+
+    local window_re='^@[0-9]+$'
+    [[ "$window_id" =~ $window_re ]] || return 1
+
+    tmux_bin=$(command -v tmux)
+    socket_path="${TMUX%%,*}"
+    if [[ -z "$tmux_bin" ]] || [[ -z "$socket_path" ]]; then
+        return 1
+    fi
+
+    local q_tmux q_socket q_window
+    q_tmux=$(tmux_focus_shell_quote "$tmux_bin")
+    q_socket=$(tmux_focus_shell_quote "$socket_path")
+    q_window=$(tmux_focus_shell_quote "$window_id")
+
+    local cmd
+    cmd="t() { $q_tmux -S $q_socket \"\$@\" 2>/dev/null; }; "
+    cmd+="n=\$(t show-options -wqv -t $q_window @code_notify_orig_name); "
+    cmd+="if [ -n \"\$n\" ]; then "
+    cmd+="t rename-window -t $q_window \"\$n\"; "
+    cmd+="if [ \"\$(t show-options -wqv -t $q_window @code_notify_autorename)\" = on ]; then "
+    cmd+="t set-option -w -t $q_window automatic-rename on; fi; "
+    cmd+="t set-option -wu -t $q_window @code_notify_orig_name; "
+    cmd+="t set-option -wu -t $q_window @code_notify_autorename; "
+    cmd+="fi"
+
+    printf '%s' "$cmd"
+}

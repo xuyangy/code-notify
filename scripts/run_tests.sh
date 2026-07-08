@@ -179,6 +179,14 @@ else
     test_fail "antigravity tool-name fallback failed"
 fi
 
+# Test 14b3: Antigravity approval banner is scoped to commands agy will prompt on
+test_start "antigravity permission decision"
+if bash tests/test-agy-permission-decision.sh >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "antigravity permission decision failed"
+fi
+
 # Test 14c: Antigravity status reads agy's managed plugin copy as ground truth
 test_start "antigravity status source"
 if bash tests/test-antigravity-status.sh >/dev/null 2>&1; then

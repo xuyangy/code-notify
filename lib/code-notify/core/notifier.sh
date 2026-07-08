@@ -264,6 +264,114 @@ except Exception:
         's/.*"toolCall"[[:space:]]*:[[:space:]]*\{[^{}]*"name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
 }
 
+# The shell command a run_command tool event will run (.toolCall.args.CommandLine);
+# empty when absent. Same jq -> python3 -> sed ladder as get_agy_tool_name.
+get_agy_command_line() {
+    if has_jq; then
+        printf '%s' "$HOOK_DATA" | jq -r '(.toolCall.args.CommandLine // "")' 2>/dev/null
+        return 0
+    fi
+    if has_python3; then
+        printf '%s' "$HOOK_DATA" | python3 -c '
+import json, sys
+try:
+    args = (json.load(sys.stdin).get("toolCall") or {}).get("args") or {}
+    print(args.get("CommandLine") or "", end="")
+except Exception:
+    print("", end="")
+' 2>/dev/null
+        return 0
+    fi
+    printf '%s' "$HOOK_DATA" | sed -nE \
+        's/.*"toolCall"[[:space:]]*:[[:space:]]*\{.*"CommandLine"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
+}
+
+# Path to agy's permission settings (permissions.allow/ask/deny). Overridable
+# for tests and non-default installs.
+agy_permissions_file() {
+    printf '%s' "${CODE_NOTIFY_AGY_SETTINGS:-$HOME/.gemini/antigravity-cli/settings.json}"
+}
+
+# Resolve what agy will do with a command against its own permission lists:
+# prints "auto" when it runs without prompting (matched allow, or auto-denied),
+# or "ask" when it pauses for the user. Precedence is deny > ask > allow (per
+# https://antigravity.google/docs/cli/permissions); an unlisted command
+# defaults to "ask". Rules are command(<prefix>) and match when their words are
+# a leading prefix of the command's words, so command(git) covers "git status"
+# but not "git-foo", and command(git add) is checked before command(git).
+# Unreadable/absent settings or no parser -> "ask" (never suppress blindly).
+agy_permission_decision() {
+    local cmd="$1" settings out
+    settings="$(agy_permissions_file)"
+    [[ -f "$settings" ]] || { printf 'ask'; return 0; }
+
+    # shellcheck disable=SC2016  # $cmd/$ct/$pt are jq variables, not shell
+    local jq_prog='
+def cmdtoks: ($cmd | split(" ") | map(select(. != "")));
+def pats(l): (.permissions[l] // [])
+  | map(select(type == "string" and test("^command\\(.*\\)$")))
+  | map(sub("^command\\("; "") | sub("\\)$"; ""))
+  | map(split(" ") | map(select(. != "")));
+def anymatch(l): cmdtoks as $ct
+  | (pats(l) | any(. as $pt | ($pt | length) > 0 and $ct[0:($pt | length)] == $pt));
+if (cmdtoks | length) == 0 then "ask"
+elif anymatch("deny") then "auto"
+elif anymatch("ask") then "ask"
+elif anymatch("allow") then "auto"
+else "ask" end'
+
+    if has_jq; then
+        out=$(jq -r --arg cmd "$cmd" "$jq_prog" "$settings" 2>/dev/null)
+        [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
+    fi
+    if has_python3; then
+        out=$(python3 - "$cmd" "$settings" <<'PY' 2>/dev/null
+import json, sys
+cmd, path = sys.argv[1], sys.argv[2]
+def toks(s): return [t for t in s.split(" ") if t]
+try:
+    with open(path) as f:
+        perms = json.load(f).get("permissions") or {}
+except Exception:
+    print("ask", end=""); sys.exit(0)
+ct = toks(cmd)
+def pats(l):
+    out = []
+    for e in (perms.get(l) or []):
+        if isinstance(e, str) and e.startswith("command(") and e.endswith(")"):
+            out.append(toks(e[len("command("):-1]))
+    return out
+def anymatch(l):
+    return any(pt and ct[:len(pt)] == pt for pt in pats(l))
+if not ct: print("ask", end="")
+elif anymatch("deny"): print("auto", end="")
+elif anymatch("ask"): print("ask", end="")
+elif anymatch("allow"): print("auto", end="")
+else: print("ask", end="")
+PY
+)
+        [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
+    fi
+    printf 'ask'
+}
+
+# Whether a run_command tool event should raise the approval banner: true only
+# when agy will actually pause for the user. agy's PreToolUse payload carries no
+# approval flag (every run_command looks identical), so the decision is
+# reconstructed from agy's own permission lists via agy_permission_decision.
+# Commands with shell chaining/redirection are treated as "ask" — the leading
+# command may auto-run while a chained one prompts, and over-notifying beats
+# swallowing a real prompt.
+agy_command_needs_approval() {
+    local cmd="$1"
+    [[ -n "$cmd" ]] || return 0
+    # shellcheck disable=SC2016  # these are literal shell-operator glob patterns
+    case "$cmd" in
+        *';'* | *'|'* | *'&'* | *'`'* | *'$('* | *'>'* | *'<'* | *$'\n'*) return 0 ;;
+    esac
+    [[ "$(agy_permission_decision "$cmd")" != "auto" ]]
+}
+
 # True when permission_prompt alerts are enabled. The notifier does not source
 # config.sh, so read the same notify-types file config.sh writes (normalized,
 # pipe-separated). Absent file means the default (idle_prompt only) — approval
@@ -397,9 +505,13 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
             # fire a bogus "task complete" mid-turn.
             cancel_agy_debounced_stop
             # The approval banner is only meaningful for calls that pause for the
-            # user (run_command) and only when permission_prompt alerts are on.
-            # Every other tool start is silent — it just cancelled the debounce.
-            if [[ "$(get_agy_tool_name)" == "run_command" ]] && agy_permission_prompt_enabled; then
+            # user (run_command), only when permission_prompt alerts are on, and
+            # only when agy will actually stop to ask — commands its permission
+            # lists auto-run (e.g. an allowlisted "git status") fire PreToolUse
+            # too but never prompt, so bannering them is just noise. Every other
+            # tool start is silent — it just cancelled the debounce.
+            if [[ "$(get_agy_tool_name)" == "run_command" ]] && agy_permission_prompt_enabled &&
+                agy_command_needs_approval "$(get_agy_command_line)"; then
                 HOOK_TYPE="notification"
                 AGY_FORCED_SUBTYPE="permission_prompt"
             else

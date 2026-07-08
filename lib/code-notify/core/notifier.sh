@@ -299,6 +299,42 @@ agy_debounce_tokenfile() {
     printf '%s/%s.token' "$state_dir" "$cid_safe"
 }
 
+# Remove stale per-conversation debounce tokens. A token only matters for the
+# few seconds a watcher sleeps on it; once that window passes the file is dead
+# weight. Without pruning, every Antigravity conversation leaves one tiny file
+# behind forever (the key is the conversation id, so it is never reused). Runs
+# best-effort and backgrounded so it never adds latency to the hook.
+prune_agy_debounce_tokens() {
+    local state_dir retention_days
+    state_dir="$HOME/.claude/notifications/agy"
+    [[ -d "$state_dir" ]] || return 0
+    retention_days="${CODE_NOTIFY_AGY_TOKEN_RETENTION_DAYS:-3}"
+    [[ "$retention_days" =~ ^[0-9]+$ ]] || retention_days=3
+    find "$state_dir" -maxdepth 1 -type f \
+        \( -name '*.token' -o -name '*.completed' \) \
+        -mtime "+${retention_days}" -delete 2>/dev/null || true
+}
+
+# Throttle wrapper around the prune. The stale-file set only changes on a day
+# boundary, so scanning the directory on every tool step is pure waste. We stamp
+# the last sweep in a tiny file and skip until the interval (default 24h) has
+# elapsed -- the common path is one `read` from that file plus an integer
+# compare, with no process spawn and no directory scan. $1 is the current epoch,
+# reused from the caller so we add zero extra `date` calls.
+maybe_prune_agy_debounce_tokens() {
+    local now="$1" stamp last interval
+    interval="${CODE_NOTIFY_AGY_PRUNE_INTERVAL_SECONDS:-86400}"
+    [[ "$interval" =~ ^[0-9]+$ ]] || interval=86400
+    stamp="$HOME/.claude/notifications/agy/.last-prune"
+    last=0
+    [[ -r "$stamp" ]] && read -r last < "$stamp" 2>/dev/null
+    [[ "$last" =~ ^[0-9]+$ ]] || last=0
+    (( now - last < interval )) && return 0
+    printf '%s' "$now" > "$stamp" 2>/dev/null || true
+    prune_agy_debounce_tokens >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+}
+
 # Cancel any pending debounced completion for this conversation. Used when a
 # later step reports an error: that error supersedes the earlier "looks done"
 # guess, so we must not also fire a "task complete".
@@ -307,11 +343,16 @@ cancel_agy_debounced_stop() {
 }
 
 schedule_agy_debounced_stop() {
-    local tokenfile token delay
+    local now tokenfile token delay
+    now="$(date +%s)"
     tokenfile="$(agy_debounce_tokenfile)"
-    token="$(date +%s)-$$-$RANDOM"
+    token="${now}-$$-$RANDOM"
     printf '%s' "$token" > "$tokenfile"
     delay="${CODE_NOTIFY_AGY_DEBOUNCE_SECONDS:-8}"
+
+    # Clean up old tokens from past conversations, throttled to ~once/day so this
+    # is effectively free on the per-step hot path.
+    maybe_prune_agy_debounce_tokens "$now"
 
     (
         sleep "$delay"

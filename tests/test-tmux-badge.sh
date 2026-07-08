@@ -8,8 +8,31 @@ ROOT_DIR="$SCRIPT_DIR/.."
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; exit 1; }
 
+# Resolve the real tmux binary now, before the fake tmux is put on PATH below.
+# The real-tmux quoting test and the cleanup trap must use this absolute path;
+# a bare `tmux` would hit the fake and neither detect the version nor actually
+# kill the throwaway server.
+REAL_TMUX="$(command -v tmux 2>/dev/null || true)"
+
 test_dir="$(mktemp -d)"
-trap 'rm -rf "$test_dir"' EXIT
+# Dedicated throwaway tmux socket for the real-tmux quoting test below, on its
+# own -L socket so it never touches the user's tmux. On every exit path (pass,
+# fail's `exit 1`, or error) the server is killed AND the socket file it leaves
+# behind is removed — kill-server does not unlink the socket, so we capture the
+# real path from tmux (#{socket_path}) into quote_sock_path and rm it here.
+QUOTE_SOCK="cn-badge-qtest-$$"
+quote_sock_path=""
+cleanup() {
+    if [[ -n "$REAL_TMUX" ]]; then
+        # || true: on skip/early-exit paths no server was started, so kill-server
+        # fails on a nonexistent socket; under set -e that would abort the trap
+        # before rm and taint the script's exit status.
+        "$REAL_TMUX" -L "$QUOTE_SOCK" kill-server 2>/dev/null || true
+        [[ -n "$quote_sock_path" ]] && rm -f "$quote_sock_path"
+    fi
+    rm -rf "$test_dir"
+}
+trap cleanup EXIT
 
 # Stateful fake tmux: window options persist as files under
 # $FAKE_TMUX_STATE/<window>.<option> so set/show/unset round-trip across
@@ -309,6 +332,45 @@ grep -q "list-windows" "$log_file" && fail "payload must not attempt a sweep whe
 tmux_badge_clear "@2"
 TMUX_BADGE_LIB_PATH="$saved_lib_path"
 pass "focus hook self-retires when the lib is gone"
+
+# --- real tmux: the hook payload parses even with quote-hostile paths ---
+# The fake tmux above logs calls and stores options but does NOT replicate
+# tmux's own command-string parser, which re-processes \, " and $ inside "..."
+# when a hook fires. So the tmux-quoting (tmux_focus_cmd_quote) is exercised
+# here against a real, throwaway tmux server: a hook whose payload embeds a path
+# containing " $ space and \ must still parse and run. Shell-quoting alone would
+# let the " terminate tmux's double-quoted argument early and break the parse.
+# The server uses a dedicated -L socket (killed by the EXIT trap) and -f
+# /dev/null, so it never touches the user's tmux or config.
+tmux_major=0
+if [[ -n "$REAL_TMUX" ]]; then
+    tmux_major=$("$REAL_TMUX" -V 2>/dev/null | grep -oE '[0-9]+' | head -n 1)
+fi
+if [[ "${tmux_major:-0}" -ge 3 ]]; then
+    qdir="$test_dir/pa\"th\$x \\y"          # dir name with " $ space \ — all tmux-hostile
+    marker="$qdir/fired.txt"
+    mkdir -p "$qdir"
+    # Build the payload exactly as tmux_badge_install_focus_hook does: an inner
+    # shell command with shell-quoted paths, then the whole run-shell argument
+    # tmux-quoted. run-shell (no -b) is synchronous so no polling race, but the
+    # parse tmux performs is identical to the -b form the real hook uses.
+    inner="touch $(tmux_focus_shell_quote "$marker")"
+    payload="run-shell $(tmux_focus_cmd_quote "$inner")"
+    "$REAL_TMUX" -L "$QUOTE_SOCK" -f /dev/null new-session -d -x 80 -y 24 \
+        || fail "real-tmux: throwaway server should start"
+    # Record the socket path so the EXIT trap can remove the file kill-server
+    # leaves behind, wherever tmux placed it.
+    quote_sock_path="$("$REAL_TMUX" -L "$QUOTE_SOCK" display-message -p '#{socket_path}' 2>/dev/null)"
+    "$REAL_TMUX" -L "$QUOTE_SOCK" set-hook -g "session-window-changed[8471]" "$payload"
+    "$REAL_TMUX" -L "$QUOTE_SOCK" new-window        # fires session-window-changed
+    i=0
+    while [[ ! -f "$marker" && "$i" -lt 20 ]]; do sleep 0.1; i=$((i + 1)); done
+    [[ -f "$marker" ]] \
+        || fail "real-tmux: hook payload with quote-hostile paths should parse and run"
+    pass "real-tmux hook payload survives quote-hostile paths"
+else
+    pass "real-tmux quote test skipped (tmux >= 3.0 not available)"
+fi
 
 # --- clear command structure ---
 cmd=$(tmux_badge_build_clear_command) || fail "clear command should build inside tmux"

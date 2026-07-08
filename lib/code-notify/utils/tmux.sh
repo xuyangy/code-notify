@@ -18,6 +18,21 @@ tmux_focus_shell_quote() {
     printf "'%s'" "${value//\'/\'\\\'\'}"
 }
 
+# Escape a string for embedding inside a tmux double-quoted command argument
+# and return it wrapped in those double quotes. When a hook fires, tmux
+# re-parses the stored command and, inside "...", processes \, " and $ itself —
+# so shell-quoting the inner values (which only protects the innermost
+# /bin/sh) is not enough: a ", \ or $ in an embedded path would break tmux's
+# parse before /bin/sh ever sees the safely-quoted value. Escape backslashes
+# first so the escapes we add are not re-escaped.
+tmux_focus_cmd_quote() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//\$/\\\$}"
+    printf '"%s"' "$value"
+}
+
 # Whether the current process is running inside a usable tmux pane.
 tmux_focus_available() {
     [[ -n "${TMUX:-}" ]] && [[ -n "${TMUX_PANE:-}" ]] && command -v tmux &> /dev/null
@@ -146,10 +161,13 @@ tmux_badge_enabled() {
 # window switch forever — the sweep that retires it can no longer run. So the
 # hook guards itself: if the lib is gone, it unsets both hooks and exits
 # silently. The tmux binary and socket are embedded for that self-retire
-# because run-shell's environment guarantees neither PATH nor $TMUX.
+# because run-shell's environment guarantees neither PATH nor $TMUX. The whole
+# run-shell argument is tmux-quoted (tmux_focus_cmd_quote) on top of the inner
+# shell-quoting, so an embedded path containing ", \ or $ survives tmux's
+# re-parse of the hook when it fires.
 tmux_badge_install_focus_hook() {
     [[ -n "$TMUX_BADGE_LIB_PATH" ]] && [[ -f "$TMUX_BADGE_LIB_PATH" ]] || return 0
-    local tmux_bin socket_path q_lib q_tmux q_socket idx retire hook_cmd
+    local tmux_bin socket_path q_lib q_tmux q_socket idx retire inner hook_cmd
     tmux_bin=$(command -v tmux) || return 0
     socket_path="${TMUX%%,*}"
     [[ -n "$socket_path" ]] || return 0
@@ -159,7 +177,8 @@ tmux_badge_install_focus_hook() {
     idx="$TMUX_BADGE_HOOK_INDEX"
     retire="$q_tmux -S $q_socket set-hook -gu 'session-window-changed[$idx]'; "
     retire+="$q_tmux -S $q_socket set-hook -gu 'client-session-changed[$idx]'"
-    hook_cmd="run-shell -b \"if [ -f $q_lib ]; then bash $q_lib badge-sweep; else $retire; fi\""
+    inner="if [ -f $q_lib ]; then bash $q_lib badge-sweep; else $retire; fi"
+    hook_cmd="run-shell -b $(tmux_focus_cmd_quote "$inner")"
     tmux set-hook -g "session-window-changed[$idx]" "$hook_cmd" 2>/dev/null
     tmux set-hook -g "client-session-changed[$idx]" "$hook_cmd" 2>/dev/null
 }

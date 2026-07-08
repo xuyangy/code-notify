@@ -41,13 +41,14 @@ while (( ${#args[@]} )); do
 done
 case "$cmd" in
     display-message)
-        # The badge info format is pipe-separated; the focus target format
-        # (session/window/pane IDs) is space-separated. Fixtures per format.
-        if [[ "${rest[0]}" == *"|"* ]]; then
-            printf '%s\n' "$FAKE_TMUX_BADGE_INFO"
-        else
-            printf '%s\n' "$FAKE_TMUX_TARGET"
-        fi
+        # The badge info format is pipe-separated; a plain window-name query
+        # reads the stateful name (kept current by rename-window); the focus
+        # target format (session/window/pane IDs) is a fixture.
+        case "${rest[0]}" in
+            *"|"*) printf '%s\n' "$FAKE_TMUX_BADGE_INFO" ;;
+            '#{window_name}') cat "$FAKE_TMUX_STATE/${target}.window_name" 2>/dev/null; echo ;;
+            *) printf '%s\n' "$FAKE_TMUX_TARGET" ;;
+        esac
         ;;
     list-windows)
         printf '%s\n' "$FAKE_TMUX_WINDOWS"
@@ -90,28 +91,28 @@ window_name() { cat "$state_dir/@2.window_name" 2>/dev/null; }
 orig_option() { cat "$state_dir/@2.@code_notify_orig_name" 2>/dev/null; }
 
 # --- disabled via environment ---
-CODE_NOTIFY_TMUX_BADGE=false tmux_badge_set "🏁" && fail "badge should be skipped when disabled via env"
+CODE_NOTIFY_TMUX_BADGE=false tmux_badge_set "🎯" && fail "badge should be skipped when disabled via env"
 [[ -z "$(window_name)" ]] || fail "disabled badge should not rename the window"
 pass "disabled via environment"
 
 # --- disabled via flag file ---
 mkdir -p "$HOME/.claude/notifications"
 touch "$HOME/.claude/notifications/tmux-badge-disabled"
-tmux_badge_set "🏁" && fail "badge should be skipped when disabled via flag file"
+tmux_badge_set "🎯" && fail "badge should be skipped when disabled via flag file"
 rm -f "$HOME/.claude/notifications/tmux-badge-disabled"
 pass "disabled via flag file"
 
 # --- no-op outside tmux ---
 (
     unset TMUX TMUX_PANE
-    tmux_badge_set "🏁" && exit 1
+    tmux_badge_set "🎯" && exit 1
     exit 0
 ) || fail "badge should fail outside tmux"
 pass "no-op outside tmux"
 
 # --- badge happy path ---
-tmux_badge_set "🏁" || fail "badge should succeed inside tmux"
-[[ "$(window_name)" == "🏁 zsh" ]] || fail "window should be renamed with icon prefix (got: $(window_name))"
+tmux_badge_set "🎯" || fail "badge should succeed inside tmux"
+[[ "$(window_name)" == "🎯 zsh" ]] || fail "window should be renamed with icon prefix (got: $(window_name))"
 [[ "$(orig_option)" == "zsh" ]] || fail "original name should be saved in window option"
 [[ "$(cat "$state_dir/@2.@code_notify_autorename")" == "on" ]] || fail "automatic-rename state should be saved"
 pass "badge sets icon and saves state"
@@ -129,6 +130,7 @@ tmux_badge_clear "@2"
 grep -q -- "set-option -w -t @2 automatic-rename on" "$log_file" || fail "clear should restore automatic-rename"
 [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "clear should unset the orig-name option"
 [[ ! -f "$state_dir/@2.@code_notify_autorename" ]] || fail "clear should unset the autorename option"
+[[ ! -f "$state_dir/@2.@code_notify_badged_name" ]] || fail "clear should unset the badged-name option"
 pass "clear restores window state"
 
 # --- clear is a no-op without a badge ---
@@ -137,22 +139,73 @@ tmux_badge_clear "@2"
 grep -q "rename-window" "$log_file" && fail "clear without badge should not rename"
 pass "clear no-op without badge"
 
+# --- manual rename while badged becomes the new original ---
+tmux_badge_set "🎯" || fail "badge before manual rename should succeed"
+export FAKE_TMUX_BADGE_INFO='@2|off|0|work'   # user renamed the badged window
+tmux_badge_set "👋" || fail "badge after manual rename should succeed"
+[[ "$(window_name)" == "👋 work" ]] || fail "badge should adopt the user's new name (got: $(window_name))"
+[[ "$(orig_option)" == "work" ]] || fail "manual rename should replace the saved original"
+[[ "$(cat "$state_dir/@2.@code_notify_autorename")" == "off" ]] || fail "manual rename should pin automatic-rename off"
+export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+pass "manual rename becomes the new original"
+
+# --- a rename that merely ends in the original name is still manual ---
+# "api zsh" ends in " zsh", so a suffix match alone would mistake it for a
+# badged form of "zsh"; the exact badged-name comparison must not.
+tmux_badge_clear "@2"                          # reset state from the previous case
+tmux_badge_set "🎯" || fail "badge before suffix-colliding rename should succeed"
+export FAKE_TMUX_BADGE_INFO='@2|off|0|api zsh'   # user renamed "🎯 zsh" -> "api zsh"
+tmux_badge_set "👋" || fail "badge after suffix-colliding rename should succeed"
+[[ "$(window_name)" == "👋 api zsh" ]] || fail "badge should adopt a rename ending in the original name (got: $(window_name))"
+[[ "$(orig_option)" == "api zsh" ]] || fail "suffix-colliding rename should replace the saved original"
+export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+pass "suffix-colliding rename becomes the new original"
+
+# --- clear keeps a manual rename ---
+tmux_badge_clear "@2"                          # reset state from the previous case
+tmux_badge_set "🎯" || fail "badge for manual-rename clear test should succeed"
+printf '%s' "work" > "$state_dir/@2.window_name"   # user renames after badging
+: > "$log_file"
+tmux_badge_clear "@2"
+[[ "$(window_name)" == "work" ]] || fail "clear must not clobber a manual rename (got: $(window_name))"
+grep -q "automatic-rename on" "$log_file" && fail "clear after a manual rename must not re-enable automatic-rename"
+[[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "clear should still drop the badge state"
+pass "clear keeps manual rename"
+
+# --- clear keeps a manual rename that ends in the original name ---
+tmux_badge_set "🎯" || fail "badge for suffix-colliding clear test should succeed"
+printf '%s' "api zsh" > "$state_dir/@2.window_name"   # user renames after badging
+: > "$log_file"
+tmux_badge_clear "@2"
+[[ "$(window_name)" == "api zsh" ]] || fail "clear must not clobber a rename ending in the original name (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "clear should still drop the badge state after a suffix-colliding rename"
+pass "clear keeps suffix-colliding manual rename"
+
+# --- legacy badge (no badged-name option) still clears via suffix match ---
+printf '%s' "zsh" > "$state_dir/@2.@code_notify_orig_name"
+printf '%s' "on" > "$state_dir/@2.@code_notify_autorename"
+printf '%s' "🎯 zsh" > "$state_dir/@2.window_name"
+rm -f "$state_dir/@2.@code_notify_badged_name"
+tmux_badge_clear "@2"
+[[ "$(window_name)" == "zsh" ]] || fail "legacy badge without a saved badged name should still restore (got: $(window_name))"
+pass "legacy badge clears without badged-name option"
+
 # --- visible window is not badged ---
 export FAKE_TMUX_BADGE_INFO='@2|on|1|zsh'
 : > "$log_file"
-tmux_badge_set "🏁" || fail "badge on visible window should still exit 0"
+tmux_badge_set "🎯" || fail "badge on visible window should still exit 0"
 grep -q "rename-window" "$log_file" && fail "visible window should not be renamed"
 pass "visible window skipped"
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 
 # --- malformed window id is rejected ---
 export FAKE_TMUX_BADGE_INFO='@2; rm -rf /|on|0|zsh'
-tmux_badge_set "🏁" && fail "badge should reject a non-ID window"
+tmux_badge_set "🎯" && fail "badge should reject a non-ID window"
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 pass "unsafe window id rejection"
 
 # --- sweep clears only badged windows that are visible again ---
-tmux_badge_set "🏁" || fail "badge for sweep setup should succeed"
+tmux_badge_set "🎯" || fail "badge for sweep setup should succeed"
 printf '%s' "other" > "$state_dir/@5.@code_notify_orig_name"
 export FAKE_TMUX_WINDOWS=$'@2|1|zsh\n@5|0|other\n@7|1|'
 tmux_badge_sweep
@@ -166,6 +219,8 @@ cmd=$(tmux_badge_build_clear_command) || fail "clear command should build inside
 [[ "$cmd" == *"-S '$test_dir/sock'"* ]] || fail "clear command should target the captured socket"
 [[ "$cmd" == *"rename-window -t '@2'"* ]] || fail "clear command should rename the origin window"
 [[ "$cmd" == *"@code_notify_orig_name"* ]] || fail "clear command should read the saved name"
+[[ "$cmd" == *"@code_notify_badged_name"* ]] || fail "clear command should read the saved badged name"
+[[ "$cmd" == *'#{window_name}'* ]] || fail "clear command should check the live window name"
 pass "clear command structure"
 
 # --- generated clear command restores a badged window ---
@@ -182,8 +237,28 @@ pass "generated clear command execution"
 grep -q "rename-window" "$log_file" && fail "clear command without badge should not rename"
 pass "generated clear command no-op"
 
+# --- generated clear command keeps a manual rename ---
+tmux_badge_set "🎯" || fail "badge for manual-rename clear-command test should succeed"
+printf '%s' "work" > "$state_dir/@2.window_name"   # user renames after badging
+: > "$log_file"
+/bin/sh -c "$cmd" > /dev/null 2>&1 || fail "clear command should run cleanly after a manual rename"
+[[ "$(window_name)" == "work" ]] || fail "clear command must not clobber a manual rename (got: $(window_name))"
+grep -q "rename-window" "$log_file" && fail "clear command after a manual rename should not rename"
+[[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "clear command should still drop the badge state"
+pass "generated clear command keeps manual rename"
+
+# --- generated clear command keeps a rename that ends in the original name ---
+tmux_badge_set "🎯" || fail "badge for suffix-colliding clear-command test should succeed"
+printf '%s' "api zsh" > "$state_dir/@2.window_name"   # user renames after badging
+: > "$log_file"
+/bin/sh -c "$cmd" > /dev/null 2>&1 || fail "clear command should run cleanly after a suffix-colliding rename"
+[[ "$(window_name)" == "api zsh" ]] || fail "clear command must not clobber a rename ending in the original name (got: $(window_name))"
+grep -q "rename-window" "$log_file" && fail "clear command after a suffix-colliding rename should not rename"
+[[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "clear command should still drop the badge state after a suffix-colliding rename"
+pass "generated clear command keeps suffix-colliding manual rename"
+
 # --- notifier.sh end-to-end wiring (macOS only) ---
-# A stop event should badge the origin window with 🏁 and hand the badge
+# A stop event should badge the origin window with 🎯 and hand the badge
 # clear command to terminal-notifier via -execute alongside -focus.
 if [[ "$(uname -s)" == "Darwin" ]]; then
     NOTIFIER="$ROOT_DIR/lib/code-notify/core/notifier.sh"
@@ -202,7 +277,7 @@ EOF
         bash "$NOTIFIER" stop claude testproj > /dev/null 2>&1 \
         || fail "notifier.sh should exit cleanly"
 
-    [[ "$(window_name)" == "🏁 zsh" ]] || fail "notifier should badge the origin window with the stop icon (got: $(window_name))"
+    [[ "$(window_name)" == "🎯 zsh" ]] || fail "notifier should badge the origin window with the stop icon (got: $(window_name))"
     grep -qx -- "-focus" "$tn_log" || fail "notifier should pass -focus"
     grep -qx -- "-execute" "$tn_log" || fail "notifier should pass -execute"
     grep -q -- "@code_notify_orig_name" "$tn_log" || fail "notifier -execute should carry the badge clear command"

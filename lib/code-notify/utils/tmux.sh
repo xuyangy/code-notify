@@ -89,20 +89,43 @@ tmux_focus_build_command() {
 # --- tmux window badging ---------------------------------------------------
 #
 # When a notification fires, the originating tmux window's name gets the event
-# icon prepended ("🏁 zsh"), so pending work is visible in the status line
+# icon prepended ("🎯 zsh"), so pending work is visible in the status line
 # from anywhere in the session. Badge state lives in tmux window options
-# (@code_notify_orig_name, @code_notify_autorename) so it survives across hook
-# processes and clears from any of them:
-#   - clicking the notification (clear command runs from the click handler)
-#   - visiting the window (tmux_badge_sweep on the next notification)
+# (@code_notify_orig_name, @code_notify_autorename, @code_notify_badged_name)
+# so it survives across hook processes and clears from any of them:
+#   - clicking the notification (macOS only — the clear command rides the
+#     notifier's click handler; Linux notify-send has no click hook)
+#   - visiting the window (tmux_badge_sweep on the next notification, all
+#     platforms)
 #
 # rename-window implicitly turns off automatic-rename for the window, so the
 # original setting is saved alongside the name and restored on clear.
+#
+# A manual rename while badged always wins: badge-set adopts the new name as
+# the original, and clear keeps it (leaving automatic-rename off, as a manual
+# rename implies) instead of restoring the stale saved name. Rename detection
+# compares against the exact badged name saved at badge time
+# (@code_notify_badged_name) — a suffix match alone would mistake a rename
+# like "zsh" -> "api zsh" for a badged form of "zsh". Badges written by older
+# versions lack the option, so a "<something> <original>" suffix match remains
+# as the fallback for them only.
 
 TMUX_BADGE_DISABLED_FILE="$HOME/.claude/notifications/tmux-badge-disabled"
 
 tmux_badge_enabled() {
     [[ "${CODE_NOTIFY_TMUX_BADGE:-}" != "false" ]] && [[ ! -f "$TMUX_BADGE_DISABLED_FILE" ]]
+}
+
+# Whether a live window name is a badged form of the saved original: exactly
+# the name written at badge time, or — for badges from versions predating
+# @code_notify_badged_name — anything ending in " <original>".
+tmux_badge_name_is_badged() {
+    local name="$1" orig_name="$2" badged_name="$3"
+    if [[ -n "$badged_name" ]]; then
+        [[ "$name" == "$badged_name" ]]
+    else
+        [[ "$name" == *" $orig_name" ]]
+    fi
 }
 
 # Prepend an icon to the originating window's name. Idempotent: a repeat
@@ -125,30 +148,54 @@ tmux_badge_set() {
     [[ "$window_id" =~ $window_re ]] || return 1
     [[ "$visible" == "1" ]] && return 0
 
-    local orig_name
+    local orig_name badged_name
     orig_name=$(tmux show-options -wqv -t "$window_id" @code_notify_orig_name 2>/dev/null)
+    badged_name=$(tmux show-options -wqv -t "$window_id" @code_notify_badged_name 2>/dev/null)
     if [[ -z "$orig_name" ]]; then
         orig_name="$name"
         tmux set-option -w -t "$window_id" @code_notify_orig_name "$orig_name" 2>/dev/null || return 1
         tmux set-option -w -t "$window_id" @code_notify_autorename "${autorename:-off}" 2>/dev/null
+    elif [[ "$name" != "$orig_name" ]] &&
+        ! tmux_badge_name_is_badged "$name" "$orig_name" "$badged_name"; then
+        # Badged, but the current name is neither the saved original nor the
+        # badged form of it: the user renamed the window while it was badged.
+        # Their name becomes the new original, and automatic-rename is pinned
+        # off — restoring the pre-badge "on" would rename right past their
+        # choice.
+        orig_name="$name"
+        tmux set-option -w -t "$window_id" @code_notify_orig_name "$orig_name" 2>/dev/null || return 1
+        tmux set-option -w -t "$window_id" @code_notify_autorename off 2>/dev/null
     fi
-    tmux rename-window -t "$window_id" "$icon $orig_name" 2>/dev/null
+    tmux rename-window -t "$window_id" "$icon $orig_name" 2>/dev/null || return 1
+    tmux set-option -w -t "$window_id" @code_notify_badged_name "$icon $orig_name" 2>/dev/null
 }
 
 # Restore a badged window: original name back, automatic-rename re-enabled if
 # it was on, badge options removed. No-op when the window carries no badge.
+# If the user renamed the window while badged, their name wins: keep it (and
+# leave automatic-rename off, as a manual rename implies) and only drop the
+# badge state.
 tmux_badge_clear() {
     local window_id="$1"
-    local orig_name autorename
+    local orig_name autorename badged_name current
     orig_name=$(tmux show-options -wqv -t "$window_id" @code_notify_orig_name 2>/dev/null)
     [[ -n "$orig_name" ]] || return 0
     autorename=$(tmux show-options -wqv -t "$window_id" @code_notify_autorename 2>/dev/null)
-    tmux rename-window -t "$window_id" "$orig_name" 2>/dev/null
-    if [[ "$autorename" == "on" ]]; then
-        tmux set-option -w -t "$window_id" automatic-rename on 2>/dev/null
+    badged_name=$(tmux show-options -wqv -t "$window_id" @code_notify_badged_name 2>/dev/null)
+    current=$(tmux display-message -p -t "$window_id" '#{window_name}' 2>/dev/null)
+    # Restore when the window still looks badged (the exact name written at
+    # badge time) or already carries the original name; an empty result means
+    # the name query failed, where restoring is the safer default.
+    if [[ -z "$current" ]] || [[ "$current" == "$orig_name" ]] ||
+        tmux_badge_name_is_badged "$current" "$orig_name" "$badged_name"; then
+        tmux rename-window -t "$window_id" "$orig_name" 2>/dev/null
+        if [[ "$autorename" == "on" ]]; then
+            tmux set-option -w -t "$window_id" automatic-rename on 2>/dev/null
+        fi
     fi
     tmux set-option -wu -t "$window_id" @code_notify_orig_name 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_autorename 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_badged_name 2>/dev/null
 }
 
 # Clear badges the user has implicitly acknowledged: any badged window that is
@@ -197,11 +244,25 @@ tmux_badge_build_clear_command() {
     cmd="t() { $q_tmux -S $q_socket \"\$@\" 2>/dev/null; }; "
     cmd+="n=\$(t show-options -wqv -t $q_window @code_notify_orig_name); "
     cmd+="if [ -n \"\$n\" ]; then "
+    # Same manual-rename guard as tmux_badge_clear: only restore when the
+    # window still carries the exact name written at badge time, the original
+    # name, or the name query failed (with the legacy suffix match when no
+    # badged name was saved); a name the user chose while badged is kept, and
+    # automatic-rename stays off.
+    cmd+="w=\$(t display-message -p -t $q_window '#{window_name}'); "
+    cmd+="b=\$(t show-options -wqv -t $q_window @code_notify_badged_name); "
+    cmd+="r=0; "
+    cmd+="if [ -z \"\$w\" ] || [ \"\$w\" = \"\$n\" ]; then r=1; "
+    cmd+="elif [ -n \"\$b\" ]; then if [ \"\$w\" = \"\$b\" ]; then r=1; fi; "
+    cmd+="else case \"\$w\" in *\" \$n\") r=1;; esac; fi; "
+    cmd+="if [ \"\$r\" = 1 ]; then "
     cmd+="t rename-window -t $q_window \"\$n\"; "
     cmd+="if [ \"\$(t show-options -wqv -t $q_window @code_notify_autorename)\" = on ]; then "
     cmd+="t set-option -w -t $q_window automatic-rename on; fi; "
+    cmd+="fi; "
     cmd+="t set-option -wu -t $q_window @code_notify_orig_name; "
     cmd+="t set-option -wu -t $q_window @code_notify_autorename; "
+    cmd+="t set-option -wu -t $q_window @code_notify_badged_name; "
     cmd+="fi"
 
     printf '%s' "$cmd"

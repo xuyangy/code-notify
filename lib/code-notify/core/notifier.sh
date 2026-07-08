@@ -852,8 +852,8 @@ choose_random_message() {
 BADGE_ICON=""
 case "$HOOK_TYPE" in
     "stop")
-        TITLE="$TOOL_DISPLAY 🏁"
-        BADGE_ICON="🏁"
+        TITLE="$TOOL_DISPLAY 🎯"
+        BADGE_ICON="🎯"
         SUBTITLE="Task Complete"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY completed the task" \
@@ -1303,7 +1303,9 @@ get_notification_sound_file() {
 
 # Badge the originating tmux window's name with the event icon so the alert
 # stays visible in the status line. Sweep first so badges on windows the user
-# has since visited are restored before a new one lands.
+# has since visited are restored before a new one lands. Clicking the
+# notification also clears the badge on macOS; elsewhere only the sweep
+# clears it (notify-send has no click hook).
 tmux_badge_sweep 2>/dev/null || true
 if [[ -n "$BADGE_ICON" ]]; then
     tmux_badge_set "$BADGE_ICON" 2>/dev/null || true

@@ -18,6 +18,13 @@ test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
 
 export HOME="$test_dir/home"
+
+# Clear runtime terminal hints and overrides inherited from the host shell
+# (iTerm2 sets LC_TERMINAL/__CFBundleIdentifier, JediTerm sets
+# TERMINAL_EMULATOR, and users may export CODE_NOTIFY_CLICK_BUNDLE_ID) so
+# activation resolution only sees what each test case sets explicitly.
+unset __CFBundleIdentifier TERMINAL_EMULATOR LC_TERMINAL \
+    CODE_NOTIFY_CLICK_BUNDLE_ID CODE_NOTIFY_CLICK_THROUGH_APP_PATH
 fake_bin="$test_dir/bin"
 notification_log="$test_dir/terminal-notifier.log"
 config_file="$HOME/.code-notify/click-through.conf"

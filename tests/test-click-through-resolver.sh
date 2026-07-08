@@ -49,8 +49,9 @@ JetBrains-JediTerm=com.jetbrains.pycharm
 EOF
 
 # Clear all runtime terminal hints so the host environment (iTerm2 sets
-# LC_TERMINAL, JediTerm sets TERMINAL_EMULATOR) can't leak into resolution.
-unset __CFBundleIdentifier TERMINAL_EMULATOR LC_TERMINAL
+# LC_TERMINAL, JediTerm sets TERMINAL_EMULATOR, and users may export the
+# CODE_NOTIFY_CLICK_BUNDLE_ID override) can't leak into resolution.
+unset __CFBundleIdentifier TERMINAL_EMULATOR LC_TERMINAL CODE_NOTIFY_CLICK_BUNDLE_ID
 
 TERM_PROGRAM="JetBrains-JediTerm"
 [[ "$(click_through_resolve_configured_bundle_id)" == "com.jetbrains.pycharm" ]] || fail "configured resolution should prefer the live TERM_PROGRAM"

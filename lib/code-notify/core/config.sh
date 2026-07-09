@@ -306,6 +306,15 @@ get_project_claude_pre_tool_use_command() {
     printf '%s PreToolUse claude %s\n' "$(shell_quote "$(get_notify_script)")" "$(shell_quote "$project_name")"
 }
 
+get_global_claude_user_prompt_command() {
+    printf '%s UserPromptSubmit claude\n' "$(get_notify_script)"
+}
+
+get_project_claude_user_prompt_command() {
+    local project_name="$1"
+    printf '%s UserPromptSubmit claude %s\n' "$(shell_quote "$(get_notify_script)")" "$(shell_quote "$project_name")"
+}
+
 get_global_codex_stop_command() {
     printf '%s stop codex\n' "$(get_notify_script)"
 }
@@ -320,6 +329,10 @@ get_managed_claude_event_pattern() {
 
 get_managed_claude_pre_tool_use_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*PreToolUse(?:\s|$)'
+}
+
+get_managed_claude_user_prompt_pattern() {
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*UserPromptSubmit(?:\s|$)'
 }
 
 get_managed_claude_notification_pattern() {
@@ -1244,6 +1257,288 @@ PYTHON
     fi
 }
 
+# ============================================
+# UserPromptSubmit Hook for badge clearing
+# ============================================
+
+# Register the UserPromptSubmit hook that clears the current tmux window's badge
+# when the user submits a prompt (Claude's "engage-clear" signal). Unlike
+# ask_user this is not tied to an alert type — it is added whenever Claude hooks
+# are enabled and is a no-op at runtime when not inside tmux.
+register_badge_clear_hook() {
+    local file="$1"
+    local prompt_cmd="$2"
+    local prompt_pattern
+    prompt_pattern="$(get_managed_claude_user_prompt_pattern)"
+
+    if has_jq; then
+        local settings="{}"
+        if [[ -f "$file" ]]; then
+            settings=$(cat "$file")
+        fi
+
+        local new_settings
+        new_settings=$(printf '%s\n' "$settings" | jq \
+            --arg cmd "$prompt_cmd" \
+            --arg pattern "$prompt_pattern" \
+            '
+            def array_or_empty:
+                if type == "array" then . else [] end;
+            def is_managed_hook($exact; $pattern):
+                ((.type // "") == "command") and
+                (
+                    ((.command // "") == $exact) or
+                    (((.command // "") | test($pattern)) // false)
+                );
+            def strip_managed_prompt($exact; $pattern):
+                array_or_empty
+                | map(
+                    if (.matcher // "") == "" and ((.hooks | type) == "array") then
+                        .hooks = (
+                            (.hooks | array_or_empty)
+                            | map(select((is_managed_hook($exact; $pattern)) | not))
+                        )
+                    else
+                        .
+                    end
+                )
+                | map(select(((.hooks | type) != "array") or ((.hooks | length) > 0)));
+            .hooks = (if (.hooks | type) == "object" then .hooks else {} end) |
+            .hooks.UserPromptSubmit = (
+                (.hooks.UserPromptSubmit | strip_managed_prompt($cmd; $pattern)) + [{
+                    "matcher": "",
+                    "hooks": [{
+                        "type": "command",
+                        "command": $cmd
+                    }]
+                }]
+            )
+        ' 2>/dev/null)
+
+        if [[ -n "$new_settings" ]]; then
+            atomic_write "$file" "$new_settings"
+        fi
+    elif has_python3; then
+        local settings="{}"
+        if [[ -f "$file" ]]; then
+            settings=$(cat "$file")
+        fi
+
+        local tmp_json
+        tmp_json=$(mktemp) || return 1
+        printf '%s\n' "$settings" > "$tmp_json"
+
+        python3 - "$file" "$prompt_cmd" "$prompt_pattern" "$tmp_json" << 'PYTHON'
+import json, os, sys, tempfile
+import re
+
+file_path, prompt_cmd, prompt_pattern, json_file = sys.argv[1:5]
+
+try:
+    with open(json_file, "r") as fh:
+        settings = json.load(fh)
+finally:
+    try:
+        os.unlink(json_file)
+    except OSError:
+        pass
+
+hooks = settings.get("hooks")
+if not isinstance(hooks, dict):
+    hooks = {}
+else:
+    hooks = dict(hooks)
+
+prompt_regex = re.compile(prompt_pattern)
+
+def is_managed_hook(hook):
+    if not isinstance(hook, dict) or hook.get("type") != "command":
+        return False
+    command = hook.get("command")
+    if not isinstance(command, str):
+        return False
+    return command == prompt_cmd or bool(prompt_regex.search(command))
+
+prompt_entries = []
+for entry in hooks.get("UserPromptSubmit", []):
+    if not isinstance(entry, dict):
+        prompt_entries.append(entry)
+        continue
+    if entry.get("matcher", "") != "":
+        prompt_entries.append(entry)
+        continue
+    filtered_hooks = [hook for hook in entry.get("hooks", []) if not is_managed_hook(hook)]
+    if filtered_hooks:
+        new_entry = dict(entry)
+        new_entry["hooks"] = filtered_hooks
+        prompt_entries.append(new_entry)
+
+prompt_entries.append({
+    "matcher": "",
+    "hooks": [{"type": "command", "command": prompt_cmd}]
+})
+hooks["UserPromptSubmit"] = prompt_entries
+settings["hooks"] = hooks
+
+dir_path = os.path.dirname(file_path)
+content = json.dumps(settings, indent=2)
+fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".tmp.")
+try:
+    with os.fdopen(fd, "w") as fh:
+        fh.write(content)
+        fh.write("\n")
+    os.replace(tmp_path, file_path)
+except Exception:
+    os.unlink(tmp_path)
+    raise
+PYTHON
+        return $?
+    else
+        echo "Error: jq or python3 required for config preservation" >&2
+        echo "Install jq: brew install jq" >&2
+        return 1
+    fi
+}
+
+# Unregister the UserPromptSubmit badge-clear hook.
+unregister_badge_clear_hook() {
+    local file="$1"
+    local prompt_cmd="${2:-}"
+    local prompt_pattern
+    prompt_pattern="$(get_managed_claude_user_prompt_pattern)"
+
+    if [[ ! -f "$file" ]]; then
+        return 0
+    fi
+
+    if has_jq; then
+        local settings
+        settings=$(cat "$file")
+
+        local new_settings
+        new_settings=$(printf '%s\n' "$settings" | jq \
+            --arg cmd "$prompt_cmd" \
+            --arg pattern "$prompt_pattern" \
+            '
+            def array_or_empty:
+                if type == "array" then . else [] end;
+            def is_managed_hook($exact; $pattern):
+                ((.type // "") == "command") and
+                (
+                    ((($exact != "") and ((.command // "") == $exact))) or
+                    (((.command // "") | test($pattern)) // false)
+                );
+            if (.hooks // {}).UserPromptSubmit then
+                .hooks.UserPromptSubmit = (
+                    (.hooks.UserPromptSubmit | array_or_empty)
+                    | map(
+                        if (.matcher // "") == "" and ((.hooks | type) == "array") then
+                            .hooks = (
+                                (.hooks | array_or_empty)
+                                | map(select((is_managed_hook($cmd; $pattern)) | not))
+                            )
+                        else
+                            .
+                        end
+                    )
+                    | map(select(((.hooks | type) != "array") or ((.hooks | length) > 0)))
+                ) |
+                if (.hooks.UserPromptSubmit | length) == 0 then del(.hooks.UserPromptSubmit) else . end |
+                if (.hooks | length) == 0 then del(.hooks) else . end
+            else . end
+        ' 2>/dev/null)
+
+        if [[ -n "$new_settings" ]]; then
+            # This unregister runs last in disable_hooks_in_settings, so when it
+            # empties the file it must remove it (the python path already does),
+            # matching update_claude_hooks_in_settings_file's rm-on-empty.
+            if [[ "$new_settings" == "{}" ]]; then
+                rm -f "$file"
+            else
+                atomic_write "$file" "$new_settings"
+            fi
+        fi
+    elif has_python3; then
+        local tmp_json
+        tmp_json=$(mktemp) || return 1
+        cat "$file" > "$tmp_json"
+
+        python3 - "$file" "$prompt_cmd" "$prompt_pattern" "$tmp_json" << 'PYTHON'
+import json, os, sys, tempfile
+import re
+
+file_path, prompt_cmd, prompt_pattern, json_file = sys.argv[1:5]
+
+try:
+    with open(json_file, "r") as fh:
+        settings = json.load(fh)
+finally:
+    try:
+        os.unlink(json_file)
+    except OSError:
+        pass
+
+hooks = settings.get("hooks", {})
+prompt = hooks.get("UserPromptSubmit", [])
+prompt_regex = re.compile(prompt_pattern)
+
+def is_managed_hook(hook):
+    if not isinstance(hook, dict) or hook.get("type") != "command":
+        return False
+    command = hook.get("command")
+    if not isinstance(command, str):
+        return False
+    return (prompt_cmd and command == prompt_cmd) or bool(prompt_regex.search(command))
+
+filtered_entries = []
+for entry in prompt:
+    if not isinstance(entry, dict):
+        filtered_entries.append(entry)
+        continue
+    if entry.get("matcher", "") != "":
+        filtered_entries.append(entry)
+        continue
+    filtered_hooks = [hook for hook in entry.get("hooks", []) if not is_managed_hook(hook)]
+    if filtered_hooks:
+        new_entry = dict(entry)
+        new_entry["hooks"] = filtered_hooks
+        filtered_entries.append(new_entry)
+
+hooks["UserPromptSubmit"] = filtered_entries
+if "UserPromptSubmit" in hooks and not hooks["UserPromptSubmit"]:
+    del hooks["UserPromptSubmit"]
+if hooks:
+    settings["hooks"] = hooks
+else:
+    settings.pop("hooks", None)
+
+if not settings:
+    try:
+        os.remove(file_path)
+    except FileNotFoundError:
+        pass
+    raise SystemExit(0)
+
+dir_path = os.path.dirname(file_path)
+content = json.dumps(settings, indent=2)
+fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".tmp.")
+try:
+    with os.fdopen(fd, "w") as fh:
+        fh.write(content)
+        fh.write("\n")
+    os.replace(tmp_path, file_path)
+except Exception:
+    os.unlink(tmp_path)
+    raise
+PYTHON
+        return $?
+    else
+        echo "Error: jq or python3 required for config preservation" >&2
+        echo "Install jq: brew install jq" >&2
+        return 1
+    fi
+}
+
 enable_hooks_in_settings() {
     local notify_matcher
     notify_matcher=$(get_notify_matcher)
@@ -1259,6 +1554,9 @@ enable_hooks_in_settings() {
 
     # Register PreToolUse hook for AskUserQuestion if ask_user alert type is enabled
     register_ask_user_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_pre_tool_use_command)"
+
+    # Register UserPromptSubmit hook that clears the tmux window badge on engage
+    register_badge_clear_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_user_prompt_command)"
 }
 
 # Disable hooks in settings.json (new format)
@@ -1278,6 +1576,9 @@ disable_hooks_in_settings() {
 
     # Remove PreToolUse hook for AskUserQuestion
     unregister_ask_user_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_pre_tool_use_command)"
+
+    # Remove UserPromptSubmit badge-clear hook
+    unregister_badge_clear_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_user_prompt_command)"
 }
 
 # Disable hooks in project settings.json
@@ -1301,6 +1602,9 @@ disable_project_hooks_in_settings() {
 
     # Remove PreToolUse hook for AskUserQuestion
     unregister_ask_user_hook "$project_settings" "$(get_project_claude_pre_tool_use_command "$project_name")"
+
+    # Remove UserPromptSubmit badge-clear hook
+    unregister_badge_clear_hook "$project_settings" "$(get_project_claude_user_prompt_command "$project_name")"
 }
 
 # Enable hooks in project settings.json
@@ -1324,6 +1628,9 @@ enable_project_hooks_in_settings() {
 
     # Register PreToolUse hook for AskUserQuestion if ask_user alert type is enabled
     register_ask_user_hook "$project_settings" "$(get_project_claude_pre_tool_use_command "$project_name")"
+
+    # Register UserPromptSubmit hook that clears the tmux window badge on engage
+    register_badge_clear_hook "$project_settings" "$(get_project_claude_user_prompt_command "$project_name")"
 }
 
 # Check if project has settings.json with code-notify hooks

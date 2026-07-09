@@ -24,6 +24,18 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "_description": "Clears the originating tmux window's badge when you submit a prompt (engage-clear)",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.code-notify/lib/code-notify/core/notifier.sh UserPromptSubmit claude"
+          }
+        ]
+      }
     ]
   }
 }

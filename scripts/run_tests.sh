@@ -326,6 +326,14 @@ else
     test_fail "ask_user alert preservation failed"
 fi
 
+# Test 24: UserPromptSubmit badge-clear hook installs/removes across jq+python
+test_start "badge-clear hook install"
+if bash tests/test-badge-clear-hook.sh >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "badge-clear hook install failed"
+fi
+
 # Summary
 echo ""
 echo "Test Summary:"

@@ -615,6 +615,20 @@ tmux_spinner_disarm || fail "spinner disarm should succeed"
 [[ ! -f "$state_dir/.@code_notify_spinner_snip" ]] || fail "disarm should drop the saved snippet"
 pass "spinner arm/disarm round-trips the status-line state"
 
+# --- spinner: #I themes render the moon after the window number ---
+printf '%s' "#[fg=grey] #I #{window_name} " > "$state_dir/.window-status-format"
+printf '%s' "#[fg=green] #I #{window_name} " > "$state_dir/.window-status-current-format"
+tmux_spinner_arm || fail "spinner arm for #I placement should succeed"
+snip="$(cat "$state_dir/.@code_notify_spinner_snip")"
+[[ "$(cat "$state_dir/.window-status-format")" == "#[fg=grey] #I $snip#{window_name} " ]] \
+    || fail "spinner should follow #I in window-status-format"
+[[ "$(cat "$state_dir/.window-status-current-format")" == "#[fg=green] #I $snip#{window_name} " ]] \
+    || fail "spinner should follow #I in window-status-current-format"
+tmux_spinner_disarm || fail "spinner disarm after #I placement should succeed"
+[[ "$(cat "$state_dir/.window-status-format")" == "#[fg=grey] #I #{window_name} " ]] \
+    || fail "spinner disarm should restore an inline #I format"
+pass "spinner follows the window number"
+
 # --- spinner: user-replaced format is left alone on disarm ---
 tmux_spinner_arm || fail "arm for replaced-format test should succeed"
 printf '%s' "USER-NEW-FMT" > "$state_dir/.window-status-format"   # user replaced it wholesale

@@ -508,7 +508,25 @@ tmux_spinner_restore_session_intervals() {
     return 0
 }
 
-# Prepend the spinner snippet to the global window-status formats and lower
+# Put the spinner immediately after tmux's conventional #I window-number token
+# when the theme uses it: `3 🌕 project` rather than a moon visually attached to
+# the previous Powerline segment. Themes without #I retain the old prefix
+# fallback so the indicator remains visible.
+tmux_spinner_insert_after_window_number() {
+    local format="$1" snip="$2" before after
+    if [[ "$format" == *"#I"* ]]; then
+        before="${format%%\#I*}"
+        after="${format#*\#I}"
+        # The vast majority of themes separate #I and the name with a space.
+        # snip already ends with one, so consume that separator to avoid two.
+        [[ "$after" == " "* ]] && after="${after# }"
+        printf '%s' "${before}#I ${snip}${after}"
+    else
+        printf '%s' "${snip}${format}"
+    fi
+}
+
+# Add the spinner snippet to the global window-status formats and lower
 # status-interval to 1 so the frame advances every second. Idempotent: the
 # saved snippet (@code_notify_spinner_snip) doubles as the armed flag. The
 # exact snippet is saved so disarm can strip precisely what was added even if
@@ -533,16 +551,18 @@ tmux_spinner_arm() {
     tmux set-option -g @code_notify_spinner_snip "$snip" 2>/dev/null || return 0
     tmux set-option -g @code_notify_saved_interval "${interval:-15}" 2>/dev/null
     tmux set-option -g @code_notify_clock '%s' 2>/dev/null
-    tmux set-option -gw window-status-format "$snip$wsf" 2>/dev/null
-    tmux set-option -gw window-status-current-format "$snip$wscf" 2>/dev/null
+    tmux set-option -gw window-status-format \
+        "$(tmux_spinner_insert_after_window_number "$wsf" "$snip")" 2>/dev/null
+    tmux set-option -gw window-status-current-format \
+        "$(tmux_spinner_insert_after_window_number "$wscf" "$snip")" 2>/dev/null
     tmux set-option -g status-interval 1 2>/dev/null
     tmux_spinner_sync_session_intervals
     return 0
 }
 
-# Undo tmux_spinner_arm: strip the exact snippet that was prepended (a format
-# the user has since replaced wholesale is left alone), restore the saved
-# status-interval, and drop the bookkeeping options. No-op when not armed.
+# Undo tmux_spinner_arm: strip the exact snippet wherever it was injected (a
+# format the user has since replaced wholesale is left alone), restore the
+# saved status-interval, and drop the bookkeeping options. No-op when not armed.
 tmux_spinner_disarm() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
     local snip cur interval
@@ -551,12 +571,12 @@ tmux_spinner_disarm() {
         return 0
     fi
     cur=$(tmux show-options -gwv window-status-format 2>/dev/null)
-    if [[ "$cur" == "$snip"* ]]; then
-        tmux set-option -gw window-status-format "${cur#"$snip"}" 2>/dev/null
+    if [[ "$cur" == *"$snip"* ]]; then
+        tmux set-option -gw window-status-format "${cur/"$snip"/}" 2>/dev/null
     fi
     cur=$(tmux show-options -gwv window-status-current-format 2>/dev/null)
-    if [[ "$cur" == "$snip"* ]]; then
-        tmux set-option -gw window-status-current-format "${cur#"$snip"}" 2>/dev/null
+    if [[ "$cur" == *"$snip"* ]]; then
+        tmux set-option -gw window-status-current-format "${cur/"$snip"/}" 2>/dev/null
     fi
     interval=$(tmux show-options -gqv @code_notify_saved_interval 2>/dev/null)
     if [[ -n "$interval" ]]; then

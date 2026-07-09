@@ -577,7 +577,7 @@ show_status() {
         if is_tool_enabled "codex"; then
             echo "  ${CHECK_MARK} Codex: ${GREEN}ENABLED${RESET}"
             echo "     Config: $CODEX_HOOKS_FILE"
-            echo "     Events: completion via Stop hook"
+            echo "     Events: completion via Stop; running indicator resumes after approval/input"
             echo "     Codex TUI notifications: disabled to avoid duplicate toasts"
             if is_notify_type_enabled "permission_prompt"; then
                 echo "     Approval alerts: ENABLED via PermissionRequest hook"

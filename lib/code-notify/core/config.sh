@@ -315,6 +315,28 @@ get_project_claude_user_prompt_command() {
     printf '%s UserPromptSubmit claude %s\n' "$(shell_quote "$(get_notify_script)")" "$(shell_quote "$project_name")"
 }
 
+get_global_claude_post_tool_command() {
+    printf '%s PostToolUse claude\n' "$(get_notify_script)"
+}
+
+get_project_claude_post_tool_command() {
+    local project_name="$1"
+    printf '%s PostToolUse claude %s\n' "$(shell_quote "$(get_notify_script)")" "$(shell_quote "$project_name")"
+}
+
+# PreToolUse is a fallback resume signal for input tools that do not emit a
+# PostToolUse event themselves. It is deliberately distinct from the existing
+# AskUserQuestion notifier command: the notifier only resumes when a prior
+# input/approval pause marker exists, so normal tool calls remain silent.
+get_global_claude_resume_after_input_command() {
+    printf '%s ResumeAfterInput claude\n' "$(get_notify_script)"
+}
+
+get_project_claude_resume_after_input_command() {
+    local project_name="$1"
+    printf '%s ResumeAfterInput claude %s\n' "$(shell_quote "$(get_notify_script)")" "$(shell_quote "$project_name")"
+}
+
 get_global_codex_stop_command() {
     printf '%s stop codex\n' "$(get_notify_script)"
 }
@@ -332,6 +354,14 @@ get_global_codex_prompt_command() {
     printf '%s UserPromptSubmit codex\n' "$(get_notify_script)"
 }
 
+get_global_codex_post_tool_command() {
+    printf '%s PostToolUse codex\n' "$(get_notify_script)"
+}
+
+get_global_codex_resume_after_input_command() {
+    printf '%s ResumeAfterInput codex\n' "$(get_notify_script)"
+}
+
 get_managed_claude_event_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(SubagentStart|SubagentStop|TeammateIdle|TaskCreated|TaskCompleted)(?:\s|$)'
 }
@@ -344,6 +374,14 @@ get_managed_claude_user_prompt_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*UserPromptSubmit(?:\s|$)'
 }
 
+get_managed_claude_post_tool_pattern() {
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*PostToolUse(?:\s|$)'
+}
+
+get_managed_claude_resume_after_input_pattern() {
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*ResumeAfterInput(?:\s|$)'
+}
+
 get_managed_claude_notification_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(notification|PreToolUse)(?:\s|$)'
 }
@@ -353,7 +391,7 @@ get_managed_claude_stop_pattern() {
 }
 
 get_managed_codex_hook_pattern() {
-    printf '%s\n' '(code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(stop|notification|UserPromptSubmit)\s+codex(?:\s|$)'
+    printf '%s\n' '(code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(stop|notification|UserPromptSubmit|PostToolUse|ResumeAfterInput)\s+codex(?:\s|$)'
 }
 
 has_claude_hooks_for_commands() {
@@ -468,6 +506,50 @@ PYTHON
     return 0
 }
 
+# A current Claude install also needs the lifecycle hooks that swap a paused
+# input request back to the running indicator. Keeping this in enablement
+# detection makes `cn on claude` repair pre-existing installations instead of
+# reporting them as already enabled and leaving the new hooks absent.
+has_empty_matcher_lifecycle_command() {
+    local file="$1" event="$2" command="$3"
+    [[ -f "$file" ]] || return 1
+
+    if has_jq; then
+        jq -e --arg event "$event" --arg command "$command" '
+            any((.hooks[$event] // [])[]?;
+                (.matcher // "") == "" and
+                any(.hooks[]?; (.type // "") == "command" and (.command // "") == $command)
+            )
+        ' "$file" >/dev/null 2>&1
+        return $?
+    fi
+
+    if has_python3; then
+        python3 - "$file" "$event" "$command" << 'PYTHON' 2>/dev/null
+import json
+import sys
+
+file_path, event, command = sys.argv[1:4]
+try:
+    with open(file_path, "r", encoding="utf-8") as fh:
+        hooks = json.load(fh).get("hooks", {})
+except Exception:
+    raise SystemExit(1)
+
+for entry in hooks.get(event, []):
+    if not isinstance(entry, dict) or entry.get("matcher", "") != "":
+        continue
+    for hook in entry.get("hooks", []):
+        if isinstance(hook, dict) and hook.get("type") == "command" and hook.get("command") == command:
+            raise SystemExit(0)
+raise SystemExit(1)
+PYTHON
+        return $?
+    fi
+
+    grep -qF "\"command\": \"$command\"" "$file"
+}
+
 has_current_global_claude_hooks() {
     local file="$1"
     has_claude_hooks_for_commands \
@@ -476,7 +558,10 @@ has_current_global_claude_hooks() {
         "$(get_global_claude_notify_command)" \
         "$(get_global_claude_stop_command)" \
         "$(get_notify_script) " \
-        " claude"
+        " claude" || return 1
+    has_empty_matcher_lifecycle_command "$file" "UserPromptSubmit" "$(get_global_claude_user_prompt_command)" || return 1
+    has_empty_matcher_lifecycle_command "$file" "PostToolUse" "$(get_global_claude_post_tool_command)" || return 1
+    has_empty_matcher_lifecycle_command "$file" "PreToolUse" "$(get_global_claude_resume_after_input_command)"
 }
 
 has_current_project_claude_hooks() {
@@ -489,7 +574,10 @@ has_current_project_claude_hooks() {
         "$(get_project_claude_notify_command "$project_name")" \
         "$(get_project_claude_stop_command "$project_name")" \
         "$(shell_quote "$(get_notify_script)") " \
-        " claude $(shell_quote "$project_name")"
+        " claude $(shell_quote "$project_name")" || return 1
+    has_empty_matcher_lifecycle_command "$file" "UserPromptSubmit" "$(get_project_claude_user_prompt_command "$project_name")" || return 1
+    has_empty_matcher_lifecycle_command "$file" "PostToolUse" "$(get_project_claude_post_tool_command "$project_name")" || return 1
+    has_empty_matcher_lifecycle_command "$file" "PreToolUse" "$(get_project_claude_resume_after_input_command "$project_name")"
 }
 
 has_legacy_global_claude_hooks() {
@@ -1548,6 +1636,248 @@ PYTHON
     fi
 }
 
+# Register a command under a no-matcher lifecycle event while preserving every
+# unrelated hook in the same settings file. This is shared by the lightweight
+# resume hooks below; unlike notification hooks, these commands are silent
+# unless a tmux input-pause marker is present.
+register_empty_matcher_lifecycle_hook() {
+    local file="$1"
+    local event="$2"
+    local hook_cmd="$3"
+    local hook_pattern="$4"
+
+    if has_jq; then
+        local settings="{}"
+        [[ -f "$file" ]] && settings=$(cat "$file")
+        local new_settings
+        new_settings=$(printf '%s\n' "$settings" | jq \
+            --arg event "$event" \
+            --arg cmd "$hook_cmd" \
+            --arg pattern "$hook_pattern" \
+            '
+            def array_or_empty: if type == "array" then . else [] end;
+            def is_managed_hook($exact; $pattern):
+                ((.type // "") == "command") and
+                (((.command // "") == $exact) or (((.command // "") | test($pattern)) // false));
+            def strip_managed($exact; $pattern):
+                array_or_empty
+                | map(
+                    if (.matcher // "") == "" and ((.hooks | type) == "array") then
+                        .hooks = ((.hooks | array_or_empty)
+                            | map(select((is_managed_hook($exact; $pattern)) | not)))
+                    else . end
+                )
+                | map(select(((.hooks | type) != "array") or ((.hooks | length) > 0)));
+            .hooks = (if (.hooks | type) == "object" then .hooks else {} end) |
+            .hooks[$event] = ((.hooks[$event] | strip_managed($cmd; $pattern)) + [{
+                "matcher": "",
+                "hooks": [{"type": "command", "command": $cmd}]
+            }])
+        ' 2>/dev/null)
+        if [[ -n "$new_settings" ]]; then
+            atomic_write "$file" "$new_settings"
+            return $?
+        fi
+        return 1
+    fi
+
+    if has_python3; then
+        local settings="{}" tmp_json
+        [[ -f "$file" ]] && settings=$(cat "$file")
+        tmp_json=$(mktemp) || return 1
+        printf '%s\n' "$settings" > "$tmp_json"
+        python3 - "$file" "$event" "$hook_cmd" "$hook_pattern" "$tmp_json" << 'PYTHON'
+import json
+import os
+import re
+import sys
+import tempfile
+
+file_path, event, hook_cmd, hook_pattern, json_file = sys.argv[1:6]
+try:
+    with open(json_file, "r", encoding="utf-8") as fh:
+        settings = json.load(fh)
+finally:
+    try:
+        os.unlink(json_file)
+    except OSError:
+        pass
+
+if not isinstance(settings, dict):
+    settings = {}
+hooks = settings.get("hooks")
+if not isinstance(hooks, dict):
+    hooks = {}
+else:
+    hooks = dict(hooks)
+pattern = re.compile(hook_pattern)
+
+def managed(hook):
+    if not isinstance(hook, dict) or hook.get("type") != "command":
+        return False
+    command = hook.get("command")
+    return isinstance(command, str) and (command == hook_cmd or bool(pattern.search(command)))
+
+entries = []
+for entry in hooks.get(event, []):
+    if not isinstance(entry, dict) or entry.get("matcher", "") != "":
+        entries.append(entry)
+        continue
+    retained = [hook for hook in entry.get("hooks", []) if not managed(hook)]
+    if retained:
+        replacement = dict(entry)
+        replacement["hooks"] = retained
+        entries.append(replacement)
+entries.append({"matcher": "", "hooks": [{"type": "command", "command": hook_cmd}]})
+hooks[event] = entries
+settings["hooks"] = hooks
+
+dir_path = os.path.dirname(file_path)
+fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".tmp.")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(settings, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp_path, file_path)
+except Exception:
+    os.unlink(tmp_path)
+    raise
+PYTHON
+        return $?
+    fi
+
+    echo "Error: jq or python3 required for config preservation" >&2
+    return 1
+}
+
+# Remove a no-matcher lifecycle command installed by the helper above without
+# disturbing user hooks for the same event.
+unregister_empty_matcher_lifecycle_hook() {
+    local file="$1"
+    local event="$2"
+    local hook_cmd="$3"
+    local hook_pattern="$4"
+    [[ -f "$file" ]] || return 0
+
+    if has_jq; then
+        local settings new_settings
+        settings=$(cat "$file")
+        new_settings=$(printf '%s\n' "$settings" | jq \
+            --arg event "$event" \
+            --arg cmd "$hook_cmd" \
+            --arg pattern "$hook_pattern" \
+            '
+            def array_or_empty: if type == "array" then . else [] end;
+            def is_managed_hook($exact; $pattern):
+                ((.type // "") == "command") and
+                (((($exact != "") and ((.command // "") == $exact))) or
+                    (((.command // "") | test($pattern)) // false));
+            if (.hooks // {})[$event] then
+                .hooks[$event] = ((.hooks[$event] | array_or_empty)
+                    | map(
+                        if (.matcher // "") == "" and ((.hooks | type) == "array") then
+                            .hooks = ((.hooks | array_or_empty)
+                                | map(select((is_managed_hook($cmd; $pattern)) | not)))
+                        else . end
+                    )
+                    | map(select(((.hooks | type) != "array") or ((.hooks | length) > 0)))) |
+                if (.hooks[$event] | length) == 0 then del(.hooks[$event]) else . end |
+                if (.hooks | length) == 0 then del(.hooks) else . end
+            else . end
+        ' 2>/dev/null)
+        if [[ -n "$new_settings" ]]; then
+            if [[ "$new_settings" == "{}" ]]; then rm -f "$file"; else atomic_write "$file" "$new_settings"; fi
+        fi
+        return 0
+    fi
+
+    if has_python3; then
+        local tmp_json
+        tmp_json=$(mktemp) || return 1
+        cat "$file" > "$tmp_json"
+        python3 - "$file" "$event" "$hook_cmd" "$hook_pattern" "$tmp_json" << 'PYTHON'
+import json
+import os
+import re
+import sys
+import tempfile
+
+file_path, event, hook_cmd, hook_pattern, json_file = sys.argv[1:6]
+try:
+    with open(json_file, "r", encoding="utf-8") as fh:
+        settings = json.load(fh)
+finally:
+    try:
+        os.unlink(json_file)
+    except OSError:
+        pass
+
+hooks = settings.get("hooks", {})
+if not isinstance(hooks, dict):
+    raise SystemExit(0)
+pattern = re.compile(hook_pattern)
+
+def managed(hook):
+    if not isinstance(hook, dict) or hook.get("type") != "command":
+        return False
+    command = hook.get("command")
+    return isinstance(command, str) and ((hook_cmd and command == hook_cmd) or bool(pattern.search(command)))
+
+entries = []
+for entry in hooks.get(event, []):
+    if not isinstance(entry, dict) or entry.get("matcher", "") != "":
+        entries.append(entry)
+        continue
+    retained = [hook for hook in entry.get("hooks", []) if not managed(hook)]
+    if retained:
+        replacement = dict(entry)
+        replacement["hooks"] = retained
+        entries.append(replacement)
+if entries:
+    hooks[event] = entries
+else:
+    hooks.pop(event, None)
+if hooks:
+    settings["hooks"] = hooks
+else:
+    settings.pop("hooks", None)
+if not settings:
+    try:
+        os.remove(file_path)
+    except FileNotFoundError:
+        pass
+    raise SystemExit(0)
+
+dir_path = os.path.dirname(file_path)
+fd, tmp_path = tempfile.mkstemp(dir=dir_path, prefix=".tmp.")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(settings, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp_path, file_path)
+except Exception:
+    os.unlink(tmp_path)
+    raise
+PYTHON
+        return $?
+    fi
+
+    echo "Error: jq or python3 required for config preservation" >&2
+    return 1
+}
+
+register_resume_after_input_hooks() {
+    local file="$1" post_tool_cmd="$2" resume_cmd="$3"
+    register_empty_matcher_lifecycle_hook "$file" "PostToolUse" "$post_tool_cmd" "$(get_managed_claude_post_tool_pattern)" || return 1
+    register_empty_matcher_lifecycle_hook "$file" "PreToolUse" "$resume_cmd" "$(get_managed_claude_resume_after_input_pattern)"
+}
+
+unregister_resume_after_input_hooks() {
+    local file="$1" post_tool_cmd="$2" resume_cmd="$3"
+    unregister_empty_matcher_lifecycle_hook "$file" "PostToolUse" "$post_tool_cmd" "$(get_managed_claude_post_tool_pattern)" || return 1
+    unregister_empty_matcher_lifecycle_hook "$file" "PreToolUse" "$resume_cmd" "$(get_managed_claude_resume_after_input_pattern)"
+}
+
 enable_hooks_in_settings() {
     local notify_matcher
     notify_matcher=$(get_notify_matcher)
@@ -1566,6 +1896,14 @@ enable_hooks_in_settings() {
 
     # Register UserPromptSubmit hook that clears the tmux window badge on engage
     register_badge_clear_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_user_prompt_command)"
+
+    # Input responses and approval decisions resume an existing turn without a
+    # UserPromptSubmit event. PostToolUse handles the resumed tool itself and
+    # the silent PreToolUse hook covers input tools that emit no PostToolUse.
+    register_resume_after_input_hooks \
+        "$GLOBAL_SETTINGS_FILE" \
+        "$(get_global_claude_post_tool_command)" \
+        "$(get_global_claude_resume_after_input_command)"
 }
 
 # Disable hooks in settings.json (new format)
@@ -1588,6 +1926,11 @@ disable_hooks_in_settings() {
 
     # Remove UserPromptSubmit badge-clear hook
     unregister_badge_clear_hook "$GLOBAL_SETTINGS_FILE" "$(get_global_claude_user_prompt_command)"
+
+    unregister_resume_after_input_hooks \
+        "$GLOBAL_SETTINGS_FILE" \
+        "$(get_global_claude_post_tool_command)" \
+        "$(get_global_claude_resume_after_input_command)"
 }
 
 # Disable hooks in project settings.json
@@ -1614,6 +1957,11 @@ disable_project_hooks_in_settings() {
 
     # Remove UserPromptSubmit badge-clear hook
     unregister_badge_clear_hook "$project_settings" "$(get_project_claude_user_prompt_command "$project_name")"
+
+    unregister_resume_after_input_hooks \
+        "$project_settings" \
+        "$(get_project_claude_post_tool_command "$project_name")" \
+        "$(get_project_claude_resume_after_input_command "$project_name")"
 }
 
 # Enable hooks in project settings.json
@@ -1640,6 +1988,11 @@ enable_project_hooks_in_settings() {
 
     # Register UserPromptSubmit hook that clears the tmux window badge on engage
     register_badge_clear_hook "$project_settings" "$(get_project_claude_user_prompt_command "$project_name")"
+
+    register_resume_after_input_hooks \
+        "$project_settings" \
+        "$(get_project_claude_post_tool_command "$project_name")" \
+        "$(get_project_claude_resume_after_input_command "$project_name")"
 }
 
 # Check if project has settings.json with code-notify hooks
@@ -1877,10 +2230,12 @@ remove_codex_tui_notifications_override() {
 
 has_current_codex_hooks() {
     local file="${1:-$CODEX_HOOKS_FILE}"
-    local stop_cmd permission_cmd prompt_cmd pattern
+    local stop_cmd permission_cmd prompt_cmd post_tool_cmd resume_cmd pattern
     stop_cmd="$(get_global_codex_stop_command)"
     permission_cmd="$(get_global_codex_permission_command)"
     prompt_cmd="$(get_global_codex_prompt_command)"
+    post_tool_cmd="$(get_global_codex_post_tool_command)"
+    resume_cmd="$(get_global_codex_resume_after_input_command)"
     pattern="$(get_managed_codex_hook_pattern)"
 
     [[ -f "$file" ]] || return 1
@@ -1890,6 +2245,8 @@ has_current_codex_hooks() {
             --arg stop "$stop_cmd" \
             --arg permission "$permission_cmd" \
             --arg prompt "$prompt_cmd" \
+            --arg post_tool "$post_tool_cmd" \
+            --arg resume "$resume_cmd" \
             --arg pattern "$pattern" \
             --argjson permission_enabled "$(is_notify_type_enabled "permission_prompt" && echo true || echo false)" '
             def command_matches($exact):
@@ -1897,6 +2254,8 @@ has_current_codex_hooks() {
 
             any((.hooks.Stop // [])[]?.hooks[]?.command?; command_matches($stop)) and
             any((.hooks.UserPromptSubmit // [])[]?.hooks[]?.command?; command_matches($prompt)) and
+            any((.hooks.PostToolUse // [])[]?.hooks[]?.command?; command_matches($post_tool)) and
+            any((.hooks.PreToolUse // [])[]?.hooks[]?.command?; command_matches($resume)) and
             (
                 ($permission_enabled | not) or
                 any((.hooks.PermissionRequest // [])[]?.hooks[]?.command?; command_matches($permission))
@@ -1906,12 +2265,12 @@ has_current_codex_hooks() {
     fi
 
     if has_python3; then
-        python3 - "$file" "$stop_cmd" "$permission_cmd" "$prompt_cmd" "$pattern" "$(is_notify_type_enabled "permission_prompt" && echo true || echo false)" << 'PYTHON' 2>/dev/null
+        python3 - "$file" "$stop_cmd" "$permission_cmd" "$prompt_cmd" "$post_tool_cmd" "$resume_cmd" "$pattern" "$(is_notify_type_enabled "permission_prompt" && echo true || echo false)" << 'PYTHON' 2>/dev/null
 import json
 import re
 import sys
 
-file_path, stop_cmd, permission_cmd, prompt_cmd, pattern, permission_enabled = sys.argv[1:7]
+file_path, stop_cmd, permission_cmd, prompt_cmd, post_tool_cmd, resume_cmd, pattern, permission_enabled = sys.argv[1:9]
 
 try:
     with open(file_path, "r", encoding="utf-8") as fh:
@@ -1944,25 +2303,40 @@ if not has_command("Stop", stop_cmd):
     raise SystemExit(1)
 if not has_command("UserPromptSubmit", prompt_cmd):
     raise SystemExit(1)
+if not has_command("PostToolUse", post_tool_cmd):
+    raise SystemExit(1)
+if not has_command("PreToolUse", resume_cmd):
+    raise SystemExit(1)
 if permission_enabled == "true" and not has_command("PermissionRequest", permission_cmd):
     raise SystemExit(1)
 PYTHON
         return $?
     fi
 
-    grep -qE '"Stop"|"PermissionRequest"' "$file" &&
+    grep -q '"Stop"' "$file" &&
         grep -q '"UserPromptSubmit"' "$file" &&
+        grep -q '"PostToolUse"' "$file" &&
+        grep -q '"PreToolUse"' "$file" &&
         grep -qE 'code-notify|notifier\.sh|notify\.(sh|ps1)' "$file" &&
-        grep -q 'codex' "$file"
+        grep -q 'codex' "$file" || return 1
+
+    # Keep the parser-free fallback aligned with the jq/Python paths: an
+    # enabled permission_prompt alert requires a PermissionRequest hook.
+    if is_notify_type_enabled "permission_prompt"; then
+        grep -q '"PermissionRequest"' "$file" || return 1
+    fi
+    return 0
 }
 
 update_codex_hooks_file() {
     local mode="$1"
     local file="$2"
-    local stop_cmd permission_cmd prompt_cmd pattern permission_enabled
+    local stop_cmd permission_cmd prompt_cmd post_tool_cmd resume_cmd pattern permission_enabled
     stop_cmd="$(get_global_codex_stop_command)"
     permission_cmd="$(get_global_codex_permission_command)"
     prompt_cmd="$(get_global_codex_prompt_command)"
+    post_tool_cmd="$(get_global_codex_post_tool_command)"
+    resume_cmd="$(get_global_codex_resume_after_input_command)"
     pattern="$(get_managed_codex_hook_pattern)"
     permission_enabled="$(is_notify_type_enabled "permission_prompt" && echo true || echo false)"
 
@@ -1971,7 +2345,7 @@ update_codex_hooks_file() {
             def array_or_empty:
                 if type == "array" then . else [] end;
 
-            def strip_managed($stop; $permission; $prompt; $pattern):
+            def strip_managed($stop; $permission; $prompt; $post_tool; $resume; $pattern):
                 array_or_empty
                 | map(
                     if ((.hooks | type) == "array") then
@@ -1984,6 +2358,8 @@ update_codex_hooks_file() {
                                         (.command // "") == $stop or
                                         (.command // "") == $permission or
                                         (.command // "") == $prompt or
+                                        (.command // "") == $post_tool or
+                                        (.command // "") == $resume or
                                         ((.command // "") | test($pattern))
                                     )
                                 ) | not
@@ -1996,12 +2372,16 @@ update_codex_hooks_file() {
                 | map(select(((.hooks | type) != "array") or ((.hooks | length) > 0)));
 
             .hooks = (if (.hooks | type) == "object" then .hooks else {} end) |
-            .hooks.Stop = (.hooks.Stop | strip_managed($stop; $permission; $prompt; $pattern)) |
-            .hooks.PermissionRequest = (.hooks.PermissionRequest | strip_managed($stop; $permission; $prompt; $pattern)) |
-            .hooks.UserPromptSubmit = (.hooks.UserPromptSubmit | strip_managed($stop; $permission; $prompt; $pattern)) |
+            .hooks.Stop = (.hooks.Stop | strip_managed($stop; $permission; $prompt; $post_tool; $resume; $pattern)) |
+            .hooks.PermissionRequest = (.hooks.PermissionRequest | strip_managed($stop; $permission; $prompt; $post_tool; $resume; $pattern)) |
+            .hooks.UserPromptSubmit = (.hooks.UserPromptSubmit | strip_managed($stop; $permission; $prompt; $post_tool; $resume; $pattern)) |
+            .hooks.PostToolUse = (.hooks.PostToolUse | strip_managed($stop; $permission; $prompt; $post_tool; $resume; $pattern)) |
+            .hooks.PreToolUse = (.hooks.PreToolUse | strip_managed($stop; $permission; $prompt; $post_tool; $resume; $pattern)) |
             if (.hooks.Stop | length) == 0 then del(.hooks.Stop) else . end |
             if (.hooks.PermissionRequest | length) == 0 then del(.hooks.PermissionRequest) else . end |
             if (.hooks.UserPromptSubmit | length) == 0 then del(.hooks.UserPromptSubmit) else . end |
+            if (.hooks.PostToolUse | length) == 0 then del(.hooks.PostToolUse) else . end |
+            if (.hooks.PreToolUse | length) == 0 then del(.hooks.PreToolUse) else . end |
             if $mode == "enable" then
                 .hooks.Stop = ((.hooks.Stop // []) + [{
                     "hooks": [{
@@ -2017,6 +2397,24 @@ update_codex_hooks_file() {
                         "command": $prompt,
                         "timeout": 5,
                         "statusMessage": "Clearing window badge"
+                    }]
+                }]) |
+                .hooks.PostToolUse = ((.hooks.PostToolUse // []) + [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": $post_tool,
+                        "timeout": 5,
+                        "statusMessage": "Restoring running indicator"
+                    }]
+                }]) |
+                .hooks.PreToolUse = ((.hooks.PreToolUse // []) + [{
+                    "matcher": "*",
+                    "hooks": [{
+                        "type": "command",
+                        "command": $resume,
+                        "timeout": 5,
+                        "statusMessage": "Restoring running indicator"
                     }]
                 }]) |
                 if $permission_enabled then
@@ -2040,6 +2438,8 @@ update_codex_hooks_file() {
           --arg stop "$stop_cmd" \
           --arg permission "$permission_cmd" \
           --arg prompt "$prompt_cmd" \
+          --arg post_tool "$post_tool_cmd" \
+          --arg resume "$resume_cmd" \
           --arg pattern "$pattern" \
           --argjson permission_enabled "$permission_enabled"
         return $?
@@ -2048,13 +2448,13 @@ update_codex_hooks_file() {
     if has_python3; then
         local tmp_json
         tmp_json=$(mktemp "$(dirname "$file")/.tmp.XXXXXX") || return 1
-        python3 - "$file" "$mode" "$stop_cmd" "$permission_cmd" "$prompt_cmd" "$pattern" "$permission_enabled" "$tmp_json" << 'PYTHON' || {
+        python3 - "$file" "$mode" "$stop_cmd" "$permission_cmd" "$prompt_cmd" "$post_tool_cmd" "$resume_cmd" "$pattern" "$permission_enabled" "$tmp_json" << 'PYTHON' || {
 import json
 import os
 import re
 import sys
 
-file_path, mode, stop_cmd, permission_cmd, prompt_cmd, pattern, permission_enabled, tmp_path = sys.argv[1:9]
+file_path, mode, stop_cmd, permission_cmd, prompt_cmd, post_tool_cmd, resume_cmd, pattern, permission_enabled, tmp_path = sys.argv[1:11]
 
 try:
     with open(file_path, "r", encoding="utf-8") as fh:
@@ -2099,6 +2499,8 @@ def strip_managed(entries):
                         command == stop_cmd
                         or command == permission_cmd
                         or command == prompt_cmd
+                        or command == post_tool_cmd
+                        or command == resume_cmd
                         or regex.search(command)
                     )
                 ):
@@ -2113,12 +2515,18 @@ def strip_managed(entries):
 hooks["Stop"] = strip_managed(hooks.get("Stop", []))
 hooks["PermissionRequest"] = strip_managed(hooks.get("PermissionRequest", []))
 hooks["UserPromptSubmit"] = strip_managed(hooks.get("UserPromptSubmit", []))
+hooks["PostToolUse"] = strip_managed(hooks.get("PostToolUse", []))
+hooks["PreToolUse"] = strip_managed(hooks.get("PreToolUse", []))
 if not hooks["Stop"]:
     hooks.pop("Stop", None)
 if not hooks.get("PermissionRequest"):
     hooks.pop("PermissionRequest", None)
 if not hooks.get("UserPromptSubmit"):
     hooks.pop("UserPromptSubmit", None)
+if not hooks.get("PostToolUse"):
+    hooks.pop("PostToolUse", None)
+if not hooks.get("PreToolUse"):
+    hooks.pop("PreToolUse", None)
 
 if mode == "enable":
     hooks["Stop"] = list(hooks.get("Stop", [])) + [{
@@ -2135,6 +2543,24 @@ if mode == "enable":
             "command": prompt_cmd,
             "timeout": 5,
             "statusMessage": "Clearing window badge",
+        }],
+    }]
+    hooks["PostToolUse"] = list(hooks.get("PostToolUse", [])) + [{
+        "matcher": "*",
+        "hooks": [{
+            "type": "command",
+            "command": post_tool_cmd,
+            "timeout": 5,
+            "statusMessage": "Restoring running indicator",
+        }],
+    }]
+    hooks["PreToolUse"] = list(hooks.get("PreToolUse", [])) + [{
+        "matcher": "*",
+        "hooks": [{
+            "type": "command",
+            "command": resume_cmd,
+            "timeout": 5,
+            "statusMessage": "Restoring running indicator",
         }],
     }]
     if permission_enabled == "true":

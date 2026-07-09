@@ -514,6 +514,32 @@ tmux_running_stop || fail "running-stop should succeed"
 [[ ! -f "$state_dir/@2.@code_notify_clear_mode" ]] || fail "running-stop should drop the badge state"
 pass "running-stop clears marker and epoch"
 
+# --- an input pause resumes only on a later lifecycle signal ---
+tmux_running_start || fail "running-start before input pause should succeed"
+tmux_running_pause_for_input || fail "input pause should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "input pause should remove the running epoch"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "input pause should retain a resume marker"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "input pause should restore the static running icon (got: $(window_name))"
+tmux_running_resume_after_input || fail "input resume should succeed"
+[[ "$(cat "$state_dir/@2.@code_notify_running")" =~ ^[0-9]+$ ]] \
+    || fail "input resume should restore the running epoch"
+[[ ! -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "input resume should consume the resume marker"
+[[ "$(window_name)" == "🌕 zsh" ]] \
+    || fail "input resume should restore the static running icon (got: $(window_name))"
+tmux_running_stop || fail "cleanup after input resume should succeed"
+pass "input pause resumes the running indicator once"
+
+# --- ordinary tool lifecycle signals must not start a spinner ---
+: > "$log_file"
+tmux_running_resume_after_input || fail "resume without an input pause should succeed"
+grep -q "rename-window" "$log_file" \
+    && fail "resume without a pending marker must not create a running badge"
+pass "resume hook ignores ordinary tool activity"
+
 # --- running-stop leaves an event badge that replaced the marker ---
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 tmux_running_start || fail "running-start before event badge should succeed"
@@ -901,6 +927,31 @@ EOF
         "$state_dir/@2.@code_notify_badged_name" 2>/dev/null || true
     printf '%s' "zsh" > "$state_dir/@2.window_name"
     pass "notifier end-to-end: stop replaces the running marker with the event badge"
+
+    # Responding to an in-turn request does not emit UserPromptSubmit. The
+    # notifier must therefore keep a pause marker from the notification and
+    # let its PostToolUse hook restore the running indicator.
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" notification claude testproj > /dev/null 2>&1 \
+        || fail "notifier.sh input request should exit cleanly"
+    [[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+        || fail "input request should retain a tmux resume marker"
+    [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+        || fail "input request should stop the running indicator"
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" PostToolUse claude testproj > /dev/null 2>&1 \
+        || fail "notifier.sh PostToolUse resume should exit cleanly"
+    [[ "$(window_name)" == "🌕 zsh" ]] \
+        || fail "PostToolUse should restore the running icon after input (got: $(window_name))"
+    [[ ! -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+        || fail "PostToolUse should consume the input pause marker"
+    rm -f "$state_dir/@2.@code_notify_running" "$state_dir/@2.@code_notify_clear_mode" \
+        "$state_dir/@2.@code_notify_orig_name" "$state_dir/@2.@code_notify_autorename" \
+        "$state_dir/@2.@code_notify_badged_name" 2>/dev/null || true
+    printf '%s' "zsh" > "$state_dir/@2.window_name"
+    pass "notifier end-to-end: input response restores the running marker"
 
     # Codex reaches the notifier via its hooks.json as `notifier.sh stop codex`,
     # so RAW_ARG1 is "stop" and only TOOL_NAME is "codex". With no

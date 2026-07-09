@@ -700,6 +700,20 @@ prompt_commands = [
     if hook.get("type") == "command"
 ]
 assert sum(command.endswith(" UserPromptSubmit codex") for command in prompt_commands) == 1, prompt_commands
+post_tool_commands = [
+    hook["command"]
+    for entry in hooks.get("PostToolUse", [])
+    for hook in entry.get("hooks", [])
+    if hook.get("type") == "command"
+]
+assert sum(command.endswith(" PostToolUse codex") for command in post_tool_commands) == 1, post_tool_commands
+resume_commands = [
+    hook["command"]
+    for entry in hooks.get("PreToolUse", [])
+    for hook in entry.get("hooks", [])
+    if hook.get("type") == "command"
+]
+assert sum(command.endswith(" ResumeAfterInput codex") for command in resume_commands) == 1, resume_commands
 assert "PermissionRequest" not in hooks, hooks
 PY
             then
@@ -725,6 +739,16 @@ PY
             cat "$CODEX_HOOKS_FILE"
             exit 1
         fi
+        if [[ $(grep -c '"command": .* PostToolUse codex' "$CODEX_HOOKS_FILE") -ne 1 ]]; then
+            echo "❌ Re-enable left duplicate PostToolUse hooks"
+            cat "$CODEX_HOOKS_FILE"
+            exit 1
+        fi
+        if [[ $(grep -c '"command": .* ResumeAfterInput codex' "$CODEX_HOOKS_FILE") -ne 1 ]]; then
+            echo "❌ Re-enable left duplicate resume hooks"
+            cat "$CODEX_HOOKS_FILE"
+            exit 1
+        fi
         echo "✅ Re-enable repairs managed hooks without duplicates"
 
         set_notify_types "permission_prompt"
@@ -739,6 +763,25 @@ PY
             exit 1
         fi
         echo "✅ permission_prompt installs PermissionRequest hook"
+
+        # The parser-free status fallback must retain the same conditional
+        # PermissionRequest requirement as the jq and Python implementations.
+        if command -v jq &> /dev/null; then
+            local missing_permission_hooks
+            missing_permission_hooks=$(mktemp)
+            jq 'del(.hooks.PermissionRequest)' "$CODEX_HOOKS_FILE" > "$missing_permission_hooks"
+            if (
+                has_jq() { return 1; }
+                has_python3() { return 1; }
+                has_current_codex_hooks "$missing_permission_hooks"
+            ); then
+                rm -f "$missing_permission_hooks"
+                echo "❌ parser-free Codex status accepted a missing PermissionRequest hook"
+                exit 1
+            fi
+            rm -f "$missing_permission_hooks"
+            echo "✅ parser-free Codex status requires PermissionRequest when enabled"
+        fi
 
         set_notify_types "idle_prompt"
         if ! enable_codex_hooks; then
@@ -759,7 +802,8 @@ PY
         fi
 
         if grep -q ' stop codex' "$CODEX_HOOKS_FILE" || grep -q ' notification codex' "$CODEX_HOOKS_FILE" ||
-            grep -q ' UserPromptSubmit codex' "$CODEX_HOOKS_FILE"; then
+            grep -q ' UserPromptSubmit codex' "$CODEX_HOOKS_FILE" || grep -q ' PostToolUse codex' "$CODEX_HOOKS_FILE" ||
+            grep -q ' ResumeAfterInput codex' "$CODEX_HOOKS_FILE"; then
             echo "❌ disable_codex_hooks did not remove managed hooks"
             cat "$CODEX_HOOKS_FILE"
             exit 1

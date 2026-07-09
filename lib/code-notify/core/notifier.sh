@@ -29,6 +29,20 @@ if [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "UserPromptSubmit" ]]; then
     exit 0
 fi
 
+# A direct prompt submission is not the only way an agent resumes: approving a
+# command or answering an in-turn question continues the existing turn. Those
+# actions do not emit UserPromptSubmit, so the lightweight PostToolUse hook and
+# the fallback PreToolUse hook use this path to restore the running indicator.
+# tmux_running_resume_after_input itself is gated by a marker set only when the
+# notifier observed an input/approval request, making ordinary tool hooks
+# no-ops.
+if [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "PostToolUse" ]] ||
+    [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "ResumeAfterInput" ]]; then
+    source "$NOTIFIER_DIR/../utils/tmux.sh"
+    tmux_running_resume_after_input 2>/dev/null || true
+    exit 0
+fi
+
 # Source shared utilities
 source "$NOTIFIER_DIR/../utils/detect.sh"
 source "$NOTIFIER_DIR/../utils/voice.sh"
@@ -988,7 +1002,24 @@ notification_is_persistent() {
 # events (SubagentStart/Stop, TaskCreated/Completed, TeammateIdle) don't stop
 # it: the main agent is still going.
 case "$HOOK_TYPE" in
-    "stop"|"notification"|"error"|"failed"|"PreToolUse")
+    "notification")
+        # Notifications represent a pause except auth_success, which reports a
+        # completed authentication flow rather than a question the user must
+        # answer. Preserve the pause so a subsequent tool lifecycle hook can
+        # put the running indicator back immediately after the user responds.
+        if [[ "$NOTIFICATION_SUBTYPE" != "auth_success" ]]; then
+            tmux_running_pause_for_input 2>/dev/null || true
+        else
+            tmux_running_stop 2>/dev/null || true
+        fi
+        ;;
+    "PreToolUse")
+        # The managed Claude AskUserQuestion hook uses this event. Once its
+        # answer is supplied, PostToolUse (or the following PreToolUse) resumes
+        # the same turn without a UserPromptSubmit event.
+        tmux_running_pause_for_input 2>/dev/null || true
+        ;;
+    "stop"|"error"|"failed")
         tmux_running_stop 2>/dev/null || true
         ;;
 esac

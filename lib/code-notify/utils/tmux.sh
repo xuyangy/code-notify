@@ -630,6 +630,8 @@ tmux_running_start() {
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
+    # A new prompt or a resumed tool turn supersedes any earlier input wait.
+    tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     if tmux_running_spinner_enabled; then
         tmux_spinner_arm
     else
@@ -668,6 +670,7 @@ tmux_prompt_submit() {
     [[ "$window_id" =~ $window_re ]] || return 0
 
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
+    tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     if tmux_running_spinner_enabled; then
         # No rename in spinner mode: drop the event badge and arm the snippet
         # (a show-options no-op when already armed).
@@ -691,6 +694,9 @@ tmux_running_stop() {
     read -r session_id window_id pane_id <<< "$target"
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
+    # A genuine terminal event must also retire a stale "waiting for input"
+    # marker. tmux_running_pause_for_input sets it again after this cleanup.
+    tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     local since mode
     since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
     if [[ -n "$since" ]]; then
@@ -701,6 +707,42 @@ tmux_running_stop() {
         fi
     fi
     tmux_spinner_disarm_if_idle
+    return 0
+}
+
+# An input/approval request pauses the current turn. Remember that state after
+# taking down the running indicator so the next tool lifecycle event can put it
+# back once the user has answered. A separate option is essential: PostToolUse
+# fires after every tool, so using the absence of @code_notify_running alone
+# would incorrectly mark completed or idle turns as active.
+tmux_running_pause_for_input() {
+    tmux_focus_available || return 0
+    tmux_running_stop
+
+    local target session_id window_id pane_id
+    target=$(tmux_focus_capture_target) || return 0
+    read -r session_id window_id pane_id <<< "$target"
+    local window_re='^@[0-9]+$'
+    [[ "$window_id" =~ $window_re ]] || return 0
+    tmux set-option -w -t "$window_id" @code_notify_resume_pending "$(date +%s)" 2>/dev/null
+    return 0
+}
+
+# PreToolUse/PostToolUse hooks call this after a user action. It is a no-op
+# unless the same window previously emitted an input/approval request, so the
+# extra hook events never create a spinner for unrelated tool completions.
+tmux_running_resume_after_input() {
+    tmux_focus_available || return 0
+
+    local target session_id window_id pane_id pending
+    target=$(tmux_focus_capture_target) || return 0
+    read -r session_id window_id pane_id <<< "$target"
+    local window_re='^@[0-9]+$'
+    [[ "$window_id" =~ $window_re ]] || return 0
+    pending=$(tmux show-options -wqv -t "$window_id" @code_notify_resume_pending 2>/dev/null)
+    [[ -n "$pending" ]] || return 0
+
+    tmux_running_start
     return 0
 }
 
@@ -862,6 +904,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         badge-clear-current) tmux_badge_clear_current ;;
         running-start) tmux_running_start ;;
         running-stop) tmux_running_stop ;;
+        running-pause) tmux_running_pause_for_input ;;
+        running-resume) tmux_running_resume_after_input ;;
         running-sweep) tmux_running_sweep_stale ;;
     esac
 fi

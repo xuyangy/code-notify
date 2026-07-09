@@ -372,6 +372,42 @@ else
     pass "real-tmux quote test skipped (tmux >= 3.0 not available)"
 fi
 
+# --- tmux_badge_clear_current clears the caller's own window ---
+# The engage-clear path: an agent's UserPromptSubmit hook runs this to drop the
+# badge on the window the user just handed work, resolving the window from the
+# current pane (FAKE_TMUX_TARGET -> @2).
+tmux_badge_set "🎯" || fail "badge for clear-current test should succeed"
+[[ "$(window_name)" == "🎯 zsh" ]] || fail "precondition: window should be badged"
+tmux_badge_clear_current || fail "clear-current should succeed"
+[[ "$(window_name)" == "zsh" ]] || fail "clear-current should restore the current window (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "clear-current should drop the badge state"
+pass "clear-current clears the caller's window"
+
+# --- clear-current is a no-op without a badge ---
+: > "$log_file"
+tmux_badge_clear_current || fail "clear-current without a badge should still succeed"
+grep -q "rename-window" "$log_file" && fail "clear-current without a badge should not rename"
+pass "clear-current no-op without a badge"
+
+# --- the badge-clear-current subcommand clears from a subprocess ---
+# Exactly what the UserPromptSubmit hook runs: a fresh `bash tmux.sh
+# badge-clear-current`, inheriting TMUX/TMUX_PANE from the pane it fired in.
+tmux_badge_set "🎯" || fail "badge for clear-current subcommand test should succeed"
+bash "$ROOT_DIR/lib/code-notify/utils/tmux.sh" badge-clear-current
+[[ "$(window_name)" == "zsh" ]] || fail "badge-clear-current subcommand should clear the window (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "badge-clear-current subcommand should drop the badge state"
+pass "badge-clear-current subcommand clears the window"
+
+# --- badge-set suppresses the focus hook on request ---
+# Engage-clear agents set CODE_NOTIFY_TMUX_FOCUS_HOOK=false so no glance-clear
+# hook is armed; the badge itself is still set.
+: > "$log_file"
+CODE_NOTIFY_TMUX_FOCUS_HOOK=false tmux_badge_set "🎯" || fail "suppressed-hook badge should still succeed"
+[[ "$(window_name)" == "🎯 zsh" ]] || fail "badge should still be set when the focus hook is suppressed"
+grep -q "set-hook -g session-window-changed" "$log_file" && fail "suppressed focus hook must not be armed"
+tmux_badge_clear "@2"
+pass "badge-set suppresses the focus hook on request"
+
 # --- clear command structure ---
 cmd=$(tmux_badge_build_clear_command) || fail "clear command should build inside tmux"
 [[ "$cmd" == *"-S '$test_dir/sock'"* ]] || fail "clear command should target the captured socket"
@@ -416,8 +452,9 @@ grep -q "rename-window" "$log_file" && fail "clear command after a suffix-collid
 pass "generated clear command keeps suffix-colliding manual rename"
 
 # --- notifier.sh end-to-end wiring (macOS only) ---
-# A stop event should badge the origin window with 🎯 and hand the badge
-# clear command to terminal-notifier via -execute alongside -focus.
+# Claude is an engage-clear agent: a stop event badges the origin window with 🎯
+# and passes -focus, but does NOT attach a click-to-clear command (clicking is a
+# glance). The badge clears on the next UserPromptSubmit instead.
 if [[ "$(uname -s)" == "Darwin" ]]; then
     NOTIFIER="$ROOT_DIR/lib/code-notify/core/notifier.sh"
     tn_log="$test_dir/terminal-notifier.log"
@@ -430,6 +467,7 @@ EOF
     chmod +x "$fake_bin/terminal-notifier"
 
     rm -f "$state_dir"/*
+    : > "$log_file"
     CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
         PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         bash "$NOTIFIER" stop claude testproj > /dev/null 2>&1 \
@@ -437,9 +475,22 @@ EOF
 
     [[ "$(window_name)" == "🎯 zsh" ]] || fail "notifier should badge the origin window with the stop icon (got: $(window_name))"
     grep -qx -- "-focus" "$tn_log" || fail "notifier should pass -focus"
-    grep -qx -- "-execute" "$tn_log" || fail "notifier should pass -execute"
-    grep -q -- "@code_notify_orig_name" "$tn_log" || fail "notifier -execute should carry the badge clear command"
-    pass "notifier end-to-end badge wiring"
+    grep -q -- "@code_notify_orig_name" "$tn_log" \
+        && fail "Claude notification must not carry a click-to-clear command (clears on prompt-submit)"
+    grep -q "set-hook -g session-window-changed" "$log_file" \
+        && fail "Claude badge-set must not arm the glance-clear focus hook"
+    pass "notifier end-to-end: Claude badges without glance-clearing"
+
+    # UserPromptSubmit: the user handed this window work, so the badge clears.
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" UserPromptSubmit claude testproj > /dev/null 2>&1 \
+        || fail "notifier.sh UserPromptSubmit should exit cleanly"
+    [[ "$(window_name)" == "zsh" ]] \
+        || fail "UserPromptSubmit should clear the badge (got: $(window_name))"
+    [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] \
+        || fail "UserPromptSubmit should drop the badge state"
+    pass "notifier end-to-end: UserPromptSubmit clears the badge"
 fi
 
 echo "All tmux badge tests passed"

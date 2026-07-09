@@ -566,6 +566,22 @@ if [[ "$HOOK_TYPE" == "agy_debounce_stop" ]]; then
     exit 0
 fi
 
+# Whether this agent clears window badges on glance (the sweep + focus hook)
+# rather than on prompt-submit. codex and agy have no "user gave this window
+# work" signal, so they keep glance-clearing. Claude clears on UserPromptSubmit
+# instead (below), so glance-clearing is suppressed for it.
+badge_glance_clear_enabled() {
+    [[ "$RAW_ARG1" == "codex" ]] || [[ "$RAW_ARG1" == agy:* ]]
+}
+
+# UserPromptSubmit (Claude only): the user just handed this window more work, so
+# clear its badge — the accurate "no longer waiting" signal, unlike a mere
+# glance. No notification fires for this event; just clear and exit.
+if [[ "$HOOK_TYPE" == "UserPromptSubmit" ]]; then
+    tmux_badge_clear_current 2>/dev/null || true
+    exit 0
+fi
+
 # Get display name for tool
 get_tool_display_name() {
     local tool="$1"
@@ -1232,11 +1248,15 @@ send_macos_notification() {
     # originating tmux window/pane (in addition to activating the terminal).
     focus_cmd=$(tmux_focus_build_command "$bundle_id" 2>/dev/null) || focus_cmd=""
 
-    # Clicking also clears the window-name badge. Appended to focus_cmd so
-    # every click path (alerter, -execute) restores the name; the clear
-    # command re-checks the saved state at click time, so it is a no-op when
-    # no badge is set.
-    badge_clear_cmd=$(tmux_badge_build_clear_command 2>/dev/null) || badge_clear_cmd=""
+    # For glance-clear agents, clicking also clears the window-name badge.
+    # Appended to focus_cmd so every click path (alerter, -execute) restores the
+    # name; the clear command re-checks the saved state at click time, so it is a
+    # no-op when no badge is set. Claude clears on prompt-submit instead, so a
+    # click there jumps to the window without clearing — clicking is a glance.
+    badge_clear_cmd=""
+    if badge_glance_clear_enabled; then
+        badge_clear_cmd=$(tmux_badge_build_clear_command 2>/dev/null) || badge_clear_cmd=""
+    fi
     if [[ -n "$badge_clear_cmd" ]] && [[ -n "$focus_cmd" ]]; then
         focus_cmd="$focus_cmd; $badge_clear_cmd"
     fi
@@ -1414,11 +1434,19 @@ get_notification_sound_file() {
 }
 
 # Badge the originating tmux window's name with the event icon so the alert
-# stays visible in the status line. Sweep first so badges on windows the user
-# has since visited are restored before a new one lands. Clicking the
-# notification also clears the badge on macOS; elsewhere only the sweep
-# clears it (notify-send has no click hook).
-tmux_badge_sweep 2>/dev/null || true
+# stays visible in the status line. Clearing differs by agent:
+#   - Glance-clear agents (codex/agy): sweep first so badges on windows the user
+#     has since visited are restored before a new one lands, and let badge-set
+#     arm the focus hook that clears on the next visit. On macOS clicking the
+#     notification also clears; elsewhere only these paths do (notify-send has
+#     no click hook).
+#   - Claude: clears on UserPromptSubmit instead, so no sweep and no focus hook —
+#     a badge persists until the user actually engages the window with new work.
+if badge_glance_clear_enabled; then
+    tmux_badge_sweep 2>/dev/null || true
+else
+    export CODE_NOTIFY_TMUX_FOCUS_HOOK=false
+fi
 if [[ -n "$BADGE_ICON" ]]; then
     tmux_badge_set "$BADGE_ICON" 2>/dev/null || true
 fi

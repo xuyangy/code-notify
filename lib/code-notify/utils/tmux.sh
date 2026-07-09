@@ -243,9 +243,12 @@ tmux_badge_set() {
     fi
     tmux rename-window -t "$window_id" "$icon $orig_name" 2>/dev/null || return 1
     tmux set-option -w -t "$window_id" @code_notify_badged_name "$icon $orig_name" 2>/dev/null
-    # A badge now exists, so arm the focus hook that clears it on the next
-    # visit. Cheap and idempotent, so setting it per badge is fine.
-    tmux_badge_install_focus_hook
+    # A badge now exists, so arm the focus hook that glance-clears it on the next
+    # visit. Cheap and idempotent, so setting it per badge is fine. Suppressed
+    # (CODE_NOTIFY_TMUX_FOCUS_HOOK=false) for agents that clear on prompt-submit
+    # instead of on glance — see the notifier's badge-clearing model.
+    [[ "${CODE_NOTIFY_TMUX_FOCUS_HOOK:-}" != "false" ]] && tmux_badge_install_focus_hook
+    return 0
 }
 
 # Restore a badged window: original name back, automatic-rename re-enabled if
@@ -306,6 +309,22 @@ tmux_badge_sweep() {
     fi
 }
 
+# Clear the badge on the window the caller is running in. This is the
+# "engage-clear" path: an agent that emits a prompt-submit signal (Claude's
+# UserPromptSubmit) runs this to drop the badge the moment the user hands the
+# window more work — unlike the sweep/focus hook, which clear merely on glance.
+# Pane-local (needs TMUX_PANE), so it resolves the current window and clears
+# just that one.
+tmux_badge_clear_current() {
+    tmux_focus_available || return 0
+    local target session_id window_id pane_id
+    target=$(tmux_focus_capture_target) || return 0
+    read -r session_id window_id pane_id <<< "$target"
+    local window_re='^@[0-9]+$'
+    [[ "$window_id" =~ $window_re ]] || return 0
+    tmux_badge_clear "$window_id"
+}
+
 # Build the command a notifier click handler runs to clear the badge on the
 # originating window. Same execution context as tmux_focus_build_command
 # (/bin/sh -c, minimal PATH, no attached client), so it embeds the absolute
@@ -359,11 +378,13 @@ tmux_badge_build_clear_command() {
     printf '%s' "$cmd"
 }
 
-# When run as a script (the tmux focus hook does `bash <this> badge-sweep`)
-# rather than sourced, dispatch the requested subcommand. Sourcing — the normal
-# path, where BASH_SOURCE[0] differs from $0 — skips this entirely.
+# When run as a script rather than sourced, dispatch the requested subcommand:
+#   - badge-sweep: the tmux focus hook (`bash <this> badge-sweep`)
+#   - badge-clear-current: the UserPromptSubmit hook clearing this window's badge
+# Sourcing — the normal path, where BASH_SOURCE[0] differs from $0 — skips this.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     case "${1:-}" in
         badge-sweep) tmux_badge_sweep ;;
+        badge-clear-current) tmux_badge_clear_current ;;
     esac
 fi

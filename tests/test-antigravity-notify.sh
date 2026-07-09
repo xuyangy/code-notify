@@ -43,9 +43,11 @@ run_agy_notifier() {
     local fake_path="$1"
     local event="$2"
     local payload="$3"
+    local hook_type="${4:-}"
 
     printf '%s' "$payload" \
     | PATH="$fake_path" \
+      CLAUDE_HOOK_TYPE="$hook_type" \
       CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
       CODE_NOTIFY_AGY_DEBOUNCE_SECONDS=1 \
       CODE_NOTIFY_TAIL_SYNC=1 \
@@ -93,17 +95,34 @@ fake_path="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 ws() { printf '"workspacePaths":["/tmp/work/%s"]' "$1"; }
 
+# Match the user's Antigravity permission configuration: git commands are
+# auto-approved and therefore must not produce an "Input Required" banner.
+mkdir -p "$HOME/.gemini/antigravity-cli"
+cat > "$HOME/.gemini/antigravity-cli/settings.json" <<'EOF'
+{
+  "permissions": {
+    "allow": ["command(git)"]
+  }
+}
+EOF
+
 # 1) PreToolUse while agy waits for approval -> Input Required.
 run_agy_notifier "$fake_path" "PreToolUse" \
     "{\"conversationId\":\"c-pre\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"echo hi\"}},$(ws projInput)}"
+
+# 1b) A git command covered by permissions.allow auto-runs and must be silent.
+run_agy_notifier "$fake_path" "PreToolUse" \
+    "{\"conversationId\":\"c-allowed\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"git diff\"}},$(ws projAllowed)}"
 
 # 2) PostToolUse with a STRUCTURED error -> Error (must not be read as success).
 run_agy_notifier "$fake_path" "PostToolUse" \
     "{\"conversationId\":\"c-err\",\"error\":{\"message\":\"build blew up\",\"code\":1},$(ws projErr)}"
 
 # 3) PostToolUse with empty error -> debounced Task Complete (fires from watcher).
+# Antigravity exports this compatibility variable to hook commands. It must not
+# divert the agy wrapper into the Claude/Codex PostToolUse fast path.
 run_agy_notifier "$fake_path" "PostToolUse" \
-    "{\"conversationId\":\"c-done\",\"error\":\"\",$(ws projDone)}"
+    "{\"conversationId\":\"c-done\",\"error\":\"\",$(ws projDone)}" "PostToolUse"
 
 # 4) Native Stop event -> Task Complete (dormant in agy today, but mapped).
 run_agy_notifier "$fake_path" "Stop" \
@@ -155,6 +174,8 @@ grep -q "Error - projCancel" "$notification_log" \
     || fail "late error in the cancel scenario was not reported"
 grep -q "Input Required - projApprove" "$notification_log" \
     || fail "PreToolUse in the approval scenario was not reported"
+grep -q "projAllowed" "$notification_log" \
+    && fail "allowlisted git command emitted an input-required notification"
 
 # A PostToolUse error must NOT also be reported as complete for the same project.
 grep -q "Task Complete - projErr" "$notification_log" \

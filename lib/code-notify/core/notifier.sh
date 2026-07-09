@@ -21,7 +21,11 @@ NOTIFIER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # fires for this event. Handled before the utility sourcing below because the
 # agent runs this hook synchronously on every prompt submission, so the path
 # must stay cheap: it only needs tmux.sh.
-if [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "UserPromptSubmit" ]]; then
+# Antigravity exports CLAUDE_HOOK_TYPE for compatibility even though its
+# wrappers identify their lifecycle event as agy:<Event> in argv. Keep those
+# events on the dedicated Antigravity path below; otherwise an agy PostToolUse
+# would be mistaken for a Claude/Codex spinner-resume hook.
+if [[ "$RAW_ARG1" != agy:* ]] && [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "UserPromptSubmit" ]]; then
     source "$NOTIFIER_DIR/../utils/tmux.sh"
     # One capture serves both halves: the event badge clears (engage-clear)
     # and the running marker — the agent is now working — replaces it.
@@ -36,8 +40,10 @@ fi
 # tmux_running_resume_after_input itself is gated by a marker set only when the
 # notifier observed an input/approval request, making ordinary tool hooks
 # no-ops.
-if [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "PostToolUse" ]] ||
-    [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "ResumeAfterInput" ]]; then
+if [[ "$RAW_ARG1" != agy:* ]] && {
+    [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "PostToolUse" ]] ||
+    [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "ResumeAfterInput" ]]
+}; then
     source "$NOTIFIER_DIR/../utils/tmux.sh"
     tmux_running_resume_after_input 2>/dev/null || true
     exit 0

@@ -131,6 +131,17 @@ tmux_focus_build_command() {
 # rename-window implicitly turns off automatic-rename for the window, so the
 # original setting is saved alongside the name and restored on clear.
 #
+# A third clear mode, "running", marks a window whose agent is still working
+# (set on UserPromptSubmit, replaced by the event badge when the agent stops).
+# Unlike event badges it is applied even to the visible window — the user just
+# submitted a prompt there and wants the marker in place before switching away
+# — and it never clears on glance: only the terminating event, the next
+# prompt-submit, or staleness (older than TMUX_RUNNING_TTL, the safety net for
+# runs that end without any hook, e.g. an Escape-interrupt) clears it. The
+# start epoch lives in @code_notify_running. See the running-indicator section
+# below for the opt-in spinner variant, which animates in the status line
+# without renaming at all.
+#
 # A manual rename while badged always wins: badge-set adopts the new name as
 # the original, and clear keeps it (leaving automatic-rename off, as a manual
 # rename implies) instead of restoring the stale saved name. Rename detection
@@ -227,23 +238,16 @@ tmux_badge_name_is_badged() {
 #     (tmux_badge_clear_current) clears it; the sweep skips it and no focus
 #     hook is armed for it, so it survives glances — even glances triggered by
 #     another agent's badge activity on the same server
-tmux_badge_set() {
-    local icon="$1"
-    local clear_mode="${2:-glance}"
-    [[ -n "$icon" ]] || return 1
-    tmux_badge_enabled || return 1
-    tmux_focus_available || return 1
-
-    # window_name goes last so embedded "|" cannot shift the other fields.
-    local info window_id autorename visible name
-    info=$(tmux display-message -p -t "$TMUX_PANE" \
-        '#{window_id}|#{automatic-rename}|#{&&:#{window_active},#{session_attached}}|#{window_name}' 2>/dev/null) || return 1
-    IFS='|' read -r window_id autorename visible name <<< "$info"
-
-    local window_re='^@[0-9]+$'
-    [[ "$window_id" =~ $window_re ]] || return 1
-    [[ "$visible" == "1" ]] && return 0
-
+#   - "running": the agent-is-working marker (see tmux_running_start). Set
+#     even on the visible window — the user just submitted a prompt there and
+#     the marker should be in place before they switch away. Cleared by the
+#     terminating event (tmux_running_stop), the next prompt-submit, or the
+#     sweep once stale; never by a mere glance.
+# tmux_badge_apply is the badge state machine on an already-resolved window;
+# tmux_badge_set below wraps it with target capture and the visibility gate
+# for callers that haven't queried the window yet.
+tmux_badge_apply() {
+    local window_id="$1" autorename="$2" name="$3" icon="$4" clear_mode="$5"
     local orig_name badged_name
     orig_name=$(tmux show-options -wqv -t "$window_id" @code_notify_orig_name 2>/dev/null)
     badged_name=$(tmux show-options -wqv -t "$window_id" @code_notify_badged_name 2>/dev/null)
@@ -267,12 +271,47 @@ tmux_badge_set() {
     tmux set-option -w -t "$window_id" @code_notify_clear_mode "$clear_mode" 2>/dev/null
     # A glance badge now exists, so arm the focus hook that clears it on the
     # next visit. Cheap and idempotent, so setting it per badge is fine. Engage
-    # badges don't arm it — they clear on prompt-submit, and the sweep skips
-    # them anyway. CODE_NOTIFY_TMUX_FOCUS_HOOK=false suppresses arming entirely.
-    if [[ "$clear_mode" != "engage" ]] && [[ "${CODE_NOTIFY_TMUX_FOCUS_HOOK:-}" != "false" ]]; then
+    # and running badges don't arm it — engage clears on prompt-submit, running
+    # on the terminating event, and the sweep skips both anyway.
+    # CODE_NOTIFY_TMUX_FOCUS_HOOK=false suppresses arming entirely.
+    if [[ "$clear_mode" == "glance" ]] && [[ "${CODE_NOTIFY_TMUX_FOCUS_HOOK:-}" != "false" ]]; then
         tmux_badge_install_focus_hook
     fi
     return 0
+}
+
+# Resolve a target and badge it. The optional third argument targets a
+# specific window (or pane) instead of the caller's own pane, for callers
+# that iterate windows without running in them (e.g. the spinner-off fallback
+# re-badging every running window).
+tmux_badge_set() {
+    local icon="$1"
+    local clear_mode="${2:-glance}"
+    local target="${3:-}"
+    [[ -n "$icon" ]] || return 1
+    tmux_badge_enabled || return 1
+    if [[ -z "$target" ]]; then
+        tmux_focus_available || return 1
+        target="$TMUX_PANE"
+    else
+        # An explicit target needs no pane of its own — just a tmux server.
+        { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 1
+    fi
+
+    # window_name goes last so embedded "|" cannot shift the other fields.
+    local info window_id autorename visible name
+    info=$(tmux display-message -p -t "$target" \
+        '#{window_id}|#{automatic-rename}|#{&&:#{window_active},#{session_attached}}|#{window_name}' 2>/dev/null) || return 1
+    IFS='|' read -r window_id autorename visible name <<< "$info"
+
+    local window_re='^@[0-9]+$'
+    [[ "$window_id" =~ $window_re ]] || return 1
+    # Running markers land even on the visible window (the user just submitted
+    # a prompt there); event badges skip it — they'd be noise where the user
+    # is already looking.
+    [[ "$visible" == "1" ]] && [[ "$clear_mode" != "running" ]] && return 0
+
+    tmux_badge_apply "$window_id" "$autorename" "$name" "$icon" "$clear_mode"
 }
 
 # Restore a badged window: original name back, automatic-rename re-enabled if
@@ -325,7 +364,11 @@ tmux_badge_sweep() {
     local window_id visible mode orig remaining=0
     while IFS='|' read -r window_id visible mode orig; do
         [[ -n "$orig" ]] || continue
-        if [[ "$mode" == "engage" ]]; then continue; fi
+        # Engage badges clear on prompt-submit, running markers on the
+        # terminating event (or staleness, handled by the running sweep below);
+        # neither may clear on a mere glance, and neither counts toward keeping
+        # the focus hook alive — it only serves glance badges.
+        if [[ "$mode" == "engage" ]] || [[ "$mode" == "running" ]]; then continue; fi
         if [[ "$visible" == "1" ]]; then
             tmux_badge_clear "$window_id"   # clear always drops the orig-name option
         else
@@ -340,6 +383,10 @@ tmux_badge_sweep() {
     if [[ "$remaining" -eq 0 ]]; then
         tmux_badge_uninstall_focus_hook
     fi
+    # Piggyback stale-running convergence on every sweep: a run that died
+    # without a hook sheds its marker (and the spinner's 1s redraw interval)
+    # the next time any badge activity happens on this server.
+    tmux_running_sweep_stale
 }
 
 # Clear the badge on the window the caller is running in. This is the
@@ -356,6 +403,379 @@ tmux_badge_clear_current() {
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
     tmux_badge_clear "$window_id"
+}
+
+# --- running indicator -------------------------------------------------------
+#
+# UserPromptSubmit marks the originating window as "agent working"
+# (tmux_running_start); the terminating event — stop, input needed, error —
+# unmarks it (tmux_running_stop). The start epoch lives in the window option
+# @code_notify_running, which doubles as the staleness guard: an agent that
+# ends without any hook firing (Escape-interrupt, crash, cn off mid-run)
+# leaves the epoch behind, and tmux_running_sweep_stale — run from every badge
+# sweep and from a one-shot timer parked on the tmux server while markers are
+# outstanding (tmux_running_schedule_sweep) — retires markers older than
+# TMUX_RUNNING_TTL. The prompt path only arms that timer; it never sweeps
+# itself, because it runs synchronously on every prompt submission.
+#
+# Two renderings:
+#   - default: a static icon (TMUX_RUNNING_ICON) prepended to the window name
+#     via the badge machinery, clear mode "running". Costs two renames per
+#     agent turn and nothing in between.
+#   - opt-in spinner (cn spinner on / CODE_NOTIFY_TMUX_SPINNER=true): no
+#     rename at all. A format snippet prepended to window-status-format (and
+#     -current-format) picks a moon frame from wall-clock seconds —
+#     #{T:@code_notify_clock} is now-as-%s, mod 8 indexes the frames — so tmux
+#     animates it during its own status redraw with no external process. The
+#     snippet renders only while the window's @code_notify_running epoch is
+#     fresher than the TTL, so a stale marker disappears from the status line
+#     by itself even before a sweep drops the option. status-interval is
+#     lowered to 1 while armed (a frame per second) and the user's value is
+#     restored when the last running window clears, so the idle cost is zero.
+
+# Safety net for runs that end without a hook. Seconds; default 4 hours.
+TMUX_RUNNING_TTL="${CODE_NOTIFY_TMUX_RUNNING_TTL:-14400}"
+TMUX_RUNNING_ICON="${CODE_NOTIFY_TMUX_RUNNING_ICON:-🌕}"
+TMUX_SPINNER_ENABLED_FILE="$HOME/.claude/notifications/tmux-spinner-enabled"
+
+tmux_running_enabled() {
+    [[ "${CODE_NOTIFY_TMUX_RUNNING:-}" != "false" ]] && tmux_badge_enabled
+}
+
+# The env var (when set) wins over the flag file, so a single session can
+# force the spinner on or off without touching persistent state.
+tmux_running_spinner_enabled() {
+    if [[ -n "${CODE_NOTIFY_TMUX_SPINNER:-}" ]]; then
+        [[ "$CODE_NOTIFY_TMUX_SPINNER" == "true" ]]
+        return
+    fi
+    [[ -f "$TMUX_SPINNER_ENABLED_FILE" ]]
+}
+
+# The status-line snippet: while this window's @code_notify_running epoch is
+# fresher than the TTL, show the moon frame for the current wall-clock second
+# (a trailing space separates it from the theme's own content); otherwise show
+# nothing. Everything is computed by tmux during its normal status redraw —
+# no process is spawned. Frame choice is a nested-conditional table because
+# tmux formats have no array indexing.
+tmux_spinner_build_format() {
+    local frames=(🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘)
+    local idx='#{e|m:#{T:@code_notify_clock},8}'
+    local frame="${frames[7]}"
+    local i
+    for ((i = 6; i >= 0; i--)); do
+        frame="#{?#{e|==:$idx,$i},${frames[$i]},$frame}"
+    done
+    local age='#{e|-:#{T:@code_notify_clock},#{@code_notify_running}}'
+    printf '%s' "#{?#{@code_notify_running},#{?#{e|<:$age,$TMUX_RUNNING_TTL},$frame ,},}"
+}
+
+# The global status-interval set in tmux_spinner_arm does not reach sessions
+# with a session-local value, whose spinner would tick at the slower local
+# rate. Lower each such session to 1, saving the old value in a session-scoped
+# option so disarm can restore it. Sessions already carrying a saved value are
+# skipped: they were adjusted this armed period, and a user who deliberately
+# re-raised their interval since must not be fought on every prompt.
+tmux_spinner_sync_session_intervals() {
+    local sid val
+    while read -r sid; do
+        [[ -n "$sid" ]] || continue
+        val=$(tmux show-options -qv -t "$sid" @code_notify_saved_interval 2>/dev/null)
+        [[ -z "$val" ]] || continue
+        val=$(tmux show-options -qv -t "$sid" status-interval 2>/dev/null)
+        { [[ -n "$val" ]] && [[ "$val" != "1" ]]; } || continue
+        tmux set-option -t "$sid" @code_notify_saved_interval "$val" 2>/dev/null
+        tmux set-option -t "$sid" status-interval 1 2>/dev/null
+    done < <(tmux list-sessions -F '#{session_id}' 2>/dev/null)
+    return 0
+}
+
+# Undo the session sync: restore each session's saved interval — only while
+# our 1 is still in place, so a value the user changed while armed wins — and
+# drop the per-session bookkeeping.
+tmux_spinner_restore_session_intervals() {
+    local sid val cur
+    while read -r sid; do
+        [[ -n "$sid" ]] || continue
+        val=$(tmux show-options -qv -t "$sid" @code_notify_saved_interval 2>/dev/null)
+        [[ -n "$val" ]] || continue
+        cur=$(tmux show-options -qv -t "$sid" status-interval 2>/dev/null)
+        if [[ "$cur" == "1" ]]; then
+            tmux set-option -t "$sid" status-interval "$val" 2>/dev/null
+        fi
+        tmux set-option -u -t "$sid" @code_notify_saved_interval 2>/dev/null
+    done < <(tmux list-sessions -F '#{session_id}' 2>/dev/null)
+    return 0
+}
+
+# Prepend the spinner snippet to the global window-status formats and lower
+# status-interval to 1 so the frame advances every second. Idempotent: the
+# saved snippet (@code_notify_spinner_snip) doubles as the armed flag. The
+# exact snippet is saved so disarm can strip precisely what was added even if
+# the TTL env var changed in between; the user's status-interval (global and
+# any session-local values) is saved for the same reason.
+tmux_spinner_arm() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local snip
+    snip=$(tmux show-options -gqv @code_notify_spinner_snip 2>/dev/null)
+    if [[ -n "$snip" ]]; then
+        # Already armed globally, but a session created — or given a
+        # session-local status-interval — since then still ticks at its own
+        # rate: bring it in line.
+        tmux_spinner_sync_session_intervals
+        return 0
+    fi
+    snip=$(tmux_spinner_build_format)
+    local interval wsf wscf
+    interval=$(tmux show-options -gv status-interval 2>/dev/null)
+    wsf=$(tmux show-options -gwv window-status-format 2>/dev/null)
+    wscf=$(tmux show-options -gwv window-status-current-format 2>/dev/null)
+    tmux set-option -g @code_notify_spinner_snip "$snip" 2>/dev/null || return 0
+    tmux set-option -g @code_notify_saved_interval "${interval:-15}" 2>/dev/null
+    tmux set-option -g @code_notify_clock '%s' 2>/dev/null
+    tmux set-option -gw window-status-format "$snip$wsf" 2>/dev/null
+    tmux set-option -gw window-status-current-format "$snip$wscf" 2>/dev/null
+    tmux set-option -g status-interval 1 2>/dev/null
+    tmux_spinner_sync_session_intervals
+    return 0
+}
+
+# Undo tmux_spinner_arm: strip the exact snippet that was prepended (a format
+# the user has since replaced wholesale is left alone), restore the saved
+# status-interval, and drop the bookkeeping options. No-op when not armed.
+tmux_spinner_disarm() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local snip cur interval
+    snip=$(tmux show-options -gqv @code_notify_spinner_snip 2>/dev/null)
+    if [[ -z "$snip" ]]; then
+        return 0
+    fi
+    cur=$(tmux show-options -gwv window-status-format 2>/dev/null)
+    if [[ "$cur" == "$snip"* ]]; then
+        tmux set-option -gw window-status-format "${cur#"$snip"}" 2>/dev/null
+    fi
+    cur=$(tmux show-options -gwv window-status-current-format 2>/dev/null)
+    if [[ "$cur" == "$snip"* ]]; then
+        tmux set-option -gw window-status-current-format "${cur#"$snip"}" 2>/dev/null
+    fi
+    interval=$(tmux show-options -gqv @code_notify_saved_interval 2>/dev/null)
+    if [[ -n "$interval" ]]; then
+        # Same protection as the formats above: only restore while our value
+        # (1) is still in place. A user who changed status-interval while the
+        # spinner was armed (config reload, manual set) keeps their newer
+        # value instead of having the arm-time snapshot clobber it.
+        cur=$(tmux show-options -gv status-interval 2>/dev/null)
+        if [[ "$cur" == "1" ]]; then
+            tmux set-option -g status-interval "$interval" 2>/dev/null
+        fi
+    fi
+    tmux_spinner_restore_session_intervals
+    tmux set-option -gu @code_notify_spinner_snip 2>/dev/null
+    tmux set-option -gu @code_notify_saved_interval 2>/dev/null
+    tmux set-option -gu @code_notify_clock 2>/dev/null
+    return 0
+}
+
+# Disarm the spinner once no window carries a fresh running epoch, so the 1s
+# status redraw stops the moment the last agent finishes.
+tmux_spinner_disarm_if_idle() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local snip
+    snip=$(tmux show-options -gqv @code_notify_spinner_snip 2>/dev/null)
+    if [[ -z "$snip" ]]; then
+        return 0
+    fi
+    local now window_id since live=0
+    now=$(date +%s)
+    while IFS='|' read -r window_id since; do
+        if [[ "$since" =~ ^[0-9]+$ ]] && [[ $((now - since)) -lt "$TMUX_RUNNING_TTL" ]]; then
+            live=1
+        fi
+    done < <(tmux list-windows -a -F '#{window_id}|#{@code_notify_running}' 2>/dev/null)
+    if [[ "$live" -eq 0 ]]; then
+        tmux_spinner_disarm
+    fi
+    return 0
+}
+
+# Mark the caller's window as running. Standalone form for the running-start
+# dispatch; the notifier's prompt intercept uses tmux_prompt_submit below,
+# which folds the engage-clear and this marker into one target capture.
+tmux_running_start() {
+    tmux_running_enabled || return 0
+    tmux_focus_available || return 0
+    local target session_id window_id pane_id
+    target=$(tmux_focus_capture_target) || return 0
+    read -r session_id window_id pane_id <<< "$target"
+    local window_re='^@[0-9]+$'
+    [[ "$window_id" =~ $window_re ]] || return 0
+    tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
+    if tmux_running_spinner_enabled; then
+        tmux_spinner_arm
+    else
+        tmux_badge_set "$TMUX_RUNNING_ICON" running
+    fi
+    # Make sure the retire timer is armed for this fresh marker — one
+    # show-options round trip when it already is. A server-wide stale sweep
+    # would also converge dead runs here, but it lists every window on every
+    # prompt; stale markers are the timer's job.
+    tmux_running_schedule_sweep $((TMUX_RUNNING_TTL + 2))
+    return 0
+}
+
+# The UserPromptSubmit fast path: the user just handed the caller's window
+# more work, so the pending event badge clears (the engage-clear) and the
+# running marker replaces it. This runs synchronously on every prompt
+# submission, so it is built around a single target capture — static mode
+# swaps the badge icon in place (one rename) instead of clear-restore
+# followed by a re-badge, and stale cleanup is left to the scheduled timer.
+tmux_prompt_submit() {
+    tmux_focus_available || return 0
+    if ! tmux_running_enabled; then
+        # Running indicator disabled: just the engage-clear. Intentionally not
+        # gated on tmux_badge_enabled — badges left from before the feature
+        # was disabled should still clear.
+        tmux_badge_clear_current
+        return 0
+    fi
+
+    # window_name goes last so embedded "|" cannot shift the other fields.
+    local info window_id autorename visible name
+    info=$(tmux display-message -p -t "$TMUX_PANE" \
+        '#{window_id}|#{automatic-rename}|#{&&:#{window_active},#{session_attached}}|#{window_name}' 2>/dev/null) || return 0
+    IFS='|' read -r window_id autorename visible name <<< "$info"
+    local window_re='^@[0-9]+$'
+    [[ "$window_id" =~ $window_re ]] || return 0
+
+    tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
+    if tmux_running_spinner_enabled; then
+        # No rename in spinner mode: drop the event badge and arm the snippet
+        # (a show-options no-op when already armed).
+        tmux_badge_clear "$window_id"
+        tmux_spinner_arm
+    else
+        tmux_badge_apply "$window_id" "$autorename" "$name" "$TMUX_RUNNING_ICON" running
+    fi
+    tmux_running_schedule_sweep $((TMUX_RUNNING_TTL + 2))
+    return 0
+}
+
+# Unmark the caller's window: the agent emitted a terminating event. Drops the
+# epoch, clears the rename marker if (and only if) the window still carries
+# one — an event badge that replaced it in the meantime is left alone — and
+# retires the spinner interval when this was the last running window.
+tmux_running_stop() {
+    tmux_focus_available || return 0
+    local target session_id window_id pane_id
+    target=$(tmux_focus_capture_target) || return 0
+    read -r session_id window_id pane_id <<< "$target"
+    local window_re='^@[0-9]+$'
+    [[ "$window_id" =~ $window_re ]] || return 0
+    local since mode
+    since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
+    if [[ -n "$since" ]]; then
+        tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
+        mode=$(tmux show-options -wqv -t "$window_id" @code_notify_clear_mode 2>/dev/null)
+        if [[ "$mode" == "running" ]]; then
+            tmux_badge_clear "$window_id"
+        fi
+    fi
+    tmux_spinner_disarm_if_idle
+    return 0
+}
+
+# The piggyback call sites above all require *something* to happen on this
+# server later — another badge, another prompt. A run that ends without a
+# terminal hook (the Escape-interrupt case the TTL exists for) on an otherwise
+# quiet server would keep its static 🌕 rename forever, and in spinner mode
+# keep status-interval at 1 even after the snippet blanks itself past the TTL.
+# So while any fresh marker exists, park a one-shot `run-shell -b -d` timer on
+# the tmux server itself that re-runs the sweep just after the oldest marker
+# expires. The pending timer is tracked in the global option
+# @code_notify_sweep_scheduled so repeat sweeps don't stack timers; the payload
+# clears the flag before sweeping, and that sweep re-schedules when fresher
+# markers remain. `run-shell -d` needs tmux >= 3.2 — on older servers the call
+# fails, the flag stays unset, and behavior degrades to piggyback-only
+# convergence. Like the focus hook, the payload guards against the lib having
+# been uninstalled before the timer fires; TMUX is passed explicitly because
+# run-shell's environment does not guarantee it, the TTL is passed so the
+# fired sweep judges staleness by the same clock that computed the delay (the
+# timer's fresh process would otherwise fall back to the default), and # is
+# doubled because run-shell format-expands its argument when it executes.
+tmux_running_schedule_sweep() {
+    local delay="$1"
+    [[ -n "$TMUX_BADGE_LIB_PATH" ]] && [[ -f "$TMUX_BADGE_LIB_PATH" ]] || return 0
+    local pending
+    pending=$(tmux show-options -gqv @code_notify_sweep_scheduled 2>/dev/null)
+    [[ -z "$pending" ]] || return 0
+    local tmux_bin socket_path q_lib q_tmux q_socket q_env q_ttl inner
+    tmux_bin=$(command -v tmux) || return 0
+    socket_path="${TMUX%%,*}"
+    [[ -n "$socket_path" ]] || return 0
+    q_lib=$(tmux_focus_shell_quote "$TMUX_BADGE_LIB_PATH")
+    q_tmux=$(tmux_focus_shell_quote "$tmux_bin")
+    q_socket=$(tmux_focus_shell_quote "$socket_path")
+    q_env=$(tmux_focus_shell_quote "$TMUX")
+    q_ttl=$(tmux_focus_shell_quote "$TMUX_RUNNING_TTL")
+    inner="$q_tmux -S $q_socket set-option -gu @code_notify_sweep_scheduled; "
+    inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_RUNNING_TTL=$q_ttl "
+    inner+="bash $q_lib running-sweep; fi"
+    inner="${inner//\#/##}"
+    tmux run-shell -b -d "$delay" "$inner" 2>/dev/null || return 0
+    tmux set-option -g @code_notify_sweep_scheduled 1 2>/dev/null
+    return 0
+}
+
+# Retire running markers whose epoch is older than the TTL: unset the option,
+# restore the window name when the rename marker is still in place, and stop
+# the spinner redraw if nothing is left running. Piggybacked on every badge
+# sweep and every running-start so dead runs converge without a daemon, with
+# the scheduled one-shot timer above covering servers where no such activity
+# ever comes.
+tmux_running_sweep_stale() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local now window_id since mode oldest=""
+    now=$(date +%s)
+    while IFS='|' read -r window_id since mode; do
+        [[ "$since" =~ ^[0-9]+$ ]] || continue
+        if [[ $((now - since)) -lt "$TMUX_RUNNING_TTL" ]]; then
+            # Still fresh: remember the oldest epoch so the timer below fires
+            # right after the first marker can actually expire.
+            if [[ -z "$oldest" ]] || [[ "$since" -lt "$oldest" ]]; then
+                oldest="$since"
+            fi
+            continue
+        fi
+        tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
+        if [[ "$mode" == "running" ]]; then
+            tmux_badge_clear "$window_id"
+        fi
+    done < <(tmux list-windows -a -F \
+        '#{window_id}|#{@code_notify_running}|#{@code_notify_clear_mode}' 2>/dev/null)
+    if [[ -n "$oldest" ]]; then
+        tmux_running_schedule_sweep $((oldest + TMUX_RUNNING_TTL - now + 2))
+    fi
+    tmux_spinner_disarm_if_idle
+    return 0
+}
+
+# Re-render active running markers as static window-name icons: every window
+# whose @code_notify_running epoch is still fresh gets the badge it would have
+# received had the spinner never been armed. Used by `cn spinner off` while
+# agents are still working — the status-line snippet vanishes the moment the
+# spinner disarms, so without this those windows would carry no indicator at
+# all until their runs end. Stale epochs are left to the sweep.
+tmux_running_apply_static_badges() {
+    tmux_running_enabled || return 0
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local now window_id since
+    now=$(date +%s)
+    while IFS='|' read -r window_id since; do
+        [[ "$since" =~ ^[0-9]+$ ]] || continue
+        [[ $((now - since)) -lt "$TMUX_RUNNING_TTL" ]] || continue
+        tmux_badge_set "$TMUX_RUNNING_ICON" running "$window_id" || continue
+    done < <(tmux list-windows -a -F '#{window_id}|#{@code_notify_running}' 2>/dev/null)
+    return 0
 }
 
 # Build the command a notifier click handler runs to clear the badge on the
@@ -414,10 +834,14 @@ tmux_badge_build_clear_command() {
 # When run as a script rather than sourced, dispatch the requested subcommand:
 #   - badge-sweep: the tmux focus hook (`bash <this> badge-sweep`)
 #   - badge-clear-current: the UserPromptSubmit hook clearing this window's badge
+#   - running-sweep: the scheduled stale-marker timer (tmux_running_schedule_sweep)
 # Sourcing — the normal path, where BASH_SOURCE[0] differs from $0 — skips this.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     case "${1:-}" in
         badge-sweep) tmux_badge_sweep ;;
         badge-clear-current) tmux_badge_clear_current ;;
+        running-start) tmux_running_start ;;
+        running-stop) tmux_running_stop ;;
+        running-sweep) tmux_running_sweep_stale ;;
     esac
 fi

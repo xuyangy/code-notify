@@ -61,6 +61,9 @@ handle_global_command() {
         "click-through")
             handle_click_through_command "$@"
             ;;
+        "spinner")
+            handle_spinner_command "$@"
+            ;;
         "help")
             show_help
             ;;
@@ -1187,6 +1190,55 @@ handle_alerts_command() {
         *)
             error "Unknown alerts command: $subcommand"
             show_alerts_help
+            return 1
+            ;;
+    esac
+}
+
+# ============================================
+# tmux Running Spinner
+# ============================================
+
+# Toggle the animated tmux running indicator (the moon-phase spinner rendered
+# in the status line while an agent is working). Off by default: the default
+# running marker is a static icon on the window name. The flag is a file so
+# every hook process sees it without any config reload.
+handle_spinner_command() {
+    local action="${1:-status}"
+    local flag_file="$HOME/.claude/notifications/tmux-spinner-enabled"
+
+    case "$action" in
+        "on")
+            mkdir -p "$(dirname "$flag_file")"
+            touch "$flag_file"
+            success "tmux running spinner enabled"
+            echo "  While an agent works, its window shows an animated 🌑🌒🌓🌔🌕🌖🌗🌘 in the tmux status line."
+            echo "  The 1s status refresh is only active while an agent is running."
+            ;;
+        "off")
+            rm -f "$flag_file"
+            # Take down a live spinner immediately rather than waiting for the
+            # running windows to finish, then give agents still mid-run the
+            # static icon the message below promises — their markers otherwise
+            # have no rendering at all until their runs end.
+            if [[ -n "${TMUX:-}" ]]; then
+                source "$LIB_DIR/utils/tmux.sh"
+                tmux_spinner_disarm 2>/dev/null || true
+                tmux_running_apply_static_badges 2>/dev/null || true
+            fi
+            success "tmux running spinner disabled"
+            echo "  Running agents fall back to the static ${CODE_NOTIFY_TMUX_RUNNING_ICON:-🌕} window-name icon."
+            ;;
+        "status")
+            if [[ -f "$flag_file" ]]; then
+                echo "tmux running spinner: ${GREEN}enabled${RESET}"
+            else
+                echo "tmux running spinner: ${DIM}disabled${RESET} (static icon on the window name)"
+            fi
+            ;;
+        *)
+            error "Unknown spinner command: $action"
+            echo "Usage: cn spinner [on|off|status]"
             return 1
             ;;
     esac

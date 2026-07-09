@@ -51,13 +51,14 @@ fi
 cmd="${args[0]}"
 args=("${args[@]:1}")
 target=""
+fmt=""
 unset_opt=0
 rest=()
 while (( ${#args[@]} )); do
     a="${args[0]}"
     case "$a" in
         -t) target="${args[1]}"; args=("${args[@]:2}") ;;
-        -F) args=("${args[@]:2}") ;;
+        -F) fmt="${args[1]}"; args=("${args[@]:2}") ;;
         -*) [[ "$a" == -*u* ]] && unset_opt=1; args=("${args[@]:1}") ;;
         *) rest+=("$a"); args=("${args[@]:1}") ;;
     esac
@@ -74,7 +75,28 @@ case "$cmd" in
         esac
         ;;
     list-windows)
-        printf '%s\n' "$FAKE_TMUX_WINDOWS"
+        # The badge sweep and the running sweep ask for different formats; the
+        # badge one (containing window_active) comes from the fixture var, the
+        # running ones are synthesized from the stateful @code_notify_running
+        # options so epoch round-trips are exercised for real.
+        if [[ "$fmt" == *window_active* ]]; then
+            printf '%s\n' "$FAKE_TMUX_WINDOWS"
+        else
+            for f in "$FAKE_TMUX_STATE"/*.@code_notify_running; do
+                [[ -e "$f" ]] || continue
+                w="${f##*/}"; w="${w%%.*}"
+                since=$(cat "$f")
+                if [[ "$fmt" == *clear_mode* ]]; then
+                    mode=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_clear_mode" 2>/dev/null)
+                    printf '%s|%s|%s\n' "$w" "$since" "$mode"
+                else
+                    printf '%s|%s\n' "$w" "$since"
+                fi
+            done
+        fi
+        ;;
+    list-sessions)
+        printf '%s\n' "$FAKE_TMUX_SESSIONS"
         ;;
     show-options)
         cat "$FAKE_TMUX_STATE/${target}.${rest[0]}" 2>/dev/null
@@ -109,6 +131,7 @@ export TMUX_PANE="%3"
 export FAKE_TMUX_TARGET='$1 @2 %3'
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 export FAKE_TMUX_WINDOWS=""
+export FAKE_TMUX_SESSIONS=""
 
 window_name() { cat "$state_dir/@2.window_name" 2>/dev/null; }
 orig_option() { cat "$state_dir/@2.@code_notify_orig_name" 2>/dev/null; }
@@ -466,6 +489,294 @@ tmux_badge_clear_current || fail "clear-current on an engage badge should succee
     || fail "clear-current should drop the engage badge's clear-mode option"
 pass "clear-current clears an engage badge"
 
+# --- running-start badges even the visible window with the static icon ---
+export FAKE_TMUX_BADGE_INFO='@2|on|1|zsh'   # visible: event badges skip it, running must not
+tmux_running_start || fail "running-start should succeed"
+[[ "$(window_name)" == "🌕 zsh" ]] || fail "running-start should set the static icon on a visible window (got: $(window_name))"
+[[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "running" ]] \
+    || fail "running marker should record clear mode running"
+[[ "$(cat "$state_dir/@2.@code_notify_running")" =~ ^[0-9]+$ ]] \
+    || fail "running-start should store the start epoch"
+pass "running-start sets the static icon and epoch"
+
+# --- sweep leaves a fresh running marker alone ---
+export FAKE_TMUX_WINDOWS="@2|1|running|zsh"
+tmux_badge_sweep
+[[ "$(window_name)" == "🌕 zsh" ]] || fail "sweep must not clear a fresh running marker (got: $(window_name))"
+[[ -f "$state_dir/@2.@code_notify_running" ]] || fail "sweep must keep a fresh running epoch"
+export FAKE_TMUX_WINDOWS=""
+pass "sweep skips a fresh running marker"
+
+# --- running-stop clears the marker and epoch ---
+tmux_running_stop || fail "running-stop should succeed"
+[[ "$(window_name)" == "zsh" ]] || fail "running-stop should restore the name (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] || fail "running-stop should drop the epoch"
+[[ ! -f "$state_dir/@2.@code_notify_clear_mode" ]] || fail "running-stop should drop the badge state"
+pass "running-stop clears marker and epoch"
+
+# --- running-stop leaves an event badge that replaced the marker ---
+export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+tmux_running_start || fail "running-start before event badge should succeed"
+tmux_badge_set "🎯" engage || fail "event badge should succeed"
+tmux_running_stop || fail "running-stop after event badge should succeed"
+[[ "$(window_name)" == "🎯 zsh" ]] || fail "running-stop must not clear an event badge (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] || fail "running-stop should still drop the epoch"
+tmux_badge_clear "@2"
+pass "running-stop leaves a replacing event badge alone"
+
+# --- stale running marker is retired by the sweep ---
+tmux_running_start || fail "running-start for staleness test should succeed"
+printf '%s' "1000" > "$state_dir/@2.@code_notify_running"   # ancient epoch
+export FAKE_TMUX_WINDOWS="@2|1000|running|zsh"              # id|since|mode for the running sweep
+tmux_running_sweep_stale
+[[ "$(window_name)" == "zsh" ]] || fail "stale sweep should restore the name (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] || fail "stale sweep should drop the epoch"
+export FAKE_TMUX_WINDOWS=""
+pass "stale running marker is retired"
+
+# --- a fresh running marker schedules a one-shot stale sweep on the server ---
+# Every other sweep call site needs later activity on the server; the run-shell
+# timer is what retires a dead run's marker when none ever comes.
+rm -f "$state_dir/.@code_notify_sweep_scheduled"   # earlier cases armed one
+: > "$log_file"
+tmux_running_start || fail "running-start for the schedule test should succeed"
+grep -q "^run-shell -b -d " "$log_file" \
+    || fail "a fresh running marker should schedule a delayed stale sweep"
+delay=$(sed -n 's/^run-shell -b -d \([0-9][0-9]*\) .*/\1/p' "$log_file" | head -n 1)
+[[ "${delay:-0}" -ge $((TMUX_RUNNING_TTL - 60)) ]] \
+    || fail "the timer should fire only after the marker can expire (got delay: $delay)"
+[[ -f "$state_dir/.@code_notify_sweep_scheduled" ]] \
+    || fail "the pending timer should be recorded in @code_notify_sweep_scheduled"
+pass "fresh running marker schedules a delayed stale sweep"
+
+# --- a pending timer is not stacked by further sweeps ---
+sched_count=$(grep -c "^run-shell -b -d " "$log_file")
+tmux_running_sweep_stale
+[[ "$(grep -c "^run-shell -b -d " "$log_file")" == "$sched_count" ]] \
+    || fail "a pending timer must not be re-armed by another sweep"
+pass "pending timer is not stacked"
+
+# --- the scheduled payload clears the flag and retires a stale marker ---
+# Extract the run-shell payload exactly as tmux would execute it after the
+# delay: /bin/sh -c, no TMUX_PANE. The marker is aged past the TTL first, so
+# the timer's sweep must restore the window and drop the epoch and the flag.
+payload=$(sed -n 's/^run-shell -b -d [0-9][0-9]* \(.*\)$/\1/p' "$log_file" | head -n 1)
+[[ -n "$payload" ]] || fail "the timer payload should be extractable from the run-shell call"
+printf '%s' "1000" > "$state_dir/@2.@code_notify_running"   # went stale before firing
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the timer payload should run cleanly"
+[[ ! -f "$state_dir/.@code_notify_sweep_scheduled" ]] \
+    || fail "the timer payload should clear the pending flag before sweeping"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "the timer's sweep should retire the stale marker"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "the timer's sweep should restore the window name (got: $(window_name))"
+pass "scheduled sweep retires a stale marker end-to-end"
+
+# --- the timer's sweep re-schedules while fresher markers remain ---
+tmux_running_start || fail "running-start for the re-schedule test should succeed"
+rm -f "$state_dir/.@code_notify_sweep_scheduled"   # pretend the timer just fired
+: > "$log_file"
+tmux_running_sweep_stale
+grep -q "^run-shell -b -d " "$log_file" \
+    || fail "a sweep that leaves fresh markers behind should re-arm the timer"
+tmux_running_stop || fail "cleanup running-stop should succeed"
+pass "sweep re-schedules while fresh markers remain"
+
+# --- running disabled via badge kill switch ---
+: > "$log_file"
+CODE_NOTIFY_TMUX_BADGE=false tmux_running_start || fail "disabled running-start should still exit 0"
+grep -q "rename-window" "$log_file" && fail "disabled running-start must not rename"
+pass "running-start honours the badge kill switch"
+
+# --- spinner: arm injects the snippet, saves state, disarm restores ---
+printf '%s' "THEME-FMT" > "$state_dir/.window-status-format"
+printf '%s' "THEME-CUR" > "$state_dir/.window-status-current-format"
+printf '%s' "10" > "$state_dir/.status-interval"
+tmux_spinner_arm || fail "spinner arm should succeed"
+snip="$(cat "$state_dir/.@code_notify_spinner_snip")"
+[[ "$snip" == *"🌑"* && "$snip" == *"🌘"* ]] || fail "spinner snippet should contain the moon frames"
+[[ "$snip" == *'#{T:@code_notify_clock}'* ]] || fail "spinner snippet should be wall-clock driven"
+[[ "$snip" == *'@code_notify_running'* ]] || fail "spinner snippet should gate on the running option"
+[[ "$(cat "$state_dir/.window-status-format")" == "$snip"THEME-FMT ]] \
+    || fail "arm should prepend the snippet to window-status-format"
+[[ "$(cat "$state_dir/.window-status-current-format")" == "$snip"THEME-CUR ]] \
+    || fail "arm should prepend the snippet to window-status-current-format"
+[[ "$(cat "$state_dir/.status-interval")" == "1" ]] || fail "arm should lower status-interval to 1"
+[[ "$(cat "$state_dir/.@code_notify_saved_interval")" == "10" ]] || fail "arm should save the user's interval"
+tmux_spinner_arm || fail "second arm should be a no-op"
+[[ "$(cat "$state_dir/.window-status-format")" == "$snip"THEME-FMT ]] \
+    || fail "arm must be idempotent (snippet stacked)"
+tmux_spinner_disarm || fail "spinner disarm should succeed"
+[[ "$(cat "$state_dir/.window-status-format")" == "THEME-FMT" ]] \
+    || fail "disarm should restore window-status-format (got: $(cat "$state_dir/.window-status-format"))"
+[[ "$(cat "$state_dir/.window-status-current-format")" == "THEME-CUR" ]] \
+    || fail "disarm should restore window-status-current-format"
+[[ "$(cat "$state_dir/.status-interval")" == "10" ]] || fail "disarm should restore status-interval"
+[[ ! -f "$state_dir/.@code_notify_spinner_snip" ]] || fail "disarm should drop the saved snippet"
+pass "spinner arm/disarm round-trips the status-line state"
+
+# --- spinner: user-replaced format is left alone on disarm ---
+tmux_spinner_arm || fail "arm for replaced-format test should succeed"
+printf '%s' "USER-NEW-FMT" > "$state_dir/.window-status-format"   # user replaced it wholesale
+tmux_spinner_disarm || fail "disarm after user replacement should succeed"
+[[ "$(cat "$state_dir/.window-status-format")" == "USER-NEW-FMT" ]] \
+    || fail "disarm must not touch a format the user replaced (got: $(cat "$state_dir/.window-status-format"))"
+pass "spinner disarm keeps a user-replaced format"
+
+# --- spinner: user-changed interval is left alone on disarm ---
+printf '%s' "10" > "$state_dir/.status-interval"
+tmux_spinner_arm || fail "arm for the interval-guard test should succeed"
+printf '%s' "5" > "$state_dir/.status-interval"   # user changed it while armed
+tmux_spinner_disarm || fail "disarm after an interval change should succeed"
+[[ "$(cat "$state_dir/.status-interval")" == "5" ]] \
+    || fail "disarm must not clobber a user-changed status-interval (got: $(cat "$state_dir/.status-interval"))"
+[[ ! -f "$state_dir/.@code_notify_saved_interval" ]] \
+    || fail "disarm should still drop the saved interval"
+pass "spinner disarm keeps a user-changed interval"
+
+# --- spinner: session-local intervals are lowered and restored ---
+# The global status-interval set does not reach a session with a local value;
+# its spinner would tick at the slower local rate.
+export FAKE_TMUX_SESSIONS='$1'
+printf '%s' "10" > "$state_dir/.status-interval"
+printf '%s' "9" > "$state_dir"/'$1.status-interval'
+tmux_spinner_arm || fail "arm for the session-interval test should succeed"
+[[ "$(cat "$state_dir"/'$1.status-interval')" == "1" ]] \
+    || fail "arm should lower a session-local interval to 1"
+[[ "$(cat "$state_dir"/'$1.@code_notify_saved_interval')" == "9" ]] \
+    || fail "arm should save the session-local interval"
+tmux_spinner_disarm || fail "disarm for the session-interval test should succeed"
+[[ "$(cat "$state_dir"/'$1.status-interval')" == "9" ]] \
+    || fail "disarm should restore the session-local interval (got: $(cat "$state_dir"/'$1.status-interval'))"
+[[ ! -f "$state_dir"/'$1.@code_notify_saved_interval' ]] \
+    || fail "disarm should drop the session bookkeeping"
+pass "session-local intervals are lowered and restored"
+
+# --- spinner: sessions appearing after arm are synced, user changes win ---
+tmux_spinner_arm || fail "arm for the late-session test should succeed"
+export FAKE_TMUX_SESSIONS=$'$1\n$4'
+printf '%s' "7" > "$state_dir"/'$4.status-interval'   # created after arm
+tmux_spinner_arm || fail "re-arm should succeed"
+[[ "$(cat "$state_dir"/'$4.status-interval')" == "1" ]] \
+    || fail "an already-armed spinner should still sync a late session's interval"
+[[ "$(cat "$state_dir"/'$4.@code_notify_saved_interval')" == "7" ]] \
+    || fail "the late session's interval should be saved"
+printf '%s' "3" > "$state_dir"/'$1.status-interval'   # user changed it while armed
+tmux_spinner_arm || fail "re-arm after a user change should succeed"
+[[ "$(cat "$state_dir"/'$1.status-interval')" == "3" ]] \
+    || fail "a session the user re-raised while armed must not be re-lowered"
+tmux_spinner_disarm || fail "disarm for the late-session test should succeed"
+[[ "$(cat "$state_dir"/'$1.status-interval')" == "3" ]] \
+    || fail "disarm must keep a session interval the user changed while armed"
+[[ "$(cat "$state_dir"/'$4.status-interval')" == "7" ]] \
+    || fail "disarm should restore the late session's interval"
+rm -f "$state_dir"/'$1.status-interval' "$state_dir"/'$4.status-interval'
+export FAKE_TMUX_SESSIONS=""
+pass "late sessions are synced and user changes win"
+
+# --- spinner mode: running-start arms without renaming ---
+rm -f "$state_dir/.window-status-format" "$state_dir/.window-status-current-format"
+printf '%s' "10" > "$state_dir/.status-interval"
+mkdir -p "$HOME/.claude/notifications"
+touch "$HOME/.claude/notifications/tmux-spinner-enabled"
+: > "$log_file"
+tmux_running_start || fail "spinner-mode running-start should succeed"
+grep -q "rename-window" "$log_file" && fail "spinner mode must not rename the window"
+[[ -f "$state_dir/.@code_notify_spinner_snip" ]] || fail "spinner mode should arm the status-line spinner"
+[[ "$(cat "$state_dir/@2.@code_notify_running")" =~ ^[0-9]+$ ]] \
+    || fail "spinner mode should still store the start epoch"
+pass "spinner-mode running-start arms without renaming"
+
+# --- spinner mode: running-stop disarms once nothing is running ---
+export FAKE_TMUX_WINDOWS="@2|"   # no running epoch anywhere after the stop
+tmux_running_stop || fail "spinner-mode running-stop should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] || fail "spinner-mode stop should drop the epoch"
+[[ ! -f "$state_dir/.@code_notify_spinner_snip" ]] \
+    || fail "last running-stop should disarm the spinner"
+[[ "$(cat "$state_dir/.status-interval")" == "10" ]] || fail "last running-stop should restore status-interval"
+export FAKE_TMUX_WINDOWS=""
+pass "spinner-mode running-stop disarms when idle"
+
+# --- spinner mode: env var override forces it off ---
+: > "$log_file"
+CODE_NOTIFY_TMUX_SPINNER=false tmux_running_start || fail "env-forced static running-start should succeed"
+grep -q "rename-window" "$log_file" || fail "CODE_NOTIFY_TMUX_SPINNER=false must fall back to the static icon"
+tmux_running_stop
+rm -f "$HOME/.claude/notifications/tmux-spinner-enabled"
+pass "spinner env override forces static mode"
+
+# --- spinner off mid-run: running windows fall back to the static icon ---
+# `cn spinner off` disarms the snippet while agents are still working; each
+# window with a fresh running epoch must be re-badged with the static icon or
+# it would carry no indicator at all until its run ends.
+touch "$HOME/.claude/notifications/tmux-spinner-enabled"
+: > "$log_file"
+tmux_running_start || fail "running-start for the spinner-off test should succeed"
+grep -q "rename-window" "$log_file" && fail "precondition: spinner mode must not rename"
+[[ -f "$state_dir/.@code_notify_spinner_snip" ]] || fail "precondition: spinner should be armed"
+rm -f "$HOME/.claude/notifications/tmux-spinner-enabled"   # what `cn spinner off` does
+tmux_spinner_disarm || fail "disarm for the spinner-off test should succeed"
+tmux_running_apply_static_badges || fail "apply-static-badges should succeed"
+[[ "$(window_name)" == "🌕 zsh" ]] \
+    || fail "spinner off must re-badge running windows with the static icon (got: $(window_name))"
+[[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "running" ]] \
+    || fail "the fallback badge should be a running-mode marker"
+pass "spinner off falls back to the static icon on running windows"
+
+# --- the static fallback skips stale epochs ---
+tmux_running_stop || fail "cleanup running-stop should succeed"
+printf '%s' "1000" > "$state_dir/@2.@code_notify_running"   # dead run, long stale
+: > "$log_file"
+tmux_running_apply_static_badges || fail "apply-static-badges on a stale epoch should still succeed"
+grep -q "rename-window" "$log_file" && fail "a stale running epoch must not get a fallback badge"
+rm -f "$state_dir/@2.@code_notify_running"
+pass "static fallback skips stale epochs"
+
+# --- prompt-submit fast path: engage badge swaps to the running icon ---
+# The synchronous prompt path must not clear-restore-then-rebadge (two
+# renames) or run a server-wide sweep: one capture, one rename, timer armed.
+tmux_badge_set "🎯" engage || fail "engage badge for the prompt-submit test should succeed"
+[[ "$(window_name)" == "🎯 zsh" ]] || fail "precondition: window should be engage-badged"
+: > "$log_file"
+tmux_prompt_submit || fail "prompt-submit should succeed"
+[[ "$(window_name)" == "🌕 zsh" ]] \
+    || fail "prompt-submit should swap the event badge for the running icon (got: $(window_name))"
+[[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "running" ]] \
+    || fail "prompt-submit should leave a running-mode marker"
+[[ "$(cat "$state_dir/@2.@code_notify_running")" =~ ^[0-9]+$ ]] \
+    || fail "prompt-submit should store the running epoch"
+[[ "$(grep -c "rename-window" "$log_file")" == "1" ]] \
+    || fail "the badge swap should cost exactly one rename"
+grep -q "^list-windows" "$log_file" && fail "prompt-submit must not run a server-wide sweep"
+tmux_running_stop || fail "cleanup running-stop should succeed"
+pass "prompt-submit swaps the badge in one rename, no sweep"
+
+# --- prompt-submit in spinner mode: clears the badge, arms, no re-badge ---
+touch "$HOME/.claude/notifications/tmux-spinner-enabled"
+tmux_badge_set "🎯" engage || fail "engage badge for the spinner prompt-submit test should succeed"
+: > "$log_file"
+tmux_prompt_submit || fail "spinner-mode prompt-submit should succeed"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "spinner-mode prompt-submit should clear the event badge (got: $(window_name))"
+[[ -f "$state_dir/.@code_notify_spinner_snip" ]] \
+    || fail "spinner-mode prompt-submit should arm the spinner"
+[[ "$(cat "$state_dir/@2.@code_notify_running")" =~ ^[0-9]+$ ]] \
+    || fail "spinner-mode prompt-submit should store the epoch"
+[[ "$(grep -c "rename-window" "$log_file")" == "1" ]] \
+    || fail "spinner mode should rename only to restore the cleared badge"
+tmux_running_stop || fail "cleanup running-stop should succeed"
+rm -f "$HOME/.claude/notifications/tmux-spinner-enabled"
+pass "spinner-mode prompt-submit clears the badge and arms the spinner"
+
+# --- prompt-submit with the running indicator disabled still engage-clears ---
+tmux_badge_set "🎯" engage || fail "engage badge for the disabled prompt-submit test should succeed"
+CODE_NOTIFY_TMUX_RUNNING=false tmux_prompt_submit || fail "disabled prompt-submit should succeed"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "prompt-submit must clear the badge even with the running indicator disabled (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "disabled prompt-submit must not store an epoch"
+pass "disabled prompt-submit still engage-clears"
+
 # --- clear command structure ---
 cmd=$(tmux_badge_build_clear_command) || fail "clear command should build inside tmux"
 [[ "$cmd" == *"-S '$test_dir/sock'"* ]] || fail "clear command should target the captured socket"
@@ -541,16 +852,41 @@ EOF
         && fail "Claude badge-set must not arm the glance-clear focus hook"
     pass "notifier end-to-end: Claude badges without glance-clearing"
 
-    # UserPromptSubmit: the user handed this window work, so the badge clears.
+    # UserPromptSubmit: the user handed this window work, so the event badge
+    # clears and the running marker (agent now working) replaces it.
     CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
         PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         bash "$NOTIFIER" UserPromptSubmit claude testproj > /dev/null 2>&1 \
         || fail "notifier.sh UserPromptSubmit should exit cleanly"
-    [[ "$(window_name)" == "zsh" ]] \
-        || fail "UserPromptSubmit should clear the badge (got: $(window_name))"
-    [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] \
-        || fail "UserPromptSubmit should drop the badge state"
-    pass "notifier end-to-end: UserPromptSubmit clears the badge"
+    [[ "$(window_name)" == "🌕 zsh" ]] \
+        || fail "UserPromptSubmit should clear the event badge and set the running icon (got: $(window_name))"
+    [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "running" ]] \
+        || fail "UserPromptSubmit should leave a running-mode marker"
+    [[ "$(cat "$state_dir/@2.@code_notify_running")" =~ ^[0-9]+$ ]] \
+        || fail "UserPromptSubmit should store the running epoch"
+    pass "notifier end-to-end: UserPromptSubmit swaps event badge for running marker"
+
+    # The next stop event takes the running marker off before badging 🎯.
+    rm -f "$HOME/.claude/notifications/state"/* 2>/dev/null || true
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" stop claude testproj > /dev/null 2>&1 \
+        || fail "notifier.sh stop after running should exit cleanly"
+    [[ "$(window_name)" == "🎯 zsh" ]] \
+        || fail "stop should replace the running icon with the event badge (got: $(window_name))"
+    [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+        || fail "stop should drop the running epoch"
+    [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "engage" ]] \
+        || fail "the replacing event badge should be engage-clear"
+    # Reset for the codex cases below, which assume a clean window.
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" UserPromptSubmit claude testproj > /dev/null 2>&1 || true
+    rm -f "$state_dir/@2.@code_notify_running" "$state_dir/@2.@code_notify_clear_mode" \
+        "$state_dir/@2.@code_notify_orig_name" "$state_dir/@2.@code_notify_autorename" \
+        "$state_dir/@2.@code_notify_badged_name" 2>/dev/null || true
+    printf '%s' "zsh" > "$state_dir/@2.window_name"
+    pass "notifier end-to-end: stop replaces the running marker with the event badge"
 
     # Codex reaches the notifier via its hooks.json as `notifier.sh stop codex`,
     # so RAW_ARG1 is "stop" and only TOOL_NAME is "codex". With no
@@ -634,17 +970,18 @@ EOF
         && fail "codex (engage-clear) notification must not carry a click-to-clear command"
     pass "notifier end-to-end: codex with the prompt hook engage-clears"
 
-    # And the Codex UserPromptSubmit event itself clears the badge.
+    # And the Codex UserPromptSubmit event itself clears the badge, leaving
+    # the running marker in its place (codex is now working on the prompt).
     CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
         PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         bash "$NOTIFIER" UserPromptSubmit codex testproj > /dev/null 2>&1 \
         || fail "notifier.sh UserPromptSubmit codex should exit cleanly"
-    [[ "$(window_name)" == "zsh" ]] \
-        || fail "codex UserPromptSubmit should clear the badge (got: $(window_name))"
-    [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] \
-        || fail "codex UserPromptSubmit should drop the badge state"
+    [[ "$(window_name)" == "🌕 zsh" ]] \
+        || fail "codex UserPromptSubmit should swap the event badge for the running icon (got: $(window_name))"
+    [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "running" ]] \
+        || fail "codex UserPromptSubmit should leave a running-mode marker"
     rm -f "$HOME/.codex/hooks.json"
-    pass "notifier end-to-end: codex UserPromptSubmit clears the badge"
+    pass "notifier end-to-end: codex UserPromptSubmit swaps badge for running marker"
 fi
 
 echo "All tmux badge tests passed"

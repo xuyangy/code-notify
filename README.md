@@ -56,6 +56,7 @@ cn usage status
 - **macOS click-through control** - Choose which app notification clicks activate
 - **tmux click-to-focus** - Clicking a notification jumps to the exact tmux window/pane the tool runs in (macOS; uses [alerter](https://github.com/vjeantet/alerter) for persistent alerts when installed)
 - **tmux window badges** - The originating tmux window's name gets the event icon prepended ("🎯 zsh"), so pending work is visible in the status line. For Claude and Codex (hooks.json installs) the badge marks a window as waiting for you and stays until you actually give it more work (it clears on your next prompt in that window), so a glance at the output doesn't wipe it. For Antigravity and legacy Codex `notify =` setups — which have no prompt signal — it clears the moment you switch to the window (manually, by clicking the notification, or via terminal-notifier `-focusLast`). Renaming a badged window yourself keeps your name. Disable with `CODE_NOTIFY_TMUX_BADGE=false` or `touch ~/.claude/notifications/tmux-badge-disabled`
+- **tmux running indicator** - While Claude or Codex (hooks.json installs) works on a prompt, its window name carries 🌕 so you can see which windows have an agent busy. Prefer an animated 🌑🌒🌓🌔🌕🌖🌗🌘 spinner in the status line instead? `cn spinner on` renders it via tmux's own status refresh — no background process, and the 1-second refresh is only active while an agent is actually running. The indicator self-expires after 4 hours (`CODE_NOTIFY_TMUX_RUNNING_TTL`) as a safety net for runs that end without a hook (e.g. Escape-interrupt) — on tmux older than 3.2 the expiry instead lands with the next notification or prompt on that server; disable entirely with `CODE_NOTIFY_TMUX_RUNNING=false`, or change the static icon with `CODE_NOTIFY_TMUX_RUNNING_ICON`
 - **Sound notifications** - Play custom sounds on task completion
 - **Voice announcements** - Hear when tasks complete (macOS, Windows)
 - **ElevenLabs voices** - Optional high-quality cloud TTS for voice announcements (macOS)
@@ -155,6 +156,9 @@ See [docs/installation.md](docs/installation.md) for more details.
 | `cn channels`        | Configure Slack/Discord/ntfy delivery        |
 | `cn snooze <time>`   | Pause all notifications (30m, 2h, off)       |
 | `cn usage`           | Configure Codex/Claude usage alerts          |
+| `cn spinner on`      | Use the animated tmux running indicator      |
+| `cn spinner off`     | Use the static tmux running indicator        |
+| `cn spinner status`  | Show the tmux spinner setting                |
 | `cn sound on`        | Enable sound notifications                   |
 | `cn sound set <path>`| Use custom sound file                        |
 | `cn voice on`        | Enable voice (macOS, Windows)                |
@@ -166,6 +170,27 @@ See [docs/installation.md](docs/installation.md) for more details.
 When enabling project notifications with `cnp on`, Code-Notify warns if Claude project trust does not appear to be accepted yet.
 Project-scoped Claude hooks override the global mute file, so `cn off` will not suppress a project where `cnp on` is enabled.
 `all` is also accepted as an explicit alias for global commands such as `cn on all`, `cn off all`, and `cn status all`.
+
+### tmux Running Spinner
+
+By default, an active Claude or Codex agent is marked with a static 🌕 icon in
+its tmux window name. To show an animated 🌑🌒🌓🌔🌕🌖🌗🌘 indicator in tmux's
+status line instead:
+
+```bash
+cn spinner on
+cn spinner status
+cn spinner off
+```
+
+`cn spinner on` saves the preference; the spinner is armed when the next agent
+run starts. Run `cn spinner off` from inside the affected tmux server to remove
+a live status-line spinner immediately. Agents that are still running fall back
+to the static 🌕 window-name icon. The disarm path leaves a status format or
+refresh interval that you changed while the spinner was active untouched.
+
+Set `CODE_NOTIFY_TMUX_SPINNER=true` or `CODE_NOTIFY_TMUX_SPINNER=false` to
+override the saved preference for a single process or session.
 
 ## How It Works
 

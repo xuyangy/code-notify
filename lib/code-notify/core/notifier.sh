@@ -23,7 +23,9 @@ NOTIFIER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # must stay cheap: it only needs tmux.sh.
 if [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "UserPromptSubmit" ]]; then
     source "$NOTIFIER_DIR/../utils/tmux.sh"
-    tmux_badge_clear_current 2>/dev/null || true
+    # One capture serves both halves: the event badge clears (engage-clear)
+    # and the running marker — the agent is now working — replaces it.
+    tmux_prompt_submit 2>/dev/null || true
     exit 0
 fi
 
@@ -978,6 +980,18 @@ fi
 notification_is_persistent() {
     [[ "$PERSIST_ACTIVE" == "1" ]]
 }
+
+# The agent reached a terminal state (done, waiting for input, or failed):
+# take the running marker off its window. This must precede the suppression
+# check — a snoozed or rate-limited stop is still a stop, and leaving the
+# marker (or spinner) up would show an agent working when none is. Mid-run
+# events (SubagentStart/Stop, TaskCreated/Completed, TeammateIdle) don't stop
+# it: the main agent is still going.
+case "$HOOK_TYPE" in
+    "stop"|"notification"|"error"|"failed"|"PreToolUse")
+        tmux_running_stop 2>/dev/null || true
+        ;;
+esac
 
 # Check if notification should be suppressed. "error" is included so that the
 # kill switch (cn off) and snooze silence failure alerts too — they are still

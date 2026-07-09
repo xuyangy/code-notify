@@ -323,6 +323,15 @@ get_global_codex_permission_command() {
     printf '%s notification codex\n' "$(get_notify_script)"
 }
 
+# Codex supports the UserPromptSubmit lifecycle hook (hooks.json, same event
+# schema as Claude's), so hooks-based Codex gets the same engage-clear badge
+# behavior: the badge clears when the user hands the window work, not when
+# they merely glance at it. The notifier gates engage-clear on this hook being
+# present in hooks.json, so stale installs keep glance-clearing.
+get_global_codex_prompt_command() {
+    printf '%s UserPromptSubmit codex\n' "$(get_notify_script)"
+}
+
 get_managed_claude_event_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(SubagentStart|SubagentStop|TeammateIdle|TaskCreated|TaskCompleted)(?:\s|$)'
 }
@@ -344,7 +353,7 @@ get_managed_claude_stop_pattern() {
 }
 
 get_managed_codex_hook_pattern() {
-    printf '%s\n' '(code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(stop|notification)\s+codex(?:\s|$)'
+    printf '%s\n' '(code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(stop|notification|UserPromptSubmit)\s+codex(?:\s|$)'
 }
 
 has_claude_hooks_for_commands() {
@@ -1868,9 +1877,10 @@ remove_codex_tui_notifications_override() {
 
 has_current_codex_hooks() {
     local file="${1:-$CODEX_HOOKS_FILE}"
-    local stop_cmd permission_cmd pattern
+    local stop_cmd permission_cmd prompt_cmd pattern
     stop_cmd="$(get_global_codex_stop_command)"
     permission_cmd="$(get_global_codex_permission_command)"
+    prompt_cmd="$(get_global_codex_prompt_command)"
     pattern="$(get_managed_codex_hook_pattern)"
 
     [[ -f "$file" ]] || return 1
@@ -1879,12 +1889,14 @@ has_current_codex_hooks() {
         jq -e \
             --arg stop "$stop_cmd" \
             --arg permission "$permission_cmd" \
+            --arg prompt "$prompt_cmd" \
             --arg pattern "$pattern" \
             --argjson permission_enabled "$(is_notify_type_enabled "permission_prompt" && echo true || echo false)" '
             def command_matches($exact):
                 . == $exact or test($pattern);
 
             any((.hooks.Stop // [])[]?.hooks[]?.command?; command_matches($stop)) and
+            any((.hooks.UserPromptSubmit // [])[]?.hooks[]?.command?; command_matches($prompt)) and
             (
                 ($permission_enabled | not) or
                 any((.hooks.PermissionRequest // [])[]?.hooks[]?.command?; command_matches($permission))
@@ -1894,12 +1906,12 @@ has_current_codex_hooks() {
     fi
 
     if has_python3; then
-        python3 - "$file" "$stop_cmd" "$permission_cmd" "$pattern" "$(is_notify_type_enabled "permission_prompt" && echo true || echo false)" << 'PYTHON' 2>/dev/null
+        python3 - "$file" "$stop_cmd" "$permission_cmd" "$prompt_cmd" "$pattern" "$(is_notify_type_enabled "permission_prompt" && echo true || echo false)" << 'PYTHON' 2>/dev/null
 import json
 import re
 import sys
 
-file_path, stop_cmd, permission_cmd, pattern, permission_enabled = sys.argv[1:6]
+file_path, stop_cmd, permission_cmd, prompt_cmd, pattern, permission_enabled = sys.argv[1:7]
 
 try:
     with open(file_path, "r", encoding="utf-8") as fh:
@@ -1930,6 +1942,8 @@ def has_command(event, exact):
 
 if not has_command("Stop", stop_cmd):
     raise SystemExit(1)
+if not has_command("UserPromptSubmit", prompt_cmd):
+    raise SystemExit(1)
 if permission_enabled == "true" and not has_command("PermissionRequest", permission_cmd):
     raise SystemExit(1)
 PYTHON
@@ -1937,6 +1951,7 @@ PYTHON
     fi
 
     grep -qE '"Stop"|"PermissionRequest"' "$file" &&
+        grep -q '"UserPromptSubmit"' "$file" &&
         grep -qE 'code-notify|notifier\.sh|notify\.(sh|ps1)' "$file" &&
         grep -q 'codex' "$file"
 }
@@ -1944,9 +1959,10 @@ PYTHON
 update_codex_hooks_file() {
     local mode="$1"
     local file="$2"
-    local stop_cmd permission_cmd pattern permission_enabled
+    local stop_cmd permission_cmd prompt_cmd pattern permission_enabled
     stop_cmd="$(get_global_codex_stop_command)"
     permission_cmd="$(get_global_codex_permission_command)"
+    prompt_cmd="$(get_global_codex_prompt_command)"
     pattern="$(get_managed_codex_hook_pattern)"
     permission_enabled="$(is_notify_type_enabled "permission_prompt" && echo true || echo false)"
 
@@ -1955,7 +1971,7 @@ update_codex_hooks_file() {
             def array_or_empty:
                 if type == "array" then . else [] end;
 
-            def strip_managed($stop; $permission; $pattern):
+            def strip_managed($stop; $permission; $prompt; $pattern):
                 array_or_empty
                 | map(
                     if ((.hooks | type) == "array") then
@@ -1967,6 +1983,7 @@ update_codex_hooks_file() {
                                     (
                                         (.command // "") == $stop or
                                         (.command // "") == $permission or
+                                        (.command // "") == $prompt or
                                         ((.command // "") | test($pattern))
                                     )
                                 ) | not
@@ -1979,10 +1996,12 @@ update_codex_hooks_file() {
                 | map(select(((.hooks | type) != "array") or ((.hooks | length) > 0)));
 
             .hooks = (if (.hooks | type) == "object" then .hooks else {} end) |
-            .hooks.Stop = (.hooks.Stop | strip_managed($stop; $permission; $pattern)) |
-            .hooks.PermissionRequest = (.hooks.PermissionRequest | strip_managed($stop; $permission; $pattern)) |
+            .hooks.Stop = (.hooks.Stop | strip_managed($stop; $permission; $prompt; $pattern)) |
+            .hooks.PermissionRequest = (.hooks.PermissionRequest | strip_managed($stop; $permission; $prompt; $pattern)) |
+            .hooks.UserPromptSubmit = (.hooks.UserPromptSubmit | strip_managed($stop; $permission; $prompt; $pattern)) |
             if (.hooks.Stop | length) == 0 then del(.hooks.Stop) else . end |
             if (.hooks.PermissionRequest | length) == 0 then del(.hooks.PermissionRequest) else . end |
+            if (.hooks.UserPromptSubmit | length) == 0 then del(.hooks.UserPromptSubmit) else . end |
             if $mode == "enable" then
                 .hooks.Stop = ((.hooks.Stop // []) + [{
                     "hooks": [{
@@ -1990,6 +2009,14 @@ update_codex_hooks_file() {
                         "command": $stop,
                         "timeout": 5,
                         "statusMessage": "Notifying task completion"
+                    }]
+                }]) |
+                .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": $prompt,
+                        "timeout": 5,
+                        "statusMessage": "Clearing window badge"
                     }]
                 }]) |
                 if $permission_enabled then
@@ -2012,6 +2039,7 @@ update_codex_hooks_file() {
         ' --arg mode "$mode" \
           --arg stop "$stop_cmd" \
           --arg permission "$permission_cmd" \
+          --arg prompt "$prompt_cmd" \
           --arg pattern "$pattern" \
           --argjson permission_enabled "$permission_enabled"
         return $?
@@ -2020,13 +2048,13 @@ update_codex_hooks_file() {
     if has_python3; then
         local tmp_json
         tmp_json=$(mktemp "$(dirname "$file")/.tmp.XXXXXX") || return 1
-        python3 - "$file" "$mode" "$stop_cmd" "$permission_cmd" "$pattern" "$permission_enabled" "$tmp_json" << 'PYTHON' || {
+        python3 - "$file" "$mode" "$stop_cmd" "$permission_cmd" "$prompt_cmd" "$pattern" "$permission_enabled" "$tmp_json" << 'PYTHON' || {
 import json
 import os
 import re
 import sys
 
-file_path, mode, stop_cmd, permission_cmd, pattern, permission_enabled, tmp_path = sys.argv[1:8]
+file_path, mode, stop_cmd, permission_cmd, prompt_cmd, pattern, permission_enabled, tmp_path = sys.argv[1:9]
 
 try:
     with open(file_path, "r", encoding="utf-8") as fh:
@@ -2067,7 +2095,12 @@ def strip_managed(entries):
                 command = hook.get("command", "")
                 if (
                     hook.get("type") == "command"
-                    and (command == stop_cmd or command == permission_cmd or regex.search(command))
+                    and (
+                        command == stop_cmd
+                        or command == permission_cmd
+                        or command == prompt_cmd
+                        or regex.search(command)
+                    )
                 ):
                     continue
                 filtered.append(hook)
@@ -2079,10 +2112,13 @@ def strip_managed(entries):
 
 hooks["Stop"] = strip_managed(hooks.get("Stop", []))
 hooks["PermissionRequest"] = strip_managed(hooks.get("PermissionRequest", []))
+hooks["UserPromptSubmit"] = strip_managed(hooks.get("UserPromptSubmit", []))
 if not hooks["Stop"]:
     hooks.pop("Stop", None)
 if not hooks.get("PermissionRequest"):
     hooks.pop("PermissionRequest", None)
+if not hooks.get("UserPromptSubmit"):
+    hooks.pop("UserPromptSubmit", None)
 
 if mode == "enable":
     hooks["Stop"] = list(hooks.get("Stop", [])) + [{
@@ -2091,6 +2127,14 @@ if mode == "enable":
             "command": stop_cmd,
             "timeout": 5,
             "statusMessage": "Notifying task completion",
+        }],
+    }]
+    hooks["UserPromptSubmit"] = list(hooks.get("UserPromptSubmit", [])) + [{
+        "hooks": [{
+            "type": "command",
+            "command": prompt_cmd,
+            "timeout": 5,
+            "statusMessage": "Clearing window badge",
         }],
     }]
     if permission_enabled == "true":

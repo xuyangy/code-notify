@@ -693,6 +693,13 @@ stop_commands = [
 ]
 assert "/usr/bin/true" in stop_commands, stop_commands
 assert sum(command.endswith(" stop codex") for command in stop_commands) == 1, stop_commands
+prompt_commands = [
+    hook["command"]
+    for entry in hooks.get("UserPromptSubmit", [])
+    for hook in entry.get("hooks", [])
+    if hook.get("type") == "command"
+]
+assert sum(command.endswith(" UserPromptSubmit codex") for command in prompt_commands) == 1, prompt_commands
 assert "PermissionRequest" not in hooks, hooks
 PY
             then
@@ -710,6 +717,11 @@ PY
 
         if [[ $(grep -c '"command": .* stop codex' "$CODEX_HOOKS_FILE") -ne 1 ]]; then
             echo "❌ Re-enable left duplicate Stop hooks"
+            cat "$CODEX_HOOKS_FILE"
+            exit 1
+        fi
+        if [[ $(grep -c '"command": .* UserPromptSubmit codex' "$CODEX_HOOKS_FILE") -ne 1 ]]; then
+            echo "❌ Re-enable left duplicate UserPromptSubmit hooks"
             cat "$CODEX_HOOKS_FILE"
             exit 1
         fi
@@ -746,7 +758,8 @@ PY
             exit 1
         fi
 
-        if grep -q ' stop codex' "$CODEX_HOOKS_FILE" || grep -q ' notification codex' "$CODEX_HOOKS_FILE"; then
+        if grep -q ' stop codex' "$CODEX_HOOKS_FILE" || grep -q ' notification codex' "$CODEX_HOOKS_FILE" ||
+            grep -q ' UserPromptSubmit codex' "$CODEX_HOOKS_FILE"; then
             echo "❌ disable_codex_hooks did not remove managed hooks"
             cat "$CODEX_HOOKS_FILE"
             exit 1

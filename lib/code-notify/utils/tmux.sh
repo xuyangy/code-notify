@@ -24,12 +24,16 @@ tmux_focus_shell_quote() {
 # so shell-quoting the inner values (which only protects the innermost
 # /bin/sh) is not enough: a ", \ or $ in an embedded path would break tmux's
 # parse before /bin/sh ever sees the safely-quoted value. Escape backslashes
-# first so the escapes we add are not re-escaped.
+# first so the escapes we add are not re-escaped. run-shell additionally
+# format-expands its argument when it executes, so # must be doubled too —
+# otherwise a #{...} or #( in an embedded path is rewritten by format
+# expansion before /bin/sh sees it.
 tmux_focus_cmd_quote() {
     local value="$1"
     value="${value//\\/\\\\}"
     value="${value//\"/\\\"}"
     value="${value//\$/\\\$}"
+    value="${value//\#/##}"
     printf '"%s"' "$value"
 }
 
@@ -106,8 +110,10 @@ tmux_focus_build_command() {
 # When a notification fires, the originating tmux window's name gets the event
 # icon prepended ("🎯 zsh"), so pending work is visible in the status line
 # from anywhere in the session. Badge state lives in tmux window options
-# (@code_notify_orig_name, @code_notify_autorename, @code_notify_badged_name)
-# so it survives across hook processes and clears from any of them:
+# (@code_notify_orig_name, @code_notify_autorename, @code_notify_badged_name,
+# @code_notify_clear_mode) so it survives across hook processes and clears from
+# any of them. How a badge clears depends on its saved clear mode ("glance" or
+# "engage" — see tmux_badge_set); the glance paths are:
 #   - visiting the window: a server hook (session-window-changed /
 #     client-session-changed, installed lazily when the first badge is set)
 #     sweeps the moment the window becomes active — whether the user switched
@@ -154,7 +160,9 @@ tmux_badge_enabled() {
 # without waiting for the next notification. Idempotent: the fixed index makes
 # a repeat set overwrite rather than stack. session-window-changed covers
 # switching windows within a session; client-session-changed covers switching
-# between attached sessions. run-shell -b keeps tmux responsive.
+# between attached sessions; client-attached covers reattaching to a session
+# whose active window was badged while detached (badge-set only skips the
+# active window of an *attached* session). run-shell -b keeps tmux responsive.
 #
 # The hook embeds an absolute lib path that can outlive the install (uninstall
 # while a badge is pending), and a dangling hook would then error on every
@@ -176,11 +184,13 @@ tmux_badge_install_focus_hook() {
     q_socket=$(tmux_focus_shell_quote "$socket_path")
     idx="$TMUX_BADGE_HOOK_INDEX"
     retire="$q_tmux -S $q_socket set-hook -gu 'session-window-changed[$idx]'; "
-    retire+="$q_tmux -S $q_socket set-hook -gu 'client-session-changed[$idx]'"
+    retire+="$q_tmux -S $q_socket set-hook -gu 'client-session-changed[$idx]'; "
+    retire+="$q_tmux -S $q_socket set-hook -gu 'client-attached[$idx]'"
     inner="if [ -f $q_lib ]; then bash $q_lib badge-sweep; else $retire; fi"
     hook_cmd="run-shell -b $(tmux_focus_cmd_quote "$inner")"
     tmux set-hook -g "session-window-changed[$idx]" "$hook_cmd" 2>/dev/null
     tmux set-hook -g "client-session-changed[$idx]" "$hook_cmd" 2>/dev/null
+    tmux set-hook -g "client-attached[$idx]" "$hook_cmd" 2>/dev/null
 }
 
 # Retire the focus hook. Called when the last badge clears, so idle window
@@ -189,6 +199,7 @@ tmux_badge_install_focus_hook() {
 tmux_badge_uninstall_focus_hook() {
     tmux set-hook -gu "session-window-changed[$TMUX_BADGE_HOOK_INDEX]" 2>/dev/null
     tmux set-hook -gu "client-session-changed[$TMUX_BADGE_HOOK_INDEX]" 2>/dev/null
+    tmux set-hook -gu "client-attached[$TMUX_BADGE_HOOK_INDEX]" 2>/dev/null
 }
 
 # Whether a live window name is a badged form of the saved original: exactly
@@ -207,8 +218,18 @@ tmux_badge_name_is_badged() {
 # notification swaps the icon instead of stacking a second one. Windows the
 # user is currently looking at (active window of an attached session) are
 # skipped — the badge would be noise there.
+#
+# The optional second argument records how this badge clears (stored in
+# @code_notify_clear_mode so the sweep, which runs agent-blind, can honour it):
+#   - "glance" (default): cleared by the sweep/focus hook the moment the user
+#     visits the window
+#   - "engage": only the owning agent's prompt-submit hook
+#     (tmux_badge_clear_current) clears it; the sweep skips it and no focus
+#     hook is armed for it, so it survives glances — even glances triggered by
+#     another agent's badge activity on the same server
 tmux_badge_set() {
     local icon="$1"
+    local clear_mode="${2:-glance}"
     [[ -n "$icon" ]] || return 1
     tmux_badge_enabled || return 1
     tmux_focus_available || return 1
@@ -243,11 +264,14 @@ tmux_badge_set() {
     fi
     tmux rename-window -t "$window_id" "$icon $orig_name" 2>/dev/null || return 1
     tmux set-option -w -t "$window_id" @code_notify_badged_name "$icon $orig_name" 2>/dev/null
-    # A badge now exists, so arm the focus hook that glance-clears it on the next
-    # visit. Cheap and idempotent, so setting it per badge is fine. Suppressed
-    # (CODE_NOTIFY_TMUX_FOCUS_HOOK=false) for agents that clear on prompt-submit
-    # instead of on glance — see the notifier's badge-clearing model.
-    [[ "${CODE_NOTIFY_TMUX_FOCUS_HOOK:-}" != "false" ]] && tmux_badge_install_focus_hook
+    tmux set-option -w -t "$window_id" @code_notify_clear_mode "$clear_mode" 2>/dev/null
+    # A glance badge now exists, so arm the focus hook that clears it on the
+    # next visit. Cheap and idempotent, so setting it per badge is fine. Engage
+    # badges don't arm it — they clear on prompt-submit, and the sweep skips
+    # them anyway. CODE_NOTIFY_TMUX_FOCUS_HOOK=false suppresses arming entirely.
+    if [[ "$clear_mode" != "engage" ]] && [[ "${CODE_NOTIFY_TMUX_FOCUS_HOOK:-}" != "false" ]]; then
+        tmux_badge_install_focus_hook
+    fi
     return 0
 }
 
@@ -277,6 +301,7 @@ tmux_badge_clear() {
     tmux set-option -wu -t "$window_id" @code_notify_orig_name 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_autorename 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_badged_name 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_clear_mode 2>/dev/null
 }
 
 # Clear badges the user has implicitly acknowledged: any badged window that is
@@ -285,21 +310,29 @@ tmux_badge_clear() {
 # though no daemon watches window focus. Intentionally not gated on
 # tmux_badge_enabled — badges left over from before the feature was disabled
 # should still be cleaned up.
+#
+# Engage-clear badges (@code_notify_clear_mode=engage) are skipped entirely:
+# they clear on the owning agent's prompt-submit, and sweeping them here would
+# reintroduce glance-clearing through another agent's badge activity. They are
+# also not counted toward keeping the focus hook alive — the hook only serves
+# glance badges. Badges with no saved mode (written by older versions) are
+# treated as glance so they still converge.
 tmux_badge_sweep() {
     # Only needs to be inside a tmux server with a tmux binary; unlike badge-set
     # it never touches the current pane, so it must not require TMUX_PANE (the
     # focus hook's run-shell context may not set it).
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
-    local window_id visible orig remaining=0
-    while IFS='|' read -r window_id visible orig; do
+    local window_id visible mode orig remaining=0
+    while IFS='|' read -r window_id visible mode orig; do
         [[ -n "$orig" ]] || continue
+        if [[ "$mode" == "engage" ]]; then continue; fi
         if [[ "$visible" == "1" ]]; then
             tmux_badge_clear "$window_id"   # clear always drops the orig-name option
         else
             remaining=$((remaining + 1))    # badged but still hidden
         fi
     done < <(tmux list-windows -a -F \
-        '#{window_id}|#{&&:#{window_active},#{session_attached}}|#{@code_notify_orig_name}' 2>/dev/null)
+        '#{window_id}|#{&&:#{window_active},#{session_attached}}|#{@code_notify_clear_mode}|#{@code_notify_orig_name}' 2>/dev/null)
     # With no badge left anywhere, retire the focus hook so it stops spawning a
     # sweep on every window switch until the next badge re-arms it. Kept as an
     # explicit if (not `&& ...`) so the function still returns 0 when a badge

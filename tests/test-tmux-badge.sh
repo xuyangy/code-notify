@@ -228,9 +228,10 @@ export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 pass "unsafe window id rejection"
 
 # --- sweep clears only badged windows that are visible again ---
+# list-windows format: window_id|visible|clear_mode|orig_name
 tmux_badge_set "🎯" || fail "badge for sweep setup should succeed"
 printf '%s' "other" > "$state_dir/@5.@code_notify_orig_name"
-export FAKE_TMUX_WINDOWS=$'@2|1|zsh\n@5|0|other\n@7|1|'
+export FAKE_TMUX_WINDOWS=$'@2|1|glance|zsh\n@5|0|glance|other\n@7|1||'
 tmux_badge_sweep
 [[ "$(window_name)" == "zsh" ]] || fail "sweep should restore the visited window"
 [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "sweep should unset options on the visited window"
@@ -246,13 +247,17 @@ grep -qF "set-hook -g session-window-changed[8471]" "$log_file" \
     || fail "badge-set should install the session-window-changed focus hook"
 grep -qF "set-hook -g client-session-changed[8471]" "$log_file" \
     || fail "badge-set should install the client-session-changed focus hook"
+grep -qF "set-hook -g client-attached[8471]" "$log_file" \
+    || fail "badge-set should install the client-attached focus hook"
 grep -q "badge-sweep" "$log_file" || fail "focus hook should invoke badge-sweep"
 pass "badge-set arms the focus-clear hook"
 
 # --- the hook entry point (`tmux.sh badge-sweep`) clears from a subprocess ---
 # This is exactly what the tmux hook runs: a fresh `bash tmux.sh badge-sweep`,
-# with no TMUX_PANE. It must still clear the now-visible badged window.
-export FAKE_TMUX_WINDOWS=$'@2|1|zsh'
+# with no TMUX_PANE. It must still clear the now-visible badged window. The
+# empty clear-mode field doubles as the legacy-badge case (written before
+# @code_notify_clear_mode existed): no saved mode is treated as glance.
+export FAKE_TMUX_WINDOWS=$'@2|1||zsh'
 env -u TMUX_PANE bash "$ROOT_DIR/lib/code-notify/utils/tmux.sh" badge-sweep
 [[ "$(window_name)" == "zsh" ]] \
     || fail "badge-sweep subcommand should clear the visited window (got: $(window_name))"
@@ -272,7 +277,7 @@ pass "sweep no-ops without a tmux server"
 
 # --- sweep retires the focus hook once no badge remains ---
 tmux_badge_set "🎯" || fail "badge for hook-retire test should succeed"
-export FAKE_TMUX_WINDOWS=$'@2|1|zsh'   # the only badged window, now visible
+export FAKE_TMUX_WINDOWS=$'@2|1|glance|zsh'   # the only badged window, now visible
 : > "$log_file"
 tmux_badge_sweep
 [[ "$(window_name)" == "zsh" ]] || fail "sweep should clear the last badge"
@@ -280,13 +285,15 @@ grep -qF "set-hook -gu session-window-changed[8471]" "$log_file" \
     || fail "sweep should retire the session hook when no badge remains"
 grep -qF "set-hook -gu client-session-changed[8471]" "$log_file" \
     || fail "sweep should retire the client hook when no badge remains"
+grep -qF "set-hook -gu client-attached[8471]" "$log_file" \
+    || fail "sweep should retire the client-attached hook when no badge remains"
 export FAKE_TMUX_WINDOWS=""
 pass "sweep retires the focus hook when no badge remains"
 
 # --- sweep keeps the hook while a badged window is still hidden ---
 tmux_badge_set "🎯" || fail "badge for hook-keep test should succeed"
 printf '%s' "other" > "$state_dir/@5.@code_notify_orig_name"
-export FAKE_TMUX_WINDOWS=$'@2|1|zsh\n@5|0|other'   # @5 still hidden + badged
+export FAKE_TMUX_WINDOWS=$'@2|1|glance|zsh\n@5|0|glance|other'   # @5 still hidden + badged
 : > "$log_file"
 tmux_badge_sweep
 grep -qF "set-hook -gu session-window-changed[8471]" "$log_file" \
@@ -313,7 +320,7 @@ payload=$(sed -n 's/^set-hook -g session-window-changed\[8471\] run-shell -b "\(
 [[ -n "$payload" ]] || fail "hook payload should be extractable from the set-hook call"
 
 # lib still present: the payload's sweep branch clears the visible badge
-export FAKE_TMUX_WINDOWS=$'@2|1|zsh'
+export FAKE_TMUX_WINDOWS=$'@2|1|glance|zsh'
 env -u TMUX_PANE /bin/sh -c "$payload" || fail "hook payload should run cleanly with the lib present"
 [[ "$(window_name)" == "zsh" ]] \
     || fail "hook payload should sweep the badge while the lib exists (got: $(window_name))"
@@ -328,6 +335,8 @@ grep -qF -- "-S $test_dir/sock set-hook -gu session-window-changed[8471]" "$log_
     || fail "payload should self-retire the session hook when the lib is gone"
 grep -qF -- "-S $test_dir/sock set-hook -gu client-session-changed[8471]" "$log_file" \
     || fail "payload should self-retire the client hook when the lib is gone"
+grep -qF -- "-S $test_dir/sock set-hook -gu client-attached[8471]" "$log_file" \
+    || fail "payload should self-retire the client-attached hook when the lib is gone"
 grep -q "list-windows" "$log_file" && fail "payload must not attempt a sweep when the lib is gone"
 tmux_badge_clear "@2"
 TMUX_BADGE_LIB_PATH="$saved_lib_path"
@@ -347,7 +356,10 @@ if [[ -n "$REAL_TMUX" ]]; then
     tmux_major=$("$REAL_TMUX" -V 2>/dev/null | grep -oE '[0-9]+' | head -n 1)
 fi
 if [[ "${tmux_major:-0}" -ge 3 ]]; then
-    qdir="$test_dir/pa\"th\$x \\y"          # dir name with " $ space \ — all tmux-hostile
+    # dir name with " $ space \ and #{...} — all tmux-hostile. The #{q} exercises
+    # run-shell's format expansion: an unescaped # would be rewritten as a format
+    # before /bin/sh ever ran.
+    qdir="$test_dir/pa\"th\$x #{q} \\y"
     marker="$qdir/fired.txt"
     mkdir -p "$qdir"
     # Build the payload exactly as tmux_badge_install_focus_hook does: an inner
@@ -399,14 +411,60 @@ bash "$ROOT_DIR/lib/code-notify/utils/tmux.sh" badge-clear-current
 pass "badge-clear-current subcommand clears the window"
 
 # --- badge-set suppresses the focus hook on request ---
-# Engage-clear agents set CODE_NOTIFY_TMUX_FOCUS_HOOK=false so no glance-clear
-# hook is armed; the badge itself is still set.
+# CODE_NOTIFY_TMUX_FOCUS_HOOK=false suppresses arming even for glance badges;
+# the badge itself is still set.
 : > "$log_file"
 CODE_NOTIFY_TMUX_FOCUS_HOOK=false tmux_badge_set "🎯" || fail "suppressed-hook badge should still succeed"
 [[ "$(window_name)" == "🎯 zsh" ]] || fail "badge should still be set when the focus hook is suppressed"
 grep -q "set-hook -g session-window-changed" "$log_file" && fail "suppressed focus hook must not be armed"
 tmux_badge_clear "@2"
 pass "badge-set suppresses the focus hook on request"
+
+# --- glance badge records its clear mode ---
+tmux_badge_set "🎯" || fail "glance badge should succeed"
+[[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "glance" ]] \
+    || fail "default badge should record clear mode glance"
+tmux_badge_clear "@2"
+[[ ! -f "$state_dir/@2.@code_notify_clear_mode" ]] \
+    || fail "clear should unset the clear-mode option"
+pass "glance badge records its clear mode"
+
+# --- engage badge records its mode and arms no focus hook ---
+: > "$log_file"
+tmux_badge_set "🎯" engage || fail "engage badge should succeed"
+[[ "$(window_name)" == "🎯 zsh" ]] || fail "engage badge should still rename the window"
+[[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "engage" ]] \
+    || fail "engage badge should record clear mode engage"
+grep -q "set-hook -g session-window-changed" "$log_file" \
+    && fail "engage badge must not arm the glance-clear focus hook"
+pass "engage badge records mode without arming the focus hook"
+
+# --- sweep skips engage badges (and doesn't count them for the hook) ---
+# The engage badge from above is visible, but only its owner's prompt-submit
+# may clear it: the sweep must leave it badged. With no glance badge anywhere,
+# the sweep must also retire the focus hook — an engage badge alone must not
+# keep it alive.
+export FAKE_TMUX_WINDOWS=$'@2|1|engage|zsh'
+: > "$log_file"
+tmux_badge_sweep
+[[ "$(window_name)" == "🎯 zsh" ]] \
+    || fail "sweep must not clear a visible engage badge (got: $(window_name))"
+[[ -f "$state_dir/@2.@code_notify_orig_name" ]] \
+    || fail "sweep must not drop an engage badge's state"
+grep -qF "set-hook -gu session-window-changed[8471]" "$log_file" \
+    || fail "an engage badge alone must not keep the focus hook alive"
+export FAKE_TMUX_WINDOWS=""
+pass "sweep skips engage badges"
+
+# --- clear-current clears an engage badge ---
+# The owning agent's prompt-submit signal is the one path that clears an
+# engage badge.
+tmux_badge_clear_current || fail "clear-current on an engage badge should succeed"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "clear-current should clear an engage badge (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_clear_mode" ]] \
+    || fail "clear-current should drop the engage badge's clear-mode option"
+pass "clear-current clears an engage badge"
 
 # --- clear command structure ---
 cmd=$(tmux_badge_build_clear_command) || fail "clear command should build inside tmux"
@@ -474,6 +532,8 @@ EOF
         || fail "notifier.sh should exit cleanly"
 
     [[ "$(window_name)" == "🎯 zsh" ]] || fail "notifier should badge the origin window with the stop icon (got: $(window_name))"
+    [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "engage" ]] \
+        || fail "Claude badge should record clear mode engage"
     grep -qx -- "-focus" "$tn_log" || fail "notifier should pass -focus"
     grep -q -- "@code_notify_orig_name" "$tn_log" \
         && fail "Claude notification must not carry a click-to-clear command (clears on prompt-submit)"
@@ -493,9 +553,11 @@ EOF
     pass "notifier end-to-end: UserPromptSubmit clears the badge"
 
     # Codex reaches the notifier via its hooks.json as `notifier.sh stop codex`,
-    # so RAW_ARG1 is "stop" and only TOOL_NAME is "codex". It must still
-    # glance-clear (no prompt-submit signal): badge set, focus hook armed, and
-    # the click-to-clear command attached. Guards the RAW_ARG1-vs-TOOL_NAME bug.
+    # so RAW_ARG1 is "stop" and only TOOL_NAME is "codex". With no
+    # UserPromptSubmit hook registered (no ~/.codex/hooks.json here) it must
+    # glance-clear: badge set, focus hook armed, and the click-to-clear command
+    # attached. Guards the RAW_ARG1-vs-TOOL_NAME bug and the engage-clear gate's
+    # fallback — a badge must never be left without a clear path.
     rm -f "$state_dir"/* "$HOME/.claude/notifications/state"/* 2>/dev/null || true
     : > "$log_file"
     : > "$tn_log"
@@ -506,11 +568,83 @@ EOF
         || fail "notifier.sh stop codex should exit cleanly"
     [[ "$(window_name)" == "🎯 zsh" ]] \
         || fail "codex stop (hooks.json path) should badge the window (got: $(window_name))"
+    [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "glance" ]] \
+        || fail "codex badge without a prompt hook should record clear mode glance"
     grep -q "set-hook -g session-window-changed" "$log_file" \
         || fail "codex (glance-clear) badge-set must arm the focus hook"
     grep -q -- "@code_notify_orig_name" "$tn_log" \
         || fail "codex notification should carry the click-to-clear command"
-    pass "notifier end-to-end: codex keeps glance-clearing via TOOL_NAME"
+    pass "notifier end-to-end: codex without a prompt hook keeps glance-clearing"
+
+    # A user's own unrelated UserPromptSubmit hook must not switch Codex to
+    # engage mode: it won't clear our badge, so glance-clearing has to stay on
+    # or the badge would be stuck. Only the managed Code-Notify command counts.
+    mkdir -p "$HOME/.codex"
+    cat > "$HOME/.codex/hooks.json" <<'EOF'
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "/usr/local/bin/my-own-hook.sh"}]}
+    ]
+  }
+}
+EOF
+    rm -f "$state_dir"/* "$HOME/.claude/notifications/state"/* 2>/dev/null || true
+    : > "$log_file"
+    : > "$tn_log"
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        CODE_NOTIFY_SKIP_CODEX_DESKTOP_CHECK=1 CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" stop codex testproj > /dev/null 2>&1 \
+        || fail "notifier.sh stop codex (unrelated prompt hook) should exit cleanly"
+    [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "glance" ]] \
+        || fail "an unrelated UserPromptSubmit hook must not switch codex to engage mode"
+    grep -q "set-hook -g session-window-changed" "$log_file" \
+        || fail "codex with only an unrelated prompt hook must still arm the focus hook"
+    pass "notifier end-to-end: unrelated prompt hook keeps codex glance-clearing"
+
+    # With the UserPromptSubmit hook registered in Codex's hooks.json (what
+    # `cn on codex` now installs), Codex is an engage-clear agent like Claude:
+    # engage-mode badge, no focus hook, no click-to-clear — the badge clears on
+    # the next prompt instead.
+    cat > "$HOME/.codex/hooks.json" <<'EOF'
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "notify.sh UserPromptSubmit codex"}]}
+    ]
+  }
+}
+EOF
+    rm -f "$state_dir"/* "$HOME/.claude/notifications/state"/* 2>/dev/null || true
+    : > "$log_file"
+    : > "$tn_log"
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        CODE_NOTIFY_SKIP_CODEX_DESKTOP_CHECK=1 CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" stop codex testproj > /dev/null 2>&1 \
+        || fail "notifier.sh stop codex (prompt hook installed) should exit cleanly"
+    [[ "$(window_name)" == "🎯 zsh" ]] \
+        || fail "codex stop should still badge the window with the prompt hook installed (got: $(window_name))"
+    [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "engage" ]] \
+        || fail "codex badge with the prompt hook should record clear mode engage"
+    grep -q "set-hook -g session-window-changed" "$log_file" \
+        && fail "codex (engage-clear) badge-set must not arm the focus hook"
+    grep -q -- "@code_notify_orig_name" "$tn_log" \
+        && fail "codex (engage-clear) notification must not carry a click-to-clear command"
+    pass "notifier end-to-end: codex with the prompt hook engage-clears"
+
+    # And the Codex UserPromptSubmit event itself clears the badge.
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" UserPromptSubmit codex testproj > /dev/null 2>&1 \
+        || fail "notifier.sh UserPromptSubmit codex should exit cleanly"
+    [[ "$(window_name)" == "zsh" ]] \
+        || fail "codex UserPromptSubmit should clear the badge (got: $(window_name))"
+    [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] \
+        || fail "codex UserPromptSubmit should drop the badge state"
+    rm -f "$HOME/.codex/hooks.json"
+    pass "notifier end-to-end: codex UserPromptSubmit clears the badge"
 fi
 
 echo "All tmux badge tests passed"

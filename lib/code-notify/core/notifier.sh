@@ -13,8 +13,21 @@ RAW_ARG1="${1:-}"
 RAW_ARG2="${2:-}"
 RAW_ARG3="${3:-}"
 
-# Source shared utilities
 NOTIFIER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# UserPromptSubmit (any agent whose installer registered the hook — Claude,
+# Codex): the user just handed this window more work, so clear its badge — the
+# accurate "no longer waiting" signal, unlike a mere glance. No notification
+# fires for this event. Handled before the utility sourcing below because the
+# agent runs this hook synchronously on every prompt submission, so the path
+# must stay cheap: it only needs tmux.sh.
+if [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "UserPromptSubmit" ]]; then
+    source "$NOTIFIER_DIR/../utils/tmux.sh"
+    tmux_badge_clear_current 2>/dev/null || true
+    exit 0
+fi
+
+# Source shared utilities
 source "$NOTIFIER_DIR/../utils/detect.sh"
 source "$NOTIFIER_DIR/../utils/voice.sh"
 source "$NOTIFIER_DIR/../utils/sound.sh"
@@ -566,25 +579,45 @@ if [[ "$HOOK_TYPE" == "agy_debounce_stop" ]]; then
     exit 0
 fi
 
-# Whether this agent clears window badges on glance (the sweep + focus hook)
-# rather than on prompt-submit. Only Claude has a "user gave this window work"
-# signal (UserPromptSubmit, below), so it alone suppresses glance-clearing;
-# every other agent keeps it, which also guarantees a clear path for anything
-# without a prompt hook. Keyed off TOOL_NAME, not RAW_ARG1: Codex reaches here
-# two ways — `notifier.sh codex <json>` and the hooks.json `notifier.sh stop
-# codex` — and only TOOL_NAME is "codex" in both (RAW_ARG1 is "stop" in the
-# latter). TOOL_NAME is resolved above for every agent (codex/antigravity/claude).
-badge_glance_clear_enabled() {
-    [[ "$TOOL_NAME" != "claude" ]]
+# How this agent's badges clear (stored per badge — see tmux_badge_set):
+#   - "engage": a UserPromptSubmit hook (intercepted near the top of this file)
+#     clears the badge when the user actually hands the window work, so
+#     glance-clearing (sweep + focus hook + macOS click-to-clear) is suppressed
+#     and the badge survives mere peeks at the output.
+#   - "glance": no prompt-submit signal is wired, so visiting the window must
+#     clear the badge or nothing will.
+# Claude's installer always registers the UserPromptSubmit hook alongside its
+# others. Codex supports UserPromptSubmit too (hooks.json), but only installs
+# that have re-run `cn on codex` since it was added carry it — so engage-clear
+# is gated on the hook actually being present in hooks.json, never leaving a
+# badge without a clear path (legacy `notify =` users and stale hooks.json
+# files keep glance-clearing). Keyed off TOOL_NAME, which is resolved above
+# for every entry path (codex/antigravity/claude/gemini).
+# Matches the managed Code-Notify command (notifier.sh/notify.sh/notify.ps1
+# invoked with "UserPromptSubmit codex"), not just the event name: a user's own
+# unrelated UserPromptSubmit hook won't clear our badge, so it must not switch
+# Codex to engage mode — that would leave badges with no clear path.
+codex_prompt_clear_hook_installed() {
+    local hooks_file="${CODE_NOTIFY_CODEX_HOOKS_FILE:-${CODEX_HOME:-$HOME/.codex}/hooks.json}"
+    [[ -f "$hooks_file" ]] || return 1
+    grep -Eq '(notifier\.sh|notify\.(sh|ps1))[^"]* UserPromptSubmit codex' "$hooks_file" 2>/dev/null
 }
 
-# UserPromptSubmit (Claude only): the user just handed this window more work, so
-# clear its badge — the accurate "no longer waiting" signal, unlike a mere
-# glance. No notification fires for this event; just clear and exit.
-if [[ "$HOOK_TYPE" == "UserPromptSubmit" ]]; then
-    tmux_badge_clear_current 2>/dev/null || true
-    exit 0
-fi
+BADGE_CLEAR_MODE="glance"
+case "$TOOL_NAME" in
+    "claude")
+        BADGE_CLEAR_MODE="engage"
+        ;;
+    "codex")
+        if codex_prompt_clear_hook_installed; then
+            BADGE_CLEAR_MODE="engage"
+        fi
+        ;;
+esac
+
+badge_glance_clear_enabled() {
+    [[ "$BADGE_CLEAR_MODE" == "glance" ]]
+}
 
 # Get display name for tool
 get_tool_display_name() {
@@ -1255,8 +1288,9 @@ send_macos_notification() {
     # For glance-clear agents, clicking also clears the window-name badge.
     # Appended to focus_cmd so every click path (alerter, -execute) restores the
     # name; the clear command re-checks the saved state at click time, so it is a
-    # no-op when no badge is set. Claude clears on prompt-submit instead, so a
-    # click there jumps to the window without clearing — clicking is a glance.
+    # no-op when no badge is set. Engage-clear agents (Claude, hooks-based Codex)
+    # clear on prompt-submit instead, so a click there jumps to the window
+    # without clearing — clicking is a glance.
     badge_clear_cmd=""
     if badge_glance_clear_enabled; then
         badge_clear_cmd=$(tmux_badge_build_clear_command 2>/dev/null) || badge_clear_cmd=""
@@ -1438,21 +1472,22 @@ get_notification_sound_file() {
 }
 
 # Badge the originating tmux window's name with the event icon so the alert
-# stays visible in the status line. Clearing differs by agent:
-#   - Glance-clear agents (codex/agy): sweep first so badges on windows the user
-#     has since visited are restored before a new one lands, and let badge-set
-#     arm the focus hook that clears on the next visit. On macOS clicking the
-#     notification also clears; elsewhere only these paths do (notify-send has
-#     no click hook).
-#   - Claude: clears on UserPromptSubmit instead, so no sweep and no focus hook —
-#     a badge persists until the user actually engages the window with new work.
+# stays visible in the status line. Clearing differs by agent (BADGE_CLEAR_MODE,
+# recorded on the badge itself so the agent-blind sweep honours it):
+#   - Glance-clear agents (agy, legacy codex, gemini): sweep first so badges on
+#     windows the user has since visited are restored before a new one lands,
+#     and let badge-set arm the focus hook that clears on the next visit. On
+#     macOS clicking the notification also clears; elsewhere only these paths
+#     do (notify-send has no click hook).
+#   - Engage-clear agents (claude, hooks-based codex): clear on UserPromptSubmit
+#     instead, so no sweep and no focus hook — the badge persists until the user
+#     actually engages the window with new work, and the sweep skips it even
+#     when another agent's activity triggers one.
 if badge_glance_clear_enabled; then
     tmux_badge_sweep 2>/dev/null || true
-else
-    export CODE_NOTIFY_TMUX_FOCUS_HOOK=false
 fi
 if [[ -n "$BADGE_ICON" ]]; then
-    tmux_badge_set "$BADGE_ICON" 2>/dev/null || true
+    tmux_badge_set "$BADGE_ICON" "$BADGE_CLEAR_MODE" 2>/dev/null || true
 fi
 
 # Send notification based on OS

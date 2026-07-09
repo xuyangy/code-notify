@@ -491,6 +491,26 @@ EOF
     [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] \
         || fail "UserPromptSubmit should drop the badge state"
     pass "notifier end-to-end: UserPromptSubmit clears the badge"
+
+    # Codex reaches the notifier via its hooks.json as `notifier.sh stop codex`,
+    # so RAW_ARG1 is "stop" and only TOOL_NAME is "codex". It must still
+    # glance-clear (no prompt-submit signal): badge set, focus hook armed, and
+    # the click-to-clear command attached. Guards the RAW_ARG1-vs-TOOL_NAME bug.
+    rm -f "$state_dir"/* "$HOME/.claude/notifications/state"/* 2>/dev/null || true
+    : > "$log_file"
+    : > "$tn_log"
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        CODE_NOTIFY_SKIP_CODEX_DESKTOP_CHECK=1 CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" stop codex testproj > /dev/null 2>&1 \
+        || fail "notifier.sh stop codex should exit cleanly"
+    [[ "$(window_name)" == "🎯 zsh" ]] \
+        || fail "codex stop (hooks.json path) should badge the window (got: $(window_name))"
+    grep -q "set-hook -g session-window-changed" "$log_file" \
+        || fail "codex (glance-clear) badge-set must arm the focus hook"
+    grep -q -- "@code_notify_orig_name" "$tn_log" \
+        || fail "codex notification should carry the click-to-clear command"
+    pass "notifier end-to-end: codex keeps glance-clearing via TOOL_NAME"
 fi
 
 echo "All tmux badge tests passed"

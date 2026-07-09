@@ -567,11 +567,15 @@ if [[ "$HOOK_TYPE" == "agy_debounce_stop" ]]; then
 fi
 
 # Whether this agent clears window badges on glance (the sweep + focus hook)
-# rather than on prompt-submit. codex and agy have no "user gave this window
-# work" signal, so they keep glance-clearing. Claude clears on UserPromptSubmit
-# instead (below), so glance-clearing is suppressed for it.
+# rather than on prompt-submit. Only Claude has a "user gave this window work"
+# signal (UserPromptSubmit, below), so it alone suppresses glance-clearing;
+# every other agent keeps it, which also guarantees a clear path for anything
+# without a prompt hook. Keyed off TOOL_NAME, not RAW_ARG1: Codex reaches here
+# two ways — `notifier.sh codex <json>` and the hooks.json `notifier.sh stop
+# codex` — and only TOOL_NAME is "codex" in both (RAW_ARG1 is "stop" in the
+# latter). TOOL_NAME is resolved above for every agent (codex/antigravity/claude).
 badge_glance_clear_enabled() {
-    [[ "$RAW_ARG1" == "codex" ]] || [[ "$RAW_ARG1" == agy:* ]]
+    [[ "$TOOL_NAME" != "claude" ]]
 }
 
 # UserPromptSubmit (Claude only): the user just handed this window more work, so

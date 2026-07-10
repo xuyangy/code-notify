@@ -288,6 +288,7 @@ tmux_badge_set() {
     local icon="$1"
     local clear_mode="${2:-glance}"
     local target="${3:-}"
+    local stale_action="${4:-keep}"
     [[ -n "$icon" ]] || return 1
     tmux_badge_enabled || return 1
     if [[ -z "$target" ]]; then
@@ -307,9 +308,30 @@ tmux_badge_set() {
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 1
     # Running markers land even on the visible window (the user just submitted
-    # a prompt there); event badges skip it — they'd be noise where the user
-    # is already looking.
-    [[ "$visible" == "1" ]] && [[ "$clear_mode" != "running" ]] && return 0
+    # a prompt there); event badges skip creating a *new* one — it would be
+    # noise where the user is already looking. What happens to a badge already
+    # on the window depends on stale_action ($4):
+    #   - "keep" (default): leave it alone. Waiting-type events (idle prompt,
+    #     permission, mid-run subagent/task events) describe a state the badge
+    #     still advertises, so an engage badge must survive them — otherwise an
+    #     idle reminder firing while the user reads the output would wipe the
+    #     "done" badge before they ever engaged.
+    #   - "clear": the new event ended the turn (stop/error), so a leftover
+    #     "waiting" badge is stale — the user watched the turn finish. Without
+    #     this, an approval answered inline on the focused window (no new
+    #     prompt, so no engage-clear) leaves its badge until an unrelated
+    #     future prompt resets it. A running badge is exempt even here as a
+    #     guard: the terminating event retires it via tmux_running_stop.
+    if [[ "$visible" == "1" ]] && [[ "$clear_mode" != "running" ]]; then
+        if [[ "$stale_action" == "clear" ]]; then
+            local existing_mode
+            existing_mode=$(tmux show-options -wqv -t "$window_id" @code_notify_clear_mode 2>/dev/null)
+            if [[ "$existing_mode" != "running" ]]; then
+                tmux_badge_clear "$window_id"
+            fi
+        fi
+        return 0
+    fi
 
     tmux_badge_apply "$window_id" "$autorename" "$name" "$icon" "$clear_mode"
 }

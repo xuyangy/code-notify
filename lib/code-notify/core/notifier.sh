@@ -498,7 +498,11 @@ agy_with_running_lock() {
     while ! mkdir "$lockdir" 2>/dev/null; do
         if (( attempts >= 500 )); then
             owner=""
-            [[ -r "$lockdir/pid" ]] && read -r owner < "$lockdir/pid" 2>/dev/null || true
+            if [[ -r "$lockdir/pid" ]]; then
+                # read exits nonzero on the newline-less pid file even though
+                # it populates owner, so its status is deliberately ignored.
+                read -r owner < "$lockdir/pid" 2>/dev/null || true
+            fi
             if [[ "$owner" =~ ^[0-9]+$ ]]; then
                 if ! kill -0 "$owner" 2>/dev/null; then
                     rm -f "$lockdir/pid" 2>/dev/null || true
@@ -549,6 +553,13 @@ prune_agy_debounce_tokens() {
     find "$state_dir" -maxdepth 1 -type f \
         \( -name '*.token' -o -name '*.completed' -o -name '*.running' \) \
         -mtime "+${retention_days}" -delete 2>/dev/null || true
+    # A .running.lock directory this old is a hook killed mid-transition:
+    # legitimate holds last milliseconds, and both mkdir and the pid write
+    # refresh the dir mtime, so an old dir cannot be live. rm -rf (not
+    # -delete) because the leftover pid file makes the dir non-empty, and
+    # deleting it first would freshen the dir mtime out of the stale set.
+    find "$state_dir" -maxdepth 1 -type d -name '*.running.lock' \
+        -mtime "+${retention_days}" -exec rm -rf {} + 2>/dev/null || true
 }
 
 # Throttle wrapper around the prune. The stale-file set only changes on a day

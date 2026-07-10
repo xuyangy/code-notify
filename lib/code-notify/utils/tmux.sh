@@ -862,6 +862,31 @@ tmux_running_apply_static_badges() {
     return 0
 }
 
+# The inverse, for `cn spinner on` while agents are mid-run: their windows
+# carry the static running rename, and the snippet renders from the very same
+# epoch — leaving the rename in place would show both indicators at once.
+# Drop the rename (the epoch stays: it is what the spinner keys on) and arm
+# the snippet when any fresh marker exists, so the animation takes over
+# immediately instead of waiting for the next hook event.
+tmux_running_convert_static_badges_to_spinner() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local now window_id since mode live=0
+    now=$(date +%s)
+    while IFS='|' read -r window_id since mode; do
+        [[ "$since" =~ ^[0-9]+$ ]] || continue
+        [[ $((now - since)) -lt "$TMUX_RUNNING_TTL" ]] || continue
+        live=1
+        if [[ "$mode" == "running" ]]; then
+            tmux_badge_clear "$window_id"
+        fi
+    done < <(tmux list-windows -a -F \
+        '#{window_id}|#{@code_notify_running}|#{@code_notify_clear_mode}' 2>/dev/null)
+    if [[ "$live" -eq 1 ]]; then
+        tmux_spinner_arm
+    fi
+    return 0
+}
+
 # Build the command a notifier click handler runs to clear the badge on the
 # originating window. Same execution context as tmux_focus_build_command
 # (/bin/sh -c, minimal PATH, no attached client), so it embeds the absolute

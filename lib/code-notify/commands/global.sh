@@ -1212,6 +1212,13 @@ handle_spinner_command() {
         "on")
             mkdir -p "$(dirname "$flag_file")"
             touch "$flag_file"
+            # Convert agents already mid-run: their static window-name icon
+            # renders from the same epoch the snippet is about to take over,
+            # so leaving it would show both indicators side by side.
+            if [[ -n "${TMUX:-}" ]]; then
+                source "$LIB_DIR/utils/tmux.sh"
+                tmux_running_convert_static_badges_to_spinner 2>/dev/null || true
+            fi
             success "tmux running spinner enabled"
             echo "  While an agent works, its window shows an animated 🌑🌒🌓🌔🌕🌖🌗🌘 in the tmux status line."
             echo "  The 1s status refresh is only active while an agent is running."

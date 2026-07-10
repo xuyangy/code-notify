@@ -815,6 +815,35 @@ grep -q "rename-window" "$log_file" && fail "a stale running epoch must not get 
 rm -f "$state_dir/@2.@code_notify_running"
 pass "static fallback skips stale epochs"
 
+# --- spinner on mid-run: static running badges convert to the snippet ---
+# `cn spinner on` while an agent works: the static 🌕 rename and the newly
+# armed snippet render from the same epoch, so the rename must come off or
+# the window shows both indicators at once.
+tmux_running_start || fail "running-start for the spinner-on test should succeed"
+[[ "$(window_name)" == "🌕 zsh" ]] || fail "precondition: window should carry the static running icon"
+tmux_running_convert_static_badges_to_spinner || fail "convert-to-spinner should succeed"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "spinner on must drop the static running rename (got: $(window_name))"
+[[ "$(cat "$state_dir/@2.@code_notify_running")" =~ ^[0-9]+$ ]] \
+    || fail "the running epoch must survive the conversion — the spinner keys on it"
+[[ -f "$state_dir/.@code_notify_spinner_snip" ]] \
+    || fail "conversion should arm the spinner when a fresh marker exists"
+tmux_spinner_disarm || fail "cleanup disarm should succeed"
+tmux_running_stop || fail "cleanup running-stop after conversion should succeed"
+pass "spinner on converts static running badges to the snippet"
+
+# --- the conversion leaves event badges and idle windows alone ---
+printf '%s' "1000" > "$state_dir/@2.@code_notify_running"   # stale epoch only
+tmux_badge_set "👋" engage || fail "event badge for the conversion test should succeed"
+tmux_running_convert_static_badges_to_spinner || fail "convert on stale/idle should succeed"
+[[ "$(window_name)" == "👋 zsh" ]] \
+    || fail "conversion must not touch an event badge (got: $(window_name))"
+[[ ! -f "$state_dir/.@code_notify_spinner_snip" ]] \
+    || fail "conversion must not arm the spinner when no fresh marker exists"
+tmux_badge_clear "@2"
+rm -f "$state_dir/@2.@code_notify_running"
+pass "conversion skips event badges and stale epochs"
+
 # --- prompt-submit fast path: engage badge swaps to the running icon ---
 # The synchronous prompt path must not clear-restore-then-rebadge (two
 # renames) or run a server-wide sweep: one capture, one rename, timer armed.

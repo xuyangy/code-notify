@@ -581,6 +581,7 @@ show_status() {
             echo "  ${CHECK_MARK} Codex: ${GREEN}ENABLED${RESET}"
             echo "     Config: $CODEX_HOOKS_FILE"
             echo "     Events: completion via Stop; running indicator resumes after approval/input"
+            echo "     Idle reminder: tmux-only post-completion watch when idle_prompt is enabled"
             echo "     Codex TUI notifications: disabled to avoid duplicate toasts"
             if is_notify_type_enabled "permission_prompt"; then
                 echo "     Approval alerts: ENABLED via PermissionRequest hook"
@@ -1458,7 +1459,7 @@ show_alerts_status() {
 
     echo "  Claude Notification subtypes:"
     if is_notify_type_enabled "idle_prompt"; then
-        echo "    ${CHECK_MARK} ${GREEN}idle_prompt${RESET} - AI is waiting for your input (60+ sec idle)"
+        echo "    ${CHECK_MARK} ${GREEN}idle_prompt${RESET} - Claude/Gemini idle prompt; tmux-only idle reminder for Codex/Antigravity"
     else
         echo "    ${MUTE} ${DIM}idle_prompt${RESET}"
     fi
@@ -1530,7 +1531,7 @@ show_alerts_status() {
     echo ""
     dim "Alert-type matching applies to Claude Code, Codex PermissionRequest, Gemini CLI, and Antigravity PreToolUse hooks."
     dim "Claude agent/team events are separate hooks and are opt-in."
-    dim "For Codex, permission_prompt controls approval/edit PermissionRequest hooks; idle_prompt does not apply."
+    dim "For Codex, permission_prompt controls approval/edit PermissionRequest hooks; idle_prompt only gates the tmux-derived post-completion reminder."
     dim "For Antigravity, permission_prompt controls the run_command approval banner (PreToolUse); it takes effect immediately, no reinstall."
     echo ""
     dim "After changing, run 'cn on' to apply the new settings (Antigravity alert changes apply immediately)."
@@ -1539,7 +1540,7 @@ show_alerts_status() {
 # Show available alert types
 show_available_alert_types() {
     echo "Available notification types:"
-    echo "  ${CYAN}idle_prompt${RESET}        - AI is waiting for your input (recommended)"
+    echo "  ${CYAN}idle_prompt${RESET}        - Claude/Gemini idle prompt; tmux-only Codex/Antigravity idle reminder"
     echo "  ${CYAN}permission_prompt${RESET}  - AI needs tool permission (can be noisy)"
     echo "  ${CYAN}auth_success${RESET}       - Authentication success"
     echo "  ${CYAN}elicitation_dialog${RESET} - MCP tool input needed"

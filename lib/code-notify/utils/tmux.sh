@@ -505,8 +505,8 @@ TMUX_SETTLE_SECONDS="${CODE_NOTIFY_TMUX_SETTLE_SECONDS:-15}"
 # still for TMUX_IDLE_SECONDS after the completion — the user never came
 # back — one synthetic idle_prompt notification fires through the notifier.
 # This is a tmux-derived approximation of the reminder, not native idle
-# support: any repaint disarms the watch, so its failure mode is a missed
-# nudge, never a false one, and outside tmux nothing is watched at all. The
+# support: final UI repaints are absorbed until the pane settles, then any
+# later repaint disarms the watch. Outside tmux nothing is watched at all. The
 # watch rides the agent-exit sweep, so
 # CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS=0 disables it as well.
 TMUX_IDLE_AGENTS="${CODE_NOTIFY_TMUX_IDLE_AGENTS:-codex|antigravity}"
@@ -622,10 +622,13 @@ tmux_idle_prompt_enabled() {
 # Arm the post-completion idle watch (see TMUX_IDLE_AGENTS) on a window whose
 # turn just ended. Records everything the eventual synthetic notification
 # needs — none of which the sweep process can reconstruct on its own: the
-# pane to observe, the arm epoch, the content snapshot, and the agent/project
+# pane to observe, the settle epoch, the content snapshot, and the agent/project
 # identity. cksum emits two whitespace-separated fields (sum and size), so
-# the packed layout is "pane epoch sum size agent project", project last so
-# embedded whitespace survives the positional parse. An uncapturable pane
+# the packed layout is "pane epoch sum size state agent project", project last
+# so embedded whitespace survives the positional parse. The initial settling
+# state absorbs the final repaint that Codex performs after its Stop hook exits;
+# once two snapshots match, the watch becomes stable and later repaints cancel
+# it. An uncapturable pane
 # simply never arms — with the turn over there is no recovery path worth
 # keeping open.
 tmux_idle_watch_arm() {
@@ -640,7 +643,7 @@ tmux_idle_watch_arm() {
     fp=$(tmux_resume_poll_fingerprint "$pane_id") || return 0
     [[ -n "$fp" ]] || return 0
     tmux set-option -w -t "$window_id" @code_notify_idle_watch \
-        "$pane_id $(date +%s) $fp $agent $project" 2>/dev/null
+        "$pane_id $(date +%s) $fp settling $agent $project" 2>/dev/null
     # Rides the agent-exit sweep; make sure it is ticking even though the
     # stop that led here just retired the turn's PID tracking.
     tmux_agent_exit_schedule_sweep
@@ -725,7 +728,7 @@ tmux_agent_exit_sweep() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
     local now window_id pid since settle_pane idle_watch live=0
     local fp_now fp_prev settle_since settle_ctx mode
-    local ipane isince ifp1 ifp2 iagent iproject
+    local ipane isince ifp1 ifp2 istate iagent iproject
     now=$(date +%s)
     while IFS='|' read -r window_id pid since settle_pane idle_watch; do
         [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
@@ -753,22 +756,35 @@ tmux_agent_exit_sweep() {
             fi
         fi
         # Post-completion idle watch (see TMUX_IDLE_AGENTS): the turn is
-        # over, so a pane still bearing the exact content it ended on means
-        # the user has not engaged the finished window — nudge once. Any
-        # other observation disarms silently (content changed, pane vanished
-        # or moved windows, capture failed, the feature got disabled
-        # mid-watch): with the turn over there is no later hook to hand off
-        # to, and a changed pane means the user is already there. This keeps
-        # the watch's lifetime hard-bounded at roughly TMUX_IDLE_SECONDS
-        # plus one tick.
+        # over, but Codex repaints once more after its Stop hook exits. Follow
+        # those final frames until two snapshots match, then start the idle
+        # countdown. Once stable, a repaint means the user is already there
+        # and disarms silently. A vanished/moved pane, capture failure, or a
+        # feature disabled mid-watch also disarms.
         if [[ -n "$idle_watch" ]]; then
-            read -r ipane isince ifp1 ifp2 iagent iproject <<< "$idle_watch"
+            read -r ipane isince ifp1 ifp2 istate iagent iproject <<< "$idle_watch"
+            # Watches armed by an older process have no state field. Treat
+            # them as stable so an upgrade cannot reinterpret their agent as
+            # state or silently lose the pending reminder.
+            if [[ "$istate" != "settling" ]] && [[ "$istate" != "stable" ]]; then
+                iproject="$iagent${iproject:+ $iproject}"
+                iagent="$istate"
+                istate="stable"
+            fi
             if [[ "$ipane" =~ ^%[0-9]+$ ]] && [[ "$isince" =~ ^[0-9]+$ ]] &&
                 [[ "${TMUX_IDLE_SECONDS:-0}" =~ ^[0-9]+$ ]] && (( TMUX_IDLE_SECONDS > 0 )) &&
                 [[ "$(tmux display-message -p -t "$ipane" '#{window_id}' 2>/dev/null)" == "$window_id" ]] &&
-                fp_now=$(tmux_resume_poll_fingerprint "$ipane") &&
-                [[ "$fp_now" == "$ifp1 $ifp2" ]]; then
-                if (( now - isince >= TMUX_IDLE_SECONDS )); then
+                fp_now=$(tmux_resume_poll_fingerprint "$ipane"); then
+                if [[ "$istate" == "settling" ]]; then
+                    if [[ "$fp_now" == "$ifp1 $ifp2" ]]; then
+                        istate="stable"
+                    fi
+                    tmux set-option -w -t "$window_id" @code_notify_idle_watch \
+                        "$ipane $now $fp_now $istate $iagent $iproject" 2>/dev/null
+                    live=1
+                elif [[ "$fp_now" != "$ifp1 $ifp2" ]]; then
+                    tmux_idle_watch_disarm "$window_id"
+                elif (( now - isince >= TMUX_IDLE_SECONDS )); then
                     tmux_idle_watch_disarm "$window_id"
                     tmux_idle_watch_notify "$ipane" "$iagent" "$iproject"
                 else

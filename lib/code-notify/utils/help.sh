@@ -71,8 +71,9 @@ ${BOLD}ALERT TYPES:${RESET}
     Notification types: ${CYAN}idle_prompt${RESET} (default), ${CYAN}permission_prompt${RESET}, ${CYAN}auth_success${RESET}, ${CYAN}elicitation_dialog${RESET}, ${CYAN}ask_user${RESET}
     Claude events: ${CYAN}SubagentStart${RESET}, ${CYAN}SubagentStop${RESET}, ${CYAN}TeammateIdle${RESET}, ${CYAN}TaskCreated${RESET}, ${CYAN}TaskCompleted${RESET}
     Note: alert-type matching applies to Claude Code, Codex PermissionRequest,
-          Gemini CLI, and Antigravity PreToolUse hooks. Codex TUI notifications
-          are disabled while Code-Notify owns Codex delivery.
+          Gemini CLI, and Antigravity PreToolUse hooks. Codex has no native
+          idle_prompt hook; with idle_prompt enabled, tmux can still deliver a
+          post-completion idle reminder for Codex and Antigravity.
 
 ${BOLD}VOICE COMMANDS:${RESET}
     ${GREEN}voice on${RESET}            Enable voice for all tools

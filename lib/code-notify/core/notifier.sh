@@ -1359,8 +1359,8 @@ case "$HOOK_TYPE" in
         SOUND="Ping"
         ;;
     "TaskCreated")
-        TITLE="$TOOL_DISPLAY 🆕"
-        BADGE_ICON="🆕"
+        TITLE="$TOOL_DISPLAY 📙"
+        BADGE_ICON="📙"
         SUBTITLE="Task Created"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY agent-team task was created" \

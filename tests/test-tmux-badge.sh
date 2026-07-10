@@ -993,7 +993,7 @@ tmux_idle_watch_arm_current codex projX \
     || fail "an uncapturable pane must not arm the idle watch"
 pass "idle watch arms for hook-less agents only, gated on alert type and capture"
 
-# --- idle watch: sweep lifecycle (young / fired / changed / vanished) ---
+# --- idle watch: sweep lifecycle (settling / young / fired / changed / vanished) ---
 # The stub notifier logs its identity-bearing invocation; delivery is
 # detached, so assertions on the log wait briefly.
 idle_notify_log="$test_dir/idle-notify.log"
@@ -1014,9 +1014,26 @@ wait_for_idle_log() {
 }
 printf '%s' "turn finished, waiting" > "$state_dir/%3.pane_content"
 tmux_idle_watch_arm_current codex projX || fail "idle arm for the sweep tests should succeed"
+# Codex repaints after Stop returns. The first changed snapshot must become the
+# new settling baseline instead of cancelling the reminder.
+printf '%s' "codex final frame" > "$state_dir/%3.pane_content"
 rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
 : > "$log_file"
 : > "$idle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_agent_exit_sweep \
+    || fail "first settling sweep should succeed"
+iw="$(cat "$state_dir/@2.@code_notify_idle_watch" 2>/dev/null)"
+[[ "$iw" == *" settling codex projX" ]] \
+    || fail "Codex's final repaint should refresh the settling baseline (got: $iw)"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_agent_exit_sweep \
+    || fail "second settling sweep should succeed"
+iw="$(cat "$state_dir/@2.@code_notify_idle_watch" 2>/dev/null)"
+[[ "$iw" == *" stable codex projX" ]] \
+    || fail "two matching snapshots should stabilize the idle watch (got: $iw)"
+pass "codex final repaint settles instead of cancelling the idle watch"
+
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+: > "$log_file"
 CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_agent_exit_sweep \
     || fail "sweep with a young idle watch should succeed"
 [[ -f "$state_dir/@2.@code_notify_idle_watch" ]] \
@@ -1029,8 +1046,8 @@ pass "young idle watch keeps the sweep ticking without notifying"
 # Stillness past the threshold fires the synthetic idle_prompt once, with the
 # watched pane in TMUX_PANE and the recorded identity in argv, then consumes
 # the watch and lets the chain die.
-idle_fp="$(printf '%s\n' "turn finished, waiting" | cksum)"
-printf '%s' "%3 1000 $idle_fp codex projX" > "$state_dir/@2.@code_notify_idle_watch"
+idle_fp="$(printf '%s\n' "codex final frame" | cksum)"
+printf '%s' "%3 1000 $idle_fp stable codex projX" > "$state_dir/@2.@code_notify_idle_watch"
 rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
 : > "$log_file"
 : > "$idle_notify_log"
@@ -1049,7 +1066,8 @@ pass "stillness past the threshold fires the synthetic idle nudge once"
 # past the threshold.
 printf '%s' "turn finished, waiting" > "$state_dir/%3.pane_content"
 tmux_idle_watch_arm_current codex projX || fail "re-arm for the change test should succeed"
-printf '%s' "%3 1000 $idle_fp codex projX" > "$state_dir/@2.@code_notify_idle_watch"
+idle_fp="$(printf '%s\n' "turn finished, waiting" | cksum)"
+printf '%s' "%3 1000 $idle_fp stable codex projX" > "$state_dir/@2.@code_notify_idle_watch"
 printf '%s' "user typed something" > "$state_dir/%3.pane_content"
 rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
 : > "$log_file"
@@ -1069,7 +1087,7 @@ pass "content change disarms the idle watch without notifying"
 # stable pane.
 printf '%s' "turn finished, waiting" > "$state_dir/%3.pane_content"
 tmux_idle_watch_arm_current codex projX || fail "re-arm for the vanish test should succeed"
-printf '%s' "%3 1000 $idle_fp codex projX" > "$state_dir/@2.@code_notify_idle_watch"
+printf '%s' "%3 1000 $idle_fp stable codex projX" > "$state_dir/@2.@code_notify_idle_watch"
 rm -f "$state_dir/%3.pane_content"   # the watched split was closed
 rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
 : > "$idle_notify_log"
@@ -1712,7 +1730,7 @@ EOF
     # would (fresh process, script dispatch); the synthetic notification
     # must come back through the real notifier.
     idle_fp="$(printf '%s\n' "codex done, waiting" | cksum)"
-    printf '%s' "%3 1000 $idle_fp codex testproj" > "$state_dir/@2.@code_notify_idle_watch"
+    printf '%s' "%3 1000 $idle_fp stable codex testproj" > "$state_dir/@2.@code_notify_idle_watch"
     rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
     : > "$tn_log"
     CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \

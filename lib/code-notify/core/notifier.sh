@@ -1197,12 +1197,16 @@ case "$HOOK_TYPE" in
         SOUND="Glass"
         ;;
     "notification")
-        TITLE="$TOOL_DISPLAY 👋"
-        BADGE_ICON="👋"
+        TITLE="$TOOL_DISPLAY 💬"
+        BADGE_ICON="💬"
         SUBTITLE="Input Required"
         SOUND="Ping"
         case "$NOTIFICATION_SUBTYPE" in
             "idle_prompt")
+                # Idle is a nudge, not a question: distinct icon so a glance
+                # tells "waiting on you" apart from an actual input request.
+                TITLE="$TOOL_DISPLAY 🥱"
+                BADGE_ICON="🥱"
                 MESSAGE=$(choose_random_message \
                     "$TOOL_DISPLAY is idle" \
                     "$TOOL_DISPLAY is waiting" \

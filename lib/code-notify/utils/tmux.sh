@@ -482,6 +482,17 @@ TMUX_RESUME_POLL_SECONDS="${CODE_NOTIFY_TMUX_RESUME_POLL_SECONDS:-2}"
 # overnight should not tick a timer every 2 seconds forever; past this age the
 # chain stops and the lifecycle hooks remain the resume path.
 TMUX_RESUME_POLL_TTL="${CODE_NOTIFY_TMUX_RESUME_POLL_TTL:-900}"
+# Agents whose running marker additionally gets a settle watch
+# (pipe-separated names as passed by the hooks). Codex finishes /review
+# without emitting any turn-end hook, so its marker would otherwise stand
+# until the 4-hour TTL; while a watched agent's marker is up, the agent-exit
+# sweep compares the pane's rendered content across ticks and takes the
+# marker down once it has held still for TMUX_SETTLE_SECONDS. Safe for
+# agents whose working TUI repaints at least once per settle window (Codex
+# ticks an elapsed-time counter every second); an agent that can look
+# static while working must not be listed.
+TMUX_SETTLE_AGENTS="${CODE_NOTIFY_TMUX_SETTLE_AGENTS:-codex}"
+TMUX_SETTLE_SECONDS="${CODE_NOTIFY_TMUX_SETTLE_SECONDS:-15}"
 
 tmux_running_enabled() {
     [[ "${CODE_NOTIFY_TMUX_RUNNING:-}" != "false" ]] && tmux_badge_enabled
@@ -540,6 +551,33 @@ tmux_agent_exit_track() {
     tmux_agent_exit_schedule_sweep
 }
 
+# Arm the settle watch on a window whose agent (per TMUX_SETTLE_AGENTS) may
+# end a turn without any hook. Stores the pane to observe; the snapshot
+# bookkeeping (@code_notify_settle_fp/_since) is reset so a fresh turn never
+# inherits the previous turn's settle countdown.
+tmux_running_settle_arm() {
+    local window_id="$1" pane_id="$2"
+    local agent="${CODE_NOTIFY_TMUX_AGENT_NAME:-}"
+    [[ -n "$agent" ]] || return 0
+    [[ "|$TMUX_SETTLE_AGENTS|" == *"|$agent|"* ]] || return 0
+    local pane_re='^%[0-9]+$'
+    [[ "$pane_id" =~ $pane_re ]] || return 0
+    tmux set-option -w -t "$window_id" @code_notify_settle_pane "$pane_id" 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_settle_fp 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_settle_since 2>/dev/null
+    # The settle check rides the agent-exit sweep; make sure it is ticking
+    # even when PID resolution failed and nothing else armed it.
+    tmux_agent_exit_schedule_sweep
+    return 0
+}
+
+tmux_running_settle_disarm() {
+    local window_id="$1"
+    tmux set-option -wu -t "$window_id" @code_notify_settle_pane 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_settle_fp 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_settle_since 2>/dev/null
+}
+
 # One short tmux-server timer checks tracked agent PIDs. Repeating one-shots
 # avoid a resident daemon and stop automatically when the last marker clears.
 tmux_agent_exit_schedule_sweep() {
@@ -558,10 +596,14 @@ tmux_agent_exit_schedule_sweep() {
     q_env=$(tmux_focus_shell_quote "$TMUX")
     # Pass the interval through like the TTL sweep passes the TTL: the timer's
     # fresh process would otherwise fall back to the default, so a custom
-    # interval would only survive the first firing.
+    # interval would only survive the first firing. The settle threshold rides
+    # along for the same reason.
     q_poll=$(tmux_focus_shell_quote "$TMUX_AGENT_EXIT_POLL_SECONDS")
+    local q_settle
+    q_settle=$(tmux_focus_shell_quote "$TMUX_SETTLE_SECONDS")
     inner="$q_tmux -S $q_socket set-option -gu @code_notify_agent_exit_sweep_scheduled; "
     inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS=$q_poll "
+    inner+="CODE_NOTIFY_TMUX_SETTLE_SECONDS=$q_settle "
     inner+="bash $q_lib agent-exit-sweep; fi"
     inner="${inner//\#/##}"
     tmux run-shell -b -d "$TMUX_AGENT_EXIT_POLL_SECONDS" "$inner" 2>/dev/null || return 0
@@ -570,28 +612,72 @@ tmux_agent_exit_schedule_sweep() {
 
 tmux_agent_exit_sweep() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
-    local window_id pid live=0
-    while IFS='|' read -r window_id pid; do
+    local now window_id pid since settle_pane live=0
+    local fp_now fp_prev settle_since mode
+    now=$(date +%s)
+    while IFS='|' read -r window_id pid since settle_pane; do
         [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
-        # list-windows emits every window, with an empty field when the
-        # option is unset. Untracked windows are strictly out of scope —
-        # their badges (e.g. an agy StopFinal completion, whose disowned
-        # watcher can never resolve an agent pid) live by the normal
-        # glance/engage/TTL rules, not by this monitor.
-        [[ "$pid" =~ ^[0-9]+$ ]] || continue
-        if kill -0 "$pid" 2>/dev/null; then
-            live=1
+        # list-windows emits every window, with empty fields when the options
+        # are unset. Windows that are neither PID-tracked nor settle-watched
+        # are strictly out of scope — their badges (e.g. an agy StopFinal
+        # completion, whose disowned watcher can never resolve an agent pid)
+        # live by the normal glance/engage/TTL rules, not by this monitor.
+        if [[ "$pid" =~ ^[0-9]+$ ]]; then
+            if kill -0 "$pid" 2>/dev/null; then
+                live=1
+            else
+                # The associated agent is gone: remove both renderings, any
+                # pending input-resume/settle state, and an event badge
+                # without disturbing a manual window rename
+                # (tmux_badge_clear already preserves one).
+                tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
+                tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+                tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
+                tmux_running_settle_disarm "$window_id"
+                tmux_badge_clear "$window_id"
+                tmux_agent_exit_untrack "$window_id"
+                continue
+            fi
+        fi
+        # Settle watch (see TMUX_SETTLE_AGENTS): while a watched agent's
+        # running marker is fresh, a pane whose rendered content holds still
+        # for a full settle window means the turn ended without a hook
+        # (Codex /review) — take the marker down. Same observability guards
+        # as the resume poll: the recorded pane must still belong to this
+        # window and must actually capture; otherwise leave the marker to
+        # the PID/TTL paths.
+        [[ "$settle_pane" =~ ^%[0-9]+$ ]] || continue
+        [[ "$since" =~ ^[0-9]+$ ]] || continue
+        (( now - since < TMUX_RUNNING_TTL )) || continue
+        live=1
+        [[ "$(tmux display-message -p -t "$settle_pane" '#{window_id}' 2>/dev/null)" == "$window_id" ]] || continue
+        fp_now=$(tmux_resume_poll_fingerprint "$settle_pane") || fp_now=""
+        [[ -n "$fp_now" ]] || continue
+        fp_prev=$(tmux show-options -wqv -t "$window_id" @code_notify_settle_fp 2>/dev/null)
+        if [[ "$fp_now" != "$fp_prev" ]]; then
+            tmux set-option -w -t "$window_id" @code_notify_settle_fp "$fp_now" 2>/dev/null
+            tmux set-option -w -t "$window_id" @code_notify_settle_since "$now" 2>/dev/null
             continue
         fi
-        # The associated agent is gone: remove both renderings, any pending
-        # input-resume state, and an event badge without disturbing a manual
-        # window rename (tmux_badge_clear already preserves one).
+        settle_since=$(tmux show-options -wqv -t "$window_id" @code_notify_settle_since 2>/dev/null)
+        if [[ ! "$settle_since" =~ ^[0-9]+$ ]]; then
+            tmux set-option -w -t "$window_id" @code_notify_settle_since "$now" 2>/dev/null
+            continue
+        fi
+        (( now - settle_since >= TMUX_SETTLE_SECONDS )) || continue
+        # Settled: the agent is idle. Mirror tmux_running_stop for this
+        # window — drop the marker, clear the running rename (an event badge
+        # that replaced it is left alone), and stop tracking; the next hook
+        # event re-arms everything.
         tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
-        tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
-        tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
-        tmux_badge_clear "$window_id"
+        tmux_running_settle_disarm "$window_id"
         tmux_agent_exit_untrack "$window_id"
-    done < <(tmux list-windows -a -F '#{window_id}|#{@code_notify_agent_pid}' 2>/dev/null)
+        mode=$(tmux show-options -wqv -t "$window_id" @code_notify_clear_mode 2>/dev/null)
+        if [[ "$mode" == "running" ]]; then
+            tmux_badge_clear "$window_id"
+        fi
+    done < <(tmux list-windows -a -F \
+        '#{window_id}|#{@code_notify_agent_pid}|#{@code_notify_running}|#{@code_notify_settle_pane}' 2>/dev/null)
     if [[ "$live" -eq 1 ]]; then
         tmux_agent_exit_schedule_sweep
     fi
@@ -790,6 +876,7 @@ tmux_running_start() {
     # A new prompt or a resumed tool turn supersedes any earlier input wait.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
+    tmux_running_settle_arm "$window_id" "$pane_id"
     if tmux_running_spinner_enabled; then
         # The spinner is rendered independently from the window name, so it
         # does not naturally replace a waiting/event badge the way the static
@@ -836,6 +923,7 @@ tmux_prompt_submit() {
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
+    tmux_running_settle_arm "$window_id" "$TMUX_PANE"
     if tmux_running_spinner_enabled; then
         # No rename in spinner mode: drop the event badge and arm the snippet
         # (a show-options no-op when already armed).
@@ -864,6 +952,7 @@ tmux_running_stop() {
     # marker. tmux_running_pause_for_input sets it again after this cleanup.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
+    tmux_running_settle_disarm "$window_id"
     tmux_agent_exit_untrack "$window_id"
     local since mode
     since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
@@ -1148,6 +1237,7 @@ tmux_running_sweep_stale() {
             continue
         fi
         tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
+        tmux_running_settle_disarm "$window_id"
         if [[ "$mode" == "running" ]]; then
             tmux_badge_clear "$window_id"
         fi

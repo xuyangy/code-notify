@@ -105,7 +105,9 @@ case "$cmd" in
                 case "$seen" in *" $w "*) continue ;; esac
                 seen="$seen$w "
                 pid=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_agent_pid" 2>/dev/null)
-                printf '%s|%s\n' "$w" "$pid"
+                run=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_running" 2>/dev/null)
+                sp=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_settle_pane" 2>/dev/null)
+                printf '%s|%s|%s|%s\n' "$w" "$pid" "$run" "$sp"
             done
         else
             for f in "$FAKE_TMUX_STATE"/*.@code_notify_running; do
@@ -864,6 +866,51 @@ grep -q "^run-shell -b -d 2 " "$log_file" \
     || fail "the pause marker should still be retained for the hooks"
 rm -f "$state_dir/@2.@code_notify_resume_pending"
 pass "watched pause without a snapshot leaves resume to the hooks"
+
+# --- codex running marker arms the settle watch; claude's does not ---
+# Codex ends /review without any turn-end hook, so its running marker gets a
+# pane-settle watch (TMUX_SETTLE_AGENTS). Claude has real Stop hooks and must
+# not be watched — its idle screen is static even mid-approval.
+CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit \
+    || fail "codex prompt-submit should succeed"
+[[ "$(cat "$state_dir/@2.@code_notify_settle_pane" 2>/dev/null)" == "%3" ]] \
+    || fail "codex prompt-submit should arm the settle watch on its pane"
+tmux_running_stop || fail "running-stop after codex settle arm should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_settle_pane" ]] \
+    || fail "running-stop should disarm the settle watch"
+CODE_NOTIFY_TMUX_AGENT_NAME=claude tmux_prompt_submit \
+    || fail "claude prompt-submit should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_settle_pane" ]] \
+    || fail "claude prompt-submit must not arm the settle watch"
+tmux_running_stop || fail "running-stop after claude prompt should succeed"
+pass "settle watch arms for codex only"
+
+# --- a settled codex pane takes the running marker down ---
+# Tick 1 stores the snapshot; a changed pane resets the countdown; once the
+# pane holds still past the threshold (forced to 0 here), the sweep retires
+# the marker and restores the window name — the /review-without-stop case.
+printf '%s' "review: analyzing diff" > "$state_dir/%3.pane_content"
+CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit \
+    || fail "codex prompt-submit for the settle flow should succeed"
+[[ "$(window_name)" == "🌕 zsh" ]] || fail "precondition: running icon should be up"
+tmux_agent_exit_sweep || fail "first settle tick should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "the first tick only snapshots; it must not stop the marker"
+[[ -f "$state_dir/@2.@code_notify_settle_fp" ]] \
+    || fail "the first tick should store the pane snapshot"
+printf '%s' "review: writing findings" > "$state_dir/%3.pane_content"
+tmux_agent_exit_sweep || fail "second settle tick should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a still-painting pane must keep the running marker"
+TMUX_SETTLE_SECONDS=0 tmux_agent_exit_sweep || fail "settling tick should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a settled pane should retire the running marker"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "the settle stop should restore the window name (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_settle_pane" ]] \
+    || fail "the settle stop should disarm the watch"
+rm -f "$state_dir/%3.pane_content"
+pass "settled codex pane retires the running marker"
 
 # --- ordinary tool lifecycle signals must not start a spinner ---
 : > "$log_file"

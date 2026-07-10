@@ -763,6 +763,11 @@ tmux_running_start() {
     # A new prompt or a resumed tool turn supersedes any earlier input wait.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     if tmux_running_spinner_enabled; then
+        # The spinner is rendered independently from the window name, so it
+        # does not naturally replace a waiting/event badge the way the static
+        # running icon below does. Clear that badge when work starts or resumes
+        # to avoid displaying contradictory "running" and "needs input" states.
+        tmux_badge_clear "$window_id"
         tmux_agent_exit_track "$window_id"
         tmux_spinner_arm
     else

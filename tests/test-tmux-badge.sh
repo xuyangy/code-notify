@@ -868,6 +868,20 @@ grep -q "rename-window" "$log_file" && fail "spinner mode must not rename the wi
     || fail "spinner mode should still store the start epoch"
 pass "spinner-mode running-start arms without renaming"
 
+# --- spinner mode: running-start clears a waiting event badge ---
+tmux_running_stop || fail "spinner-mode setup stop should succeed"
+tmux_badge_set "💬" engage || fail "spinner-mode waiting badge setup should succeed"
+[[ "$(window_name)" == "💬 zsh" ]] \
+    || fail "precondition: window should carry the waiting badge"
+tmux_running_start || fail "spinner-mode resume from waiting badge should succeed"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "spinner-mode resume should clear the waiting badge (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_clear_mode" ]] \
+    || fail "spinner-mode resume should remove the waiting badge state"
+[[ "$(cat "$state_dir/@2.@code_notify_running")" =~ ^[0-9]+$ ]] \
+    || fail "spinner-mode resume should retain the running epoch"
+pass "spinner-mode running-start clears a waiting event badge"
+
 # --- spinner mode: running-stop disarms once nothing is running ---
 export FAKE_TMUX_WINDOWS="@2|"   # no running epoch anywhere after the stop
 tmux_running_stop || fail "spinner-mode running-stop should succeed"

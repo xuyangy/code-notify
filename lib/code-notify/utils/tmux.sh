@@ -699,18 +699,22 @@ tmux_agent_exit_schedule_sweep() {
     # Pass the interval through like the TTL sweep passes the TTL: the timer's
     # fresh process would otherwise fall back to the default, so a custom
     # interval would only survive the first firing. The settle and idle
-    # thresholds ride along for the same reason, and the notifier override so
-    # tests exercising the fired payload keep their stub (empty behaves as
-    # unset).
+    # thresholds and the idle-agent allowlist ride along for the same reason
+    # (the settle-to-idle handoff arms inside the fired process, so a session
+    # that excluded an agent must stay excluded there too), plus the notifier
+    # override so tests exercising the fired payload keep their stub (empty
+    # behaves as unset).
     q_poll=$(tmux_focus_shell_quote "$TMUX_AGENT_EXIT_POLL_SECONDS")
-    local q_settle q_idle q_notifier
+    local q_settle q_idle q_idle_agents q_notifier
     q_settle=$(tmux_focus_shell_quote "$TMUX_SETTLE_SECONDS")
     q_idle=$(tmux_focus_shell_quote "$TMUX_IDLE_SECONDS")
+    q_idle_agents=$(tmux_focus_shell_quote "$TMUX_IDLE_AGENTS")
     q_notifier=$(tmux_focus_shell_quote "${CODE_NOTIFY_NOTIFIER_PATH:-}")
     inner="$q_tmux -S $q_socket set-option -gu @code_notify_agent_exit_sweep_scheduled; "
     inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS=$q_poll "
     inner+="CODE_NOTIFY_TMUX_SETTLE_SECONDS=$q_settle "
-    inner+="CODE_NOTIFY_TMUX_IDLE_SECONDS=$q_idle CODE_NOTIFY_NOTIFIER_PATH=$q_notifier "
+    inner+="CODE_NOTIFY_TMUX_IDLE_SECONDS=$q_idle CODE_NOTIFY_TMUX_IDLE_AGENTS=$q_idle_agents "
+    inner+="CODE_NOTIFY_NOTIFIER_PATH=$q_notifier "
     inner+="bash $q_lib agent-exit-sweep; fi"
     inner="${inner//\#/##}"
     tmux run-shell -b -d "$TMUX_AGENT_EXIT_POLL_SECONDS" "$inner" 2>/dev/null || return 0

@@ -919,6 +919,48 @@ iw="$(cat "$state_dir/@2.@code_notify_idle_watch" 2>/dev/null)"
 rm -f "$state_dir/@2.@code_notify_idle_watch" "$state_dir/%3.pane_content"
 pass "settled codex pane retires the running marker"
 
+# --- scheduled settle-to-idle handoff honours the idle-agent allowlist ---
+# The handoff arms inside the timer's fresh process, so the allowlist must
+# ride the payload like the thresholds do: a session that excluded codex
+# stays excluded when /review settles in a scheduled tick. Positive control
+# first — the forwarded default must still arm — so a quoting bug that
+# empties the variable (blocking every agent) cannot pass the negative case.
+settle_handoff_round() {
+    # $1: env value for TMUX_IDLE_AGENTS ("" = default). Arms a codex settle
+    # watch, seeds it as already settled, then runs the scheduled payload
+    # exactly as tmux would (fresh /bin/sh, no TMUX_PANE).
+    printf '%s' "review output" > "$state_dir/%3.pane_content"
+    rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+    : > "$log_file"
+    if [[ -n "$1" ]]; then
+        TMUX_IDLE_AGENTS="$1" CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit \
+            || return 1
+    else
+        CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit || return 1
+    fi
+    printf '%s' "$(printf '%s\n' "review output" | cksum)" \
+        > "$state_dir/@2.@code_notify_settle_fp"
+    printf '%s' "1000" > "$state_dir/@2.@code_notify_settle_since"
+    payload=$(sed -n 's/^run-shell -b -d 5 \(.*\)$/\1/p' "$log_file" | head -n 1)
+    [[ -n "$payload" ]] || return 1
+    env -u TMUX_PANE /bin/sh -c "$payload"
+}
+settle_handoff_round "" || fail "default-allowlist handoff round should run cleanly"
+[[ "$(cat "$state_dir/@2.@code_notify_idle_watch" 2>/dev/null)" == *" codex "* ]] \
+    || fail "the scheduled handoff should arm codex under the forwarded default allowlist"
+rm -f "$state_dir/@2.@code_notify_idle_watch" "$state_dir/%3.pane_content" \
+    "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+settle_handoff_round "antigravity" || fail "override-allowlist handoff round should run cleanly"
+[[ "$payload" == *"CODE_NOTIFY_TMUX_IDLE_AGENTS='antigravity'"* ]] \
+    || fail "the scheduled payload should carry the session's allowlist"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "the scheduled settle stop should still retire the running marker"
+[[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "an excluded agent must stay excluded in the timer process"
+rm -f "$state_dir/%3.pane_content" "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+printf '%s' "zsh" > "$state_dir/@2.window_name"
+pass "scheduled handoff honours the forwarded idle-agent allowlist"
+
 # --- idle watch: arm gating (agent list, alert types, pane capture) ---
 # Codex/Antigravity never send an idle reminder after a completion, so their
 # stop events arm a post-completion idle watch; Claude nudges natively and

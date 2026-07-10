@@ -619,6 +619,7 @@ show_status() {
                 echo "     Input needed: disabled (run 'cn alerts add permission_prompt')"
             fi
             echo "     Task complete: debounced PostToolUse, cancelled on next tool start (agy 1.0.11 has no working Stop hook)"
+            echo "     Running indicator: first PreToolUse of each turn (marker-gated)"
         else
             echo "  ${MUTE} Antigravity CLI: ${DIM}DISABLED${RESET}"
         fi

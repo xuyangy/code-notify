@@ -449,6 +449,92 @@ agy_debounce_tokenfile() {
     printf '%s/%s.token' "$state_dir" "$cid_safe"
 }
 
+# Per-conversation marker that prevents tmux_running_start from firing on every
+# PreToolUse in a turn.  The first PreToolUse of a turn creates this file and
+# lights the indicator; subsequent PreToolUse calls see the file and skip the
+# tmux IPC entirely.  Turn-end events (StopFinal/Stop/error) remove it so the
+# next turn re-arms, and a permission prompt removes it so the first tool call
+# after approval restarts the paused indicator.
+agy_running_markerfile() {
+    local state_dir cid_safe
+    state_dir="$HOME/.claude/notifications/agy"
+    mkdir -p "$state_dir"
+    cid_safe="$(get_agy_conversation_id | tr -c 'A-Za-z0-9._-' '_')"
+    printf '%s/%s.running' "$state_dir" "$cid_safe"
+}
+
+# Start the running indicator if this is the first tool call of the turn.
+# A marker older than TMUX_RUNNING_TTL is ignored: a turn that ended without
+# any hook (Escape-interrupt — the case the TTL exists for) leaves its marker
+# behind, and honouring it would keep the whole next turn unlit. The indicator
+# itself self-expires at the same TTL, so past it the marker is dead weight.
+agy_maybe_start_running() {
+    local marker now stamp=""
+    marker="$(agy_running_markerfile)"
+    now="$(date +%s)"
+    if [[ -r "$marker" ]]; then
+        read -r stamp < "$marker" 2>/dev/null || true
+        if [[ "$stamp" =~ ^[0-9]+$ ]] && [[ $((now - stamp)) -lt "$TMUX_RUNNING_TTL" ]]; then
+            return 0
+        fi
+    fi
+    printf '%s' "$now" > "$marker" 2>/dev/null || true
+    tmux_running_start 2>/dev/null || true
+}
+
+# Clear the per-conversation running marker so the next turn re-arms.
+agy_clear_running_marker() {
+    rm -f "$(agy_running_markerfile)" 2>/dev/null || true
+}
+
+# Serialize the running-indicator transition with a debounce completion.  The
+# token check alone is not enough: a new PreToolUse can invalidate the token
+# after StopFinal checks it but before StopFinal clears the marker/stops tmux.
+# mkdir is atomic, and the pid file lets later hooks recover a lock left by a
+# killed hook process.
+agy_with_running_lock() {
+    local lockdir owner attempts=0 status
+    lockdir="$(agy_running_markerfile).lock"
+    while ! mkdir "$lockdir" 2>/dev/null; do
+        if (( attempts >= 500 )); then
+            owner=""
+            [[ -r "$lockdir/pid" ]] && read -r owner < "$lockdir/pid" 2>/dev/null || true
+            if [[ "$owner" =~ ^[0-9]+$ ]]; then
+                if ! kill -0 "$owner" 2>/dev/null; then
+                    rm -f "$lockdir/pid" 2>/dev/null || true
+                    rmdir "$lockdir" 2>/dev/null || true
+                fi
+            elif [[ ! -e "$lockdir/pid" ]]; then
+                # The owner may have been killed between mkdir and writing its
+                # pid.  The empty directory is safe to reclaim.
+                rmdir "$lockdir" 2>/dev/null || true
+            fi
+            attempts=0
+        fi
+        ((attempts++))
+        sleep 0.01
+    done
+    printf '%s' "$$" > "$lockdir/pid" 2>/dev/null || true
+    "$@"
+    status=$?
+    rm -f "$lockdir/pid" 2>/dev/null || true
+    rmdir "$lockdir" 2>/dev/null || true
+    return "$status"
+}
+
+agy_start_running_locked() {
+    cancel_agy_debounced_stop
+    agy_maybe_start_running
+}
+
+agy_stop_final_locked() {
+    local expected_token="$1" current_token
+    current_token="$(cat "$(agy_debounce_tokenfile)" 2>/dev/null || true)"
+    [[ -n "$expected_token" ]] && [[ "$current_token" == "$expected_token" ]] || return 1
+    agy_clear_running_marker
+    tmux_running_stop 2>/dev/null || true
+}
+
 # Remove stale per-conversation debounce tokens. A token only matters for the
 # few seconds a watcher sleeps on it; once that window passes the file is dead
 # weight. Without pruning, every Antigravity conversation leaves one tiny file
@@ -461,7 +547,7 @@ prune_agy_debounce_tokens() {
     retention_days="${CODE_NOTIFY_AGY_TOKEN_RETENTION_DAYS:-3}"
     [[ "$retention_days" =~ ^[0-9]+$ ]] || retention_days=3
     find "$state_dir" -maxdepth 1 -type f \
-        \( -name '*.token' -o -name '*.completed' \) \
+        \( -name '*.token' -o -name '*.completed' -o -name '*.running' \) \
         -mtime "+${retention_days}" -delete 2>/dev/null || true
 }
 
@@ -509,12 +595,15 @@ schedule_agy_debounced_stop() {
         # Only the latest activity wins; a newer step or an error overwrites the
         # token, so earlier/cancelled watchers bail out here.
         [[ "$(cat "$tokenfile" 2>/dev/null)" == "$token" ]] || exit 0
-        printf '%s' "$HOOK_DATA" | "$SELF_NOTIFIER" "agy:StopFinal" "antigravity" >/dev/null 2>&1
+        # Carry the token into StopFinal so that the completion is revalidated
+        # after the watcher crosses the process boundary.
+        printf '%s' "$HOOK_DATA" | "$SELF_NOTIFIER" "agy:StopFinal" "antigravity" "$token" >/dev/null 2>&1
     ) >/dev/null 2>&1 &
     disown 2>/dev/null || true
 }
 
 AGY_FORCED_SUBTYPE=""
+AGY_STOP_FINAL_CLEANUP=0
 HOOK_DATA=""
 if [[ "$RAW_ARG1" == "codex" ]]; then
     TOOL_NAME="codex"
@@ -538,7 +627,9 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
             # Without this, a tool that outlives the debounce window (e.g. a slow
             # file read between two quick steps) lets the previous step's watcher
             # fire a bogus "task complete" mid-turn.
-            cancel_agy_debounced_stop
+            # Cancel the debounce and possibly start tmux as one transaction
+            # with StopFinal, so a completion cannot stop a newly started turn.
+            agy_with_running_lock agy_start_running_locked || true
             # The approval banner is only meaningful for calls that pause for the
             # user (run_command), only when permission_prompt alerts are on, and
             # only when agy will actually stop to ask — commands its permission
@@ -549,6 +640,13 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
                 agy_command_needs_approval "$(get_agy_command_line)"; then
                 HOOK_TYPE="notification"
                 AGY_FORCED_SUBTYPE="permission_prompt"
+                # This notification pauses the running indicator further down.
+                # Drop the marker so the next PreToolUse — the first tool call
+                # after the user approves — re-lights it via tmux_running_start
+                # (which also retires the window's resume-pending flag). agy
+                # has no PostToolUse resume shim, so without this the indicator
+                # would stay paused for the rest of the turn.
+                agy_clear_running_marker
             else
                 exit 0
             fi
@@ -559,17 +657,22 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
                 # cancel the pending debounce before raising the error alert.
                 HOOK_TYPE="error"
                 cancel_agy_debounced_stop
+                agy_clear_running_marker
             else
                 HOOK_TYPE="agy_debounce_stop"
             fi
             ;;
         StopFinal)
             # Emitted by our own debounce watcher once step activity went quiet.
-            # The completion it carries is already validated, so just deliver it.
-            # Do NOT cancel here: a PostToolUse for a newer turn may have armed a
-            # fresh watcher while this one was delivering, and cancelling would
-            # swallow that turn's legitimate completion.
+            # Revalidate the token while holding the same lock used by
+            # PreToolUse. If a newer turn won the race, this completion is stale
+            # and must not stop the newer turn's indicator or notify for it.
+            agy_with_running_lock agy_stop_final_locked "$RAW_ARG3" || exit 0
             HOOK_TYPE="stop"
+            # tmux_running_stop already ran inside the lock; skipping the
+            # generic cleanup below keeps a newer PreToolUse from being stopped
+            # after the lock is released.
+            AGY_STOP_FINAL_CLEANUP=1
             ;;
         Stop)
             # Native lifecycle Stop (inert in agy 1.0.11, ready for when it
@@ -578,6 +681,7 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
             # duplicate "task complete" from the watcher.
             HOOK_TYPE="stop"
             cancel_agy_debounced_stop
+            agy_clear_running_marker
             ;;
         *)
             HOOK_TYPE="stop"
@@ -1026,7 +1130,9 @@ case "$HOOK_TYPE" in
         tmux_running_pause_for_input 2>/dev/null || true
         ;;
     "stop"|"error"|"failed")
-        tmux_running_stop 2>/dev/null || true
+        if [[ "$AGY_STOP_FINAL_CLEANUP" != "1" ]]; then
+            tmux_running_stop 2>/dev/null || true
+        fi
         ;;
 esac
 

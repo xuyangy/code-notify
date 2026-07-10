@@ -244,22 +244,31 @@ grep -q "rename-window" "$log_file" && fail "visible window should not be rename
 pass "visible window skipped"
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 
-# --- a stale badge clears once a later event fires while the window is
-# visible, instead of lingering because a mere glance never engage-clears it
-# (e.g. a permission prompt answered inline, then the task finishes while the
-# user is looking right at the window) ---
+# --- a terminal event badges even the visible window, replacing a stale
+# waiting badge (e.g. a permission prompt answered inline, then the task
+# finishes while the user is looking right at the window) ---
 tmux_badge_set "👋" engage || fail "stale-badge setup should succeed"
 [[ "$(window_name)" == "👋 zsh" ]] || fail "precondition: window should carry the stale badge"
-export FAKE_TMUX_BADGE_INFO='@2|on|1|zsh'   # user is now looking at the window
-tmux_badge_set "🟢" engage "" clear || fail "terminal badge attempt on visible window should still exit 0"
-[[ "$(window_name)" == "zsh" ]] || fail "stale badge should clear, not persist (got: $(window_name))"
-[[ ! -f "$state_dir/@2.@code_notify_clear_mode" ]] || fail "clearing the stale badge should drop its clear-mode option"
-pass "terminal event clears a stale badge on a visible window"
+export FAKE_TMUX_BADGE_INFO='@2|on|1|👋 zsh'   # user is now looking at the window
+tmux_badge_set "🟢" engage "" apply || fail "terminal badge on visible window should succeed"
+[[ "$(window_name)" == "🟢 zsh" ]] || fail "terminal event should badge the visible window (got: $(window_name))"
+[[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "engage" ]] \
+    || fail "the visible completion badge should keep engage clear mode"
+pass "terminal event badges the visible window, replacing a stale one"
+tmux_badge_clear "@2"
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 
-# --- a waiting-type event (idle reminder, permission, mid-run) keeps an
-# existing badge: the default stale action must not wipe a done/complete
-# badge the user has not engaged away yet ---
+# --- a completion on a bare focused window still gets its badge ---
+export FAKE_TMUX_BADGE_INFO='@2|on|1|zsh'
+tmux_badge_set "🟢" engage "" apply || fail "completion badge on a bare visible window should succeed"
+[[ "$(window_name)" == "🟢 zsh" ]] || fail "completion badge should always show (got: $(window_name))"
+pass "completion badge lands on a bare visible window"
+tmux_badge_clear "@2"
+export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+
+# --- a waiting-type event (idle reminder, permission, mid-run) still skips
+# the visible window and keeps an existing badge: it must not wipe or restack
+# a done/complete badge the user has not engaged away yet ---
 tmux_badge_set "🟢" engage || fail "done-badge setup should succeed"
 [[ "$(window_name)" == "🟢 zsh" ]] || fail "precondition: window should carry the done badge"
 export FAKE_TMUX_BADGE_INFO='@2|on|1|🟢 zsh'   # user reads the output; idle reminder fires
@@ -268,22 +277,6 @@ tmux_badge_set "👋" engage || fail "waiting badge attempt on visible window sh
 [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "engage" ]] \
     || fail "waiting event must keep the badge state"
 pass "waiting event keeps an existing badge on a visible window"
-tmux_badge_clear "@2"
-export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
-
-# --- ...and a running badge on the visible window survives even a terminal
-# reconcile (the terminating event retires it via tmux_running_stop, not here) ---
-printf '%s' "zsh" > "$state_dir/@2.@code_notify_orig_name"
-printf '%s' "on" > "$state_dir/@2.@code_notify_autorename"
-printf '%s' "🌕 zsh" > "$state_dir/@2.@code_notify_badged_name"
-printf '%s' "running" > "$state_dir/@2.@code_notify_clear_mode"
-printf '%s' "🌕 zsh" > "$state_dir/@2.window_name"
-export FAKE_TMUX_BADGE_INFO='@2|on|1|🌕 zsh'
-tmux_badge_set "🌱" engage "" clear || fail "badge attempt over a running badge should still exit 0"
-[[ "$(window_name)" == "🌕 zsh" ]] || fail "reconcile must not strip the running badge (got: $(window_name))"
-[[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "running" ]] \
-    || fail "running badge state should survive the reconcile"
-pass "running badge survives a terminal reconcile on a visible window"
 tmux_badge_clear "@2"
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 

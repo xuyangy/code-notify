@@ -1655,18 +1655,19 @@ if badge_glance_clear_enabled; then
     tmux_badge_sweep 2>/dev/null || true
 fi
 if [[ -n "$BADGE_ICON" ]]; then
-    # Terminal events additionally reconcile a stale badge on the visible
-    # window (a "needs approval"/"waiting" badge whose turn the user just
-    # watched end). Waiting and mid-run events pass "keep": an idle reminder
-    # or subagent event must not wipe a done/complete badge the user has not
-    # engaged away yet.
-    BADGE_STALE_ACTION="keep"
+    # Terminal events badge even the visible window — completion should be
+    # glanceable everywhere — and applying there also replaces a stale
+    # waiting badge whose turn the user just watched end (an approval
+    # answered inline leaves one). Waiting and mid-run events keep the
+    # default skip: an idle reminder must not wipe or restack a badge the
+    # user has not engaged away yet.
+    BADGE_VISIBLE_ACTION="skip"
     case "$HOOK_TYPE" in
         "stop"|"error"|"failed")
-            BADGE_STALE_ACTION="clear"
+            BADGE_VISIBLE_ACTION="apply"
             ;;
     esac
-    tmux_badge_set "$BADGE_ICON" "$BADGE_CLEAR_MODE" "" "$BADGE_STALE_ACTION" 2>/dev/null || true
+    tmux_badge_set "$BADGE_ICON" "$BADGE_CLEAR_MODE" "" "$BADGE_VISIBLE_ACTION" 2>/dev/null || true
 fi
 
 # Send notification based on OS

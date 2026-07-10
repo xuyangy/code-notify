@@ -277,8 +277,8 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo "Add it to ~/.zshrc (zsh) or ~/.bashrc (bash)"
 fi
 
-echo "Run these commands to get started:"
-echo "  code-notify setup    # Initial setup"
-echo "  cn on                  # Enable notifications"
-echo ""
+printf "Run these commands to get started:\n"
+printf "  %-22s # %s\n" "code-notify setup" "Initial setup"
+printf "  %-22s # %s\n" "cn on" "Enable notifications"
+printf "\n"
 echo "For more info: https://github.com/xuyangy/code-notify"

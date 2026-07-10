@@ -137,28 +137,28 @@ window_name() { cat "$state_dir/@2.window_name" 2>/dev/null; }
 orig_option() { cat "$state_dir/@2.@code_notify_orig_name" 2>/dev/null; }
 
 # --- disabled via environment ---
-CODE_NOTIFY_TMUX_BADGE=false tmux_badge_set "🎯" && fail "badge should be skipped when disabled via env"
+CODE_NOTIFY_TMUX_BADGE=false tmux_badge_set "🟢" && fail "badge should be skipped when disabled via env"
 [[ -z "$(window_name)" ]] || fail "disabled badge should not rename the window"
 pass "disabled via environment"
 
 # --- disabled via flag file ---
 mkdir -p "$HOME/.claude/notifications"
 touch "$HOME/.claude/notifications/tmux-badge-disabled"
-tmux_badge_set "🎯" && fail "badge should be skipped when disabled via flag file"
+tmux_badge_set "🟢" && fail "badge should be skipped when disabled via flag file"
 rm -f "$HOME/.claude/notifications/tmux-badge-disabled"
 pass "disabled via flag file"
 
 # --- no-op outside tmux ---
 (
     unset TMUX TMUX_PANE
-    tmux_badge_set "🎯" && exit 1
+    tmux_badge_set "🟢" && exit 1
     exit 0
 ) || fail "badge should fail outside tmux"
 pass "no-op outside tmux"
 
 # --- badge happy path ---
-tmux_badge_set "🎯" || fail "badge should succeed inside tmux"
-[[ "$(window_name)" == "🎯 zsh" ]] || fail "window should be renamed with icon prefix (got: $(window_name))"
+tmux_badge_set "🟢" || fail "badge should succeed inside tmux"
+[[ "$(window_name)" == "🟢 zsh" ]] || fail "window should be renamed with icon prefix (got: $(window_name))"
 [[ "$(orig_option)" == "zsh" ]] || fail "original name should be saved in window option"
 [[ "$(cat "$state_dir/@2.@code_notify_autorename")" == "on" ]] || fail "automatic-rename state should be saved"
 pass "badge sets icon and saves state"
@@ -186,7 +186,7 @@ grep -q "rename-window" "$log_file" && fail "clear without badge should not rena
 pass "clear no-op without badge"
 
 # --- manual rename while badged becomes the new original ---
-tmux_badge_set "🎯" || fail "badge before manual rename should succeed"
+tmux_badge_set "🟢" || fail "badge before manual rename should succeed"
 export FAKE_TMUX_BADGE_INFO='@2|off|0|work'   # user renamed the badged window
 tmux_badge_set "👋" || fail "badge after manual rename should succeed"
 [[ "$(window_name)" == "👋 work" ]] || fail "badge should adopt the user's new name (got: $(window_name))"
@@ -199,8 +199,8 @@ pass "manual rename becomes the new original"
 # "api zsh" ends in " zsh", so a suffix match alone would mistake it for a
 # badged form of "zsh"; the exact badged-name comparison must not.
 tmux_badge_clear "@2"                          # reset state from the previous case
-tmux_badge_set "🎯" || fail "badge before suffix-colliding rename should succeed"
-export FAKE_TMUX_BADGE_INFO='@2|off|0|api zsh'   # user renamed "🎯 zsh" -> "api zsh"
+tmux_badge_set "🟢" || fail "badge before suffix-colliding rename should succeed"
+export FAKE_TMUX_BADGE_INFO='@2|off|0|api zsh'   # user renamed "🟢 zsh" -> "api zsh"
 tmux_badge_set "👋" || fail "badge after suffix-colliding rename should succeed"
 [[ "$(window_name)" == "👋 api zsh" ]] || fail "badge should adopt a rename ending in the original name (got: $(window_name))"
 [[ "$(orig_option)" == "api zsh" ]] || fail "suffix-colliding rename should replace the saved original"
@@ -209,7 +209,7 @@ pass "suffix-colliding rename becomes the new original"
 
 # --- clear keeps a manual rename ---
 tmux_badge_clear "@2"                          # reset state from the previous case
-tmux_badge_set "🎯" || fail "badge for manual-rename clear test should succeed"
+tmux_badge_set "🟢" || fail "badge for manual-rename clear test should succeed"
 printf '%s' "work" > "$state_dir/@2.window_name"   # user renames after badging
 : > "$log_file"
 tmux_badge_clear "@2"
@@ -219,7 +219,7 @@ grep -q "automatic-rename on" "$log_file" && fail "clear after a manual rename m
 pass "clear keeps manual rename"
 
 # --- clear keeps a manual rename that ends in the original name ---
-tmux_badge_set "🎯" || fail "badge for suffix-colliding clear test should succeed"
+tmux_badge_set "🟢" || fail "badge for suffix-colliding clear test should succeed"
 printf '%s' "api zsh" > "$state_dir/@2.window_name"   # user renames after badging
 : > "$log_file"
 tmux_badge_clear "@2"
@@ -230,7 +230,7 @@ pass "clear keeps suffix-colliding manual rename"
 # --- legacy badge (no badged-name option) still clears via suffix match ---
 printf '%s' "zsh" > "$state_dir/@2.@code_notify_orig_name"
 printf '%s' "on" > "$state_dir/@2.@code_notify_autorename"
-printf '%s' "🎯 zsh" > "$state_dir/@2.window_name"
+printf '%s' "🟢 zsh" > "$state_dir/@2.window_name"
 rm -f "$state_dir/@2.@code_notify_badged_name"
 tmux_badge_clear "@2"
 [[ "$(window_name)" == "zsh" ]] || fail "legacy badge without a saved badged name should still restore (got: $(window_name))"
@@ -239,20 +239,20 @@ pass "legacy badge clears without badged-name option"
 # --- visible window is not badged ---
 export FAKE_TMUX_BADGE_INFO='@2|on|1|zsh'
 : > "$log_file"
-tmux_badge_set "🎯" || fail "badge on visible window should still exit 0"
+tmux_badge_set "🟢" || fail "badge on visible window should still exit 0"
 grep -q "rename-window" "$log_file" && fail "visible window should not be renamed"
 pass "visible window skipped"
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 
 # --- malformed window id is rejected ---
 export FAKE_TMUX_BADGE_INFO='@2; rm -rf /|on|0|zsh'
-tmux_badge_set "🎯" && fail "badge should reject a non-ID window"
+tmux_badge_set "🟢" && fail "badge should reject a non-ID window"
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 pass "unsafe window id rejection"
 
 # --- sweep clears only badged windows that are visible again ---
 # list-windows format: window_id|visible|clear_mode|orig_name
-tmux_badge_set "🎯" || fail "badge for sweep setup should succeed"
+tmux_badge_set "🟢" || fail "badge for sweep setup should succeed"
 printf '%s' "other" > "$state_dir/@5.@code_notify_orig_name"
 export FAKE_TMUX_WINDOWS=$'@2|1|glance|zsh\n@5|0|glance|other\n@7|1||'
 tmux_badge_sweep
@@ -265,7 +265,7 @@ export FAKE_TMUX_WINDOWS=""
 
 # --- badge-set arms the focus-clear server hook ---
 : > "$log_file"
-tmux_badge_set "🎯" || fail "badge for hook-install test should succeed"
+tmux_badge_set "🟢" || fail "badge for hook-install test should succeed"
 grep -qF "set-hook -g session-window-changed[8471]" "$log_file" \
     || fail "badge-set should install the session-window-changed focus hook"
 grep -qF "set-hook -g client-session-changed[8471]" "$log_file" \
@@ -290,7 +290,7 @@ export FAKE_TMUX_WINDOWS=""
 pass "badge-sweep subcommand clears without TMUX_PANE"
 
 # --- sweep is a no-op with no tmux server (TMUX unset) ---
-tmux_badge_set "🎯" || fail "badge for no-server sweep should succeed"
+tmux_badge_set "🟢" || fail "badge for no-server sweep should succeed"
 : > "$log_file"
 ( unset TMUX; tmux_badge_sweep )
 grep -q "list-windows" "$log_file" && fail "sweep should not query tmux when TMUX is unset"
@@ -299,7 +299,7 @@ export FAKE_TMUX_WINDOWS=""
 pass "sweep no-ops without a tmux server"
 
 # --- sweep retires the focus hook once no badge remains ---
-tmux_badge_set "🎯" || fail "badge for hook-retire test should succeed"
+tmux_badge_set "🟢" || fail "badge for hook-retire test should succeed"
 export FAKE_TMUX_WINDOWS=$'@2|1|glance|zsh'   # the only badged window, now visible
 : > "$log_file"
 tmux_badge_sweep
@@ -314,7 +314,7 @@ export FAKE_TMUX_WINDOWS=""
 pass "sweep retires the focus hook when no badge remains"
 
 # --- sweep keeps the hook while a badged window is still hidden ---
-tmux_badge_set "🎯" || fail "badge for hook-keep test should succeed"
+tmux_badge_set "🟢" || fail "badge for hook-keep test should succeed"
 printf '%s' "other" > "$state_dir/@5.@code_notify_orig_name"
 export FAKE_TMUX_WINDOWS=$'@2|1|glance|zsh\n@5|0|glance|other'   # @5 still hidden + badged
 : > "$log_file"
@@ -336,7 +336,7 @@ cp "$ROOT_DIR/lib/code-notify/utils/tmux.sh" "$lib_copy"
 saved_lib_path="$TMUX_BADGE_LIB_PATH"
 TMUX_BADGE_LIB_PATH="$lib_copy"
 : > "$log_file"
-tmux_badge_set "🎯" || fail "badge for self-retire test should succeed"
+tmux_badge_set "🟢" || fail "badge for self-retire test should succeed"
 grep -qF 'run-shell -b "if [ -f ' "$log_file" \
     || fail "hook payload should guard on the lib file existing"
 payload=$(sed -n 's/^set-hook -g session-window-changed\[8471\] run-shell -b "\(.*\)"$/\1/p' "$log_file" | head -n 1)
@@ -350,7 +350,7 @@ env -u TMUX_PANE /bin/sh -c "$payload" || fail "hook payload should run cleanly 
 export FAKE_TMUX_WINDOWS=""
 
 # lib gone: the payload unsets both hooks through the embedded tmux + socket
-tmux_badge_set "🎯" || fail "re-badge for self-retire test should succeed"
+tmux_badge_set "🟢" || fail "re-badge for self-retire test should succeed"
 rm -f "$lib_copy"
 : > "$log_file"
 env -u TMUX_PANE /bin/sh -c "$payload" || fail "hook payload should exit 0 with the lib missing"
@@ -411,8 +411,8 @@ fi
 # The engage-clear path: an agent's UserPromptSubmit hook runs this to drop the
 # badge on the window the user just handed work, resolving the window from the
 # current pane (FAKE_TMUX_TARGET -> @2).
-tmux_badge_set "🎯" || fail "badge for clear-current test should succeed"
-[[ "$(window_name)" == "🎯 zsh" ]] || fail "precondition: window should be badged"
+tmux_badge_set "🟢" || fail "badge for clear-current test should succeed"
+[[ "$(window_name)" == "🟢 zsh" ]] || fail "precondition: window should be badged"
 tmux_badge_clear_current || fail "clear-current should succeed"
 [[ "$(window_name)" == "zsh" ]] || fail "clear-current should restore the current window (got: $(window_name))"
 [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "clear-current should drop the badge state"
@@ -427,7 +427,7 @@ pass "clear-current no-op without a badge"
 # --- the badge-clear-current subcommand clears from a subprocess ---
 # Exactly what the UserPromptSubmit hook runs: a fresh `bash tmux.sh
 # badge-clear-current`, inheriting TMUX/TMUX_PANE from the pane it fired in.
-tmux_badge_set "🎯" || fail "badge for clear-current subcommand test should succeed"
+tmux_badge_set "🟢" || fail "badge for clear-current subcommand test should succeed"
 bash "$ROOT_DIR/lib/code-notify/utils/tmux.sh" badge-clear-current
 [[ "$(window_name)" == "zsh" ]] || fail "badge-clear-current subcommand should clear the window (got: $(window_name))"
 [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "badge-clear-current subcommand should drop the badge state"
@@ -437,14 +437,14 @@ pass "badge-clear-current subcommand clears the window"
 # CODE_NOTIFY_TMUX_FOCUS_HOOK=false suppresses arming even for glance badges;
 # the badge itself is still set.
 : > "$log_file"
-CODE_NOTIFY_TMUX_FOCUS_HOOK=false tmux_badge_set "🎯" || fail "suppressed-hook badge should still succeed"
-[[ "$(window_name)" == "🎯 zsh" ]] || fail "badge should still be set when the focus hook is suppressed"
+CODE_NOTIFY_TMUX_FOCUS_HOOK=false tmux_badge_set "🟢" || fail "suppressed-hook badge should still succeed"
+[[ "$(window_name)" == "🟢 zsh" ]] || fail "badge should still be set when the focus hook is suppressed"
 grep -q "set-hook -g session-window-changed" "$log_file" && fail "suppressed focus hook must not be armed"
 tmux_badge_clear "@2"
 pass "badge-set suppresses the focus hook on request"
 
 # --- glance badge records its clear mode ---
-tmux_badge_set "🎯" || fail "glance badge should succeed"
+tmux_badge_set "🟢" || fail "glance badge should succeed"
 [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "glance" ]] \
     || fail "default badge should record clear mode glance"
 tmux_badge_clear "@2"
@@ -454,8 +454,8 @@ pass "glance badge records its clear mode"
 
 # --- engage badge records its mode and arms no focus hook ---
 : > "$log_file"
-tmux_badge_set "🎯" engage || fail "engage badge should succeed"
-[[ "$(window_name)" == "🎯 zsh" ]] || fail "engage badge should still rename the window"
+tmux_badge_set "🟢" engage || fail "engage badge should succeed"
+[[ "$(window_name)" == "🟢 zsh" ]] || fail "engage badge should still rename the window"
 [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "engage" ]] \
     || fail "engage badge should record clear mode engage"
 grep -q "set-hook -g session-window-changed" "$log_file" \
@@ -470,7 +470,7 @@ pass "engage badge records mode without arming the focus hook"
 export FAKE_TMUX_WINDOWS=$'@2|1|engage|zsh'
 : > "$log_file"
 tmux_badge_sweep
-[[ "$(window_name)" == "🎯 zsh" ]] \
+[[ "$(window_name)" == "🟢 zsh" ]] \
     || fail "sweep must not clear a visible engage badge (got: $(window_name))"
 [[ -f "$state_dir/@2.@code_notify_orig_name" ]] \
     || fail "sweep must not drop an engage badge's state"
@@ -543,9 +543,9 @@ pass "resume hook ignores ordinary tool activity"
 # --- running-stop leaves an event badge that replaced the marker ---
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 tmux_running_start || fail "running-start before event badge should succeed"
-tmux_badge_set "🎯" engage || fail "event badge should succeed"
+tmux_badge_set "🟢" engage || fail "event badge should succeed"
 tmux_running_stop || fail "running-stop after event badge should succeed"
-[[ "$(window_name)" == "🎯 zsh" ]] || fail "running-stop must not clear an event badge (got: $(window_name))"
+[[ "$(window_name)" == "🟢 zsh" ]] || fail "running-stop must not clear an event badge (got: $(window_name))"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] || fail "running-stop should still drop the epoch"
 tmux_badge_clear "@2"
 pass "running-stop leaves a replacing event badge alone"
@@ -775,8 +775,8 @@ pass "static fallback skips stale epochs"
 # --- prompt-submit fast path: engage badge swaps to the running icon ---
 # The synchronous prompt path must not clear-restore-then-rebadge (two
 # renames) or run a server-wide sweep: one capture, one rename, timer armed.
-tmux_badge_set "🎯" engage || fail "engage badge for the prompt-submit test should succeed"
-[[ "$(window_name)" == "🎯 zsh" ]] || fail "precondition: window should be engage-badged"
+tmux_badge_set "🟢" engage || fail "engage badge for the prompt-submit test should succeed"
+[[ "$(window_name)" == "🟢 zsh" ]] || fail "precondition: window should be engage-badged"
 : > "$log_file"
 tmux_prompt_submit || fail "prompt-submit should succeed"
 [[ "$(window_name)" == "🌕 zsh" ]] \
@@ -793,7 +793,7 @@ pass "prompt-submit swaps the badge in one rename, no sweep"
 
 # --- prompt-submit in spinner mode: clears the badge, arms, no re-badge ---
 touch "$HOME/.claude/notifications/tmux-spinner-enabled"
-tmux_badge_set "🎯" engage || fail "engage badge for the spinner prompt-submit test should succeed"
+tmux_badge_set "🟢" engage || fail "engage badge for the spinner prompt-submit test should succeed"
 : > "$log_file"
 tmux_prompt_submit || fail "spinner-mode prompt-submit should succeed"
 [[ "$(window_name)" == "zsh" ]] \
@@ -809,7 +809,7 @@ rm -f "$HOME/.claude/notifications/tmux-spinner-enabled"
 pass "spinner-mode prompt-submit clears the badge and arms the spinner"
 
 # --- prompt-submit with the running indicator disabled still engage-clears ---
-tmux_badge_set "🎯" engage || fail "engage badge for the disabled prompt-submit test should succeed"
+tmux_badge_set "🟢" engage || fail "engage badge for the disabled prompt-submit test should succeed"
 CODE_NOTIFY_TMUX_RUNNING=false tmux_prompt_submit || fail "disabled prompt-submit should succeed"
 [[ "$(window_name)" == "zsh" ]] \
     || fail "prompt-submit must clear the badge even with the running indicator disabled (got: $(window_name))"
@@ -841,7 +841,7 @@ grep -q "rename-window" "$log_file" && fail "clear command without badge should 
 pass "generated clear command no-op"
 
 # --- generated clear command keeps a manual rename ---
-tmux_badge_set "🎯" || fail "badge for manual-rename clear-command test should succeed"
+tmux_badge_set "🟢" || fail "badge for manual-rename clear-command test should succeed"
 printf '%s' "work" > "$state_dir/@2.window_name"   # user renames after badging
 : > "$log_file"
 /bin/sh -c "$cmd" > /dev/null 2>&1 || fail "clear command should run cleanly after a manual rename"
@@ -851,7 +851,7 @@ grep -q "rename-window" "$log_file" && fail "clear command after a manual rename
 pass "generated clear command keeps manual rename"
 
 # --- generated clear command keeps a rename that ends in the original name ---
-tmux_badge_set "🎯" || fail "badge for suffix-colliding clear-command test should succeed"
+tmux_badge_set "🟢" || fail "badge for suffix-colliding clear-command test should succeed"
 printf '%s' "api zsh" > "$state_dir/@2.window_name"   # user renames after badging
 : > "$log_file"
 /bin/sh -c "$cmd" > /dev/null 2>&1 || fail "clear command should run cleanly after a suffix-colliding rename"
@@ -861,7 +861,7 @@ grep -q "rename-window" "$log_file" && fail "clear command after a suffix-collid
 pass "generated clear command keeps suffix-colliding manual rename"
 
 # --- notifier.sh end-to-end wiring (macOS only) ---
-# Claude is an engage-clear agent: a stop event badges the origin window with 🎯
+# Claude is an engage-clear agent: a stop event badges the origin window with 🟢
 # and passes -focus, but does NOT attach a click-to-clear command (clicking is a
 # glance). The badge clears on the next UserPromptSubmit instead.
 if [[ "$(uname -s)" == "Darwin" ]]; then
@@ -882,7 +882,7 @@ EOF
         bash "$NOTIFIER" stop claude testproj > /dev/null 2>&1 \
         || fail "notifier.sh should exit cleanly"
 
-    [[ "$(window_name)" == "🎯 zsh" ]] || fail "notifier should badge the origin window with the stop icon (got: $(window_name))"
+    [[ "$(window_name)" == "🟢 zsh" ]] || fail "notifier should badge the origin window with the stop icon (got: $(window_name))"
     [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "engage" ]] \
         || fail "Claude badge should record clear mode engage"
     grep -qx -- "-focus" "$tn_log" || fail "notifier should pass -focus"
@@ -906,13 +906,13 @@ EOF
         || fail "UserPromptSubmit should store the running epoch"
     pass "notifier end-to-end: UserPromptSubmit swaps event badge for running marker"
 
-    # The next stop event takes the running marker off before badging 🎯.
+    # The next stop event takes the running marker off before badging 🟢.
     rm -f "$HOME/.claude/notifications/state"/* 2>/dev/null || true
     CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
         PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         bash "$NOTIFIER" stop claude testproj > /dev/null 2>&1 \
         || fail "notifier.sh stop after running should exit cleanly"
-    [[ "$(window_name)" == "🎯 zsh" ]] \
+    [[ "$(window_name)" == "🟢 zsh" ]] \
         || fail "stop should replace the running icon with the event badge (got: $(window_name))"
     [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
         || fail "stop should drop the running epoch"
@@ -967,7 +967,7 @@ EOF
         PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         bash "$NOTIFIER" stop codex testproj > /dev/null 2>&1 \
         || fail "notifier.sh stop codex should exit cleanly"
-    [[ "$(window_name)" == "🎯 zsh" ]] \
+    [[ "$(window_name)" == "🟢 zsh" ]] \
         || fail "codex stop (hooks.json path) should badge the window (got: $(window_name))"
     [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "glance" ]] \
         || fail "codex badge without a prompt hook should record clear mode glance"
@@ -1025,7 +1025,7 @@ EOF
         PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         bash "$NOTIFIER" stop codex testproj > /dev/null 2>&1 \
         || fail "notifier.sh stop codex (prompt hook installed) should exit cleanly"
-    [[ "$(window_name)" == "🎯 zsh" ]] \
+    [[ "$(window_name)" == "🟢 zsh" ]] \
         || fail "codex stop should still badge the window with the prompt hook installed (got: $(window_name))"
     [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "engage" ]] \
         || fail "codex badge with the prompt hook should record clear mode engage"

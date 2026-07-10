@@ -108,7 +108,7 @@ tmux_focus_build_command() {
 # --- tmux window badging ---------------------------------------------------
 #
 # When a notification fires, the originating tmux window's name gets the event
-# icon prepended ("🎯 zsh"), so pending work is visible in the status line
+# icon prepended ("🟢 zsh"), so pending work is visible in the status line
 # from anywhere in the session. Badge state lives in tmux window options
 # (@code_notify_orig_name, @code_notify_autorename, @code_notify_badged_name,
 # @code_notify_clear_mode) so it survives across hook processes and clears from

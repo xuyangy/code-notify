@@ -152,6 +152,7 @@ tmux_focus_build_command() {
 # as the fallback for them only.
 
 TMUX_BADGE_DISABLED_FILE="$HOME/.claude/notifications/tmux-badge-disabled"
+TMUX_BADGE_VISIBLE_ENABLED_FILE="$HOME/.claude/notifications/tmux-badge-visible-enabled"
 
 # Absolute path to this library, so the tmux focus hook can re-invoke it as a
 # script (bash <this> badge-sweep). Resolved at source time.
@@ -164,6 +165,20 @@ TMUX_BADGE_HOOK_INDEX="${CODE_NOTIFY_TMUX_HOOK_INDEX:-8471}"
 
 tmux_badge_enabled() {
     [[ "${CODE_NOTIFY_TMUX_BADGE:-}" != "false" ]] && [[ ! -f "$TMUX_BADGE_DISABLED_FILE" ]]
+}
+
+# Whether event badges should land even on the window the user is currently
+# looking at (`cn badge-visible on`). Off by default: waiting-type events skip
+# the visible window so an idle reminder can't wipe or restack a badge the
+# user has not engaged away yet. The env var (when set) wins over the flag
+# file, so a single session can force the behavior on or off without touching
+# persistent state.
+tmux_badge_visible_enabled() {
+    if [[ -n "${CODE_NOTIFY_TMUX_BADGE_VISIBLE:-}" ]]; then
+        [[ "$CODE_NOTIFY_TMUX_BADGE_VISIBLE" == "true" ]]
+        return
+    fi
+    [[ -f "$TMUX_BADGE_VISIBLE_ENABLED_FILE" ]]
 }
 
 # Install the server hook that clears a window's badge the instant it becomes

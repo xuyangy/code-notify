@@ -1675,13 +1675,18 @@ if [[ -n "$BADGE_ICON" ]]; then
     # waiting badge whose turn the user just watched end (an approval
     # answered inline leaves one). Waiting and mid-run events keep the
     # default skip: an idle reminder must not wipe or restack a badge the
-    # user has not engaged away yet.
+    # user has not engaged away yet. `cn badge-visible on` (or
+    # CODE_NOTIFY_TMUX_BADGE_VISIBLE=true) lifts the skip so every event
+    # badges the window, focused or not.
     BADGE_VISIBLE_ACTION="skip"
     case "$HOOK_TYPE" in
         "stop"|"error"|"failed")
             BADGE_VISIBLE_ACTION="apply"
             ;;
     esac
+    if tmux_badge_visible_enabled; then
+        BADGE_VISIBLE_ACTION="apply"
+    fi
     tmux_badge_set "$BADGE_ICON" "$BADGE_CLEAR_MODE" "" "$BADGE_VISIBLE_ACTION" 2>/dev/null || true
 fi
 

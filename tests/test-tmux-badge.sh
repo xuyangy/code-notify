@@ -316,6 +316,18 @@ pass "waiting event keeps an existing badge on a visible window"
 tmux_badge_clear "@2"
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 
+# --- badge-visible toggle: env var wins, flag file is the persistent state ---
+# The notifier promotes every event to visible_action=apply when this is on.
+tmux_badge_visible_enabled && fail "badge-visible should default to off"
+CODE_NOTIFY_TMUX_BADGE_VISIBLE=true tmux_badge_visible_enabled \
+    || fail "badge-visible env true should enable"
+touch "$HOME/.claude/notifications/tmux-badge-visible-enabled"
+tmux_badge_visible_enabled || fail "badge-visible flag file should enable"
+CODE_NOTIFY_TMUX_BADGE_VISIBLE=false tmux_badge_visible_enabled \
+    && fail "badge-visible env false should override the flag file"
+rm -f "$HOME/.claude/notifications/tmux-badge-visible-enabled"
+pass "badge-visible toggle honours env and flag file"
+
 # --- malformed window id is rejected ---
 export FAKE_TMUX_BADGE_INFO='@2; rm -rf /|on|0|zsh'
 tmux_badge_set "🟢" && fail "badge should reject a non-ID window"

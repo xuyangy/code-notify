@@ -64,6 +64,9 @@ handle_global_command() {
         "spinner")
             handle_spinner_command "$@"
             ;;
+        "badge-visible")
+            handle_badge_visible_command "$@"
+            ;;
         "help")
             show_help
             ;;
@@ -1247,6 +1250,43 @@ handle_spinner_command() {
         *)
             error "Unknown spinner command: $action"
             echo "Usage: cn spinner [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+# Toggle badging of the visible tmux window. Off by default: waiting-type
+# events (idle reminder, permission request, mid-run subagent/task events)
+# skip the window the user is currently looking at, so a reminder can't wipe
+# or restack a badge they have not engaged away yet; only terminal events
+# (stop, error) badge it. On: every event badges the window, focused or not.
+# The flag is a file so every hook process sees it without any config reload.
+handle_badge_visible_command() {
+    local action="${1:-status}"
+    local flag_file="$HOME/.claude/notifications/tmux-badge-visible-enabled"
+
+    case "$action" in
+        "on")
+            mkdir -p "$(dirname "$flag_file")"
+            touch "$flag_file"
+            success "tmux badge on the visible window enabled"
+            echo "  Every event badges the originating window, even the one you are looking at."
+            ;;
+        "off")
+            rm -f "$flag_file"
+            success "tmux badge on the visible window disabled"
+            echo "  Waiting-type events skip the focused window; only stop/error badge it."
+            ;;
+        "status")
+            if [[ -f "$flag_file" ]]; then
+                echo "tmux badge on visible window: ${GREEN}enabled${RESET} (every event badges the focused window)"
+            else
+                echo "tmux badge on visible window: ${DIM}disabled${RESET} (only stop/error badge the focused window)"
+            fi
+            ;;
+        *)
+            error "Unknown badge-visible command: $action"
+            echo "Usage: cn badge-visible [on|off|status]"
             return 1
             ;;
     esac

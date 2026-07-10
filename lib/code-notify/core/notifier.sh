@@ -771,14 +771,16 @@ if [[ "$HOOK_TYPE" == "agy_debounce_stop" ]]; then
 fi
 
 # How this agent's badges clear (stored per badge — see tmux_badge_set):
-#   - "engage": a UserPromptSubmit hook (intercepted near the top of this file)
-#     clears the badge when the user actually hands the window work, so
+#   - "engage": the next reliable work signal clears the badge when the user
+#     actually hands the window work (UserPromptSubmit for Claude/Codex, first
+#     PreToolUse for Antigravity), so
 #     glance-clearing (sweep + focus hook + macOS click-to-clear) is suppressed
 #     and the badge survives mere peeks at the output.
 #   - "glance": no prompt-submit signal is wired, so visiting the window must
 #     clear the badge or nothing will.
 # Claude's installer always registers the UserPromptSubmit hook alongside its
-# others. Codex supports UserPromptSubmit too (hooks.json), but only installs
+# others. Antigravity's all-tools PreToolUse hook is its equivalent engagement
+# signal. Codex supports UserPromptSubmit too (hooks.json), but only installs
 # that have re-run `cn on codex` since it was added carry it — so engage-clear
 # is gated on the hook actually being present in hooks.json, never leaving a
 # badge without a clear path (legacy `notify =` users and stale hooks.json
@@ -803,6 +805,9 @@ case "$TOOL_NAME" in
         if codex_prompt_clear_hook_installed; then
             BADGE_CLEAR_MODE="engage"
         fi
+        ;;
+    "antigravity")
+        BADGE_CLEAR_MODE="engage"
         ;;
 esac
 
@@ -1723,15 +1728,15 @@ get_notification_sound_file() {
 # Badge the originating tmux window's name with the event icon so the alert
 # stays visible in the status line. Clearing differs by agent (BADGE_CLEAR_MODE,
 # recorded on the badge itself so the agent-blind sweep honours it):
-#   - Glance-clear agents (agy, legacy codex, gemini): sweep first so badges on
+#   - Glance-clear agents (legacy codex, gemini): sweep first so badges on
 #     windows the user has since visited are restored before a new one lands,
 #     and let badge-set arm the focus hook that clears on the next visit. On
 #     macOS clicking the notification also clears; elsewhere only these paths
 #     do (notify-send has no click hook).
-#   - Engage-clear agents (claude, hooks-based codex): clear on UserPromptSubmit
-#     instead, so no sweep and no focus hook — the badge persists until the user
-#     actually engages the window with new work, and the sweep skips it even
-#     when another agent's activity triggers one.
+#   - Engage-clear agents (claude, hooks-based codex, antigravity): clear on the
+#     next work signal instead, so no sweep and no focus hook — the badge
+#     persists until the user actually engages the window with new work, and
+#     the sweep skips it even when another agent's activity triggers one.
 if badge_glance_clear_enabled; then
     tmux_badge_sweep 2>/dev/null || true
 fi

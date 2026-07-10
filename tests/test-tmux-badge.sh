@@ -901,10 +901,27 @@ CODE_NOTIFY_TMUX_AGENT_NAME=claude tmux_prompt_submit \
 tmux_running_stop || fail "running-stop after claude prompt should succeed"
 pass "settle watch arms for codex only"
 
-# --- a settled codex pane takes the running marker down ---
+# The settle path calls the notifier synchronously after removing the running
+# state. Keep this unit section isolated from desktop delivery; the macOS
+# end-to-end section below exercises the real notifier and badge transition.
+settle_notify_log="$test_dir/settle-notify.log"
+cat > "$fake_bin/settle-notifier-stub" <<EOF
+#!/bin/bash
+running=0
+[[ -f "$state_dir/@2.@code_notify_running" ]] && running=1
+printf '%s|%s|%s|%s|%s|%s|%s\n' \
+    "\$TMUX_PANE" "\$1" "\$2" "\$3" \
+    "\${CODE_NOTIFY_TMUX_IDLE_AGENTS:-}" \
+    "\$(cat "$state_dir/@2.window_name" 2>/dev/null)" "\$running" \
+    >> "$settle_notify_log"
+EOF
+chmod +x "$fake_bin/settle-notifier-stub"
+
+# --- a settled codex pane takes the running marker down and completes ---
 # Tick 1 stores the snapshot; a changed pane resets the countdown; once the
 # pane holds still past the threshold (forced to 0 here), the sweep retires
-# the marker and restores the window name — the /review-without-stop case.
+# marker, restores the window name, and synthesizes the missing completion —
+# the /review-without-stop case.
 printf '%s' "review: analyzing diff" > "$state_dir/%3.pane_content"
 CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit \
     || fail "codex prompt-submit for the settle flow should succeed"
@@ -918,28 +935,24 @@ printf '%s' "review: writing findings" > "$state_dir/%3.pane_content"
 tmux_agent_exit_sweep || fail "second settle tick should succeed"
 [[ -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "a still-painting pane must keep the running marker"
-TMUX_SETTLE_SECONDS=0 tmux_agent_exit_sweep || fail "settling tick should succeed"
+: > "$settle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" \
+    TMUX_SETTLE_SECONDS=0 tmux_agent_exit_sweep \
+    || fail "settling tick should succeed"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "a settled pane should retire the running marker"
 [[ "$(window_name)" == "zsh" ]] \
     || fail "the settle stop should restore the window name (got: $(window_name))"
 [[ ! -f "$state_dir/@2.@code_notify_settle_pane" ]] \
     || fail "the settle stop should disarm the watch"
-# A hook-less turn end hands the window to the post-completion idle watch,
-# carrying the identity recorded at settle-arm time so the eventual nudge
-# can name the agent and project.
-iw="$(cat "$state_dir/@2.@code_notify_idle_watch" 2>/dev/null)"
-{ [[ "$iw" == "%3 "* ]] && [[ "$iw" == *" codex "* ]]; } \
-    || fail "the settle stop should hand off to the idle watch (got: $iw)"
-rm -f "$state_dir/@2.@code_notify_idle_watch" "$state_dir/%3.pane_content"
-pass "settled codex pane retires the running marker"
+[[ "$(cat "$settle_notify_log")" == "%3|stop|codex|"*"|zsh|0" ]] \
+    || fail "settle should invoke stop only after clearing the running rendering (got: $(cat "$settle_notify_log"))"
+rm -f "$state_dir/%3.pane_content"
+pass "settled codex pane retires running state before synthetic completion"
 
-# --- scheduled settle-to-idle handoff honours the idle-agent allowlist ---
-# The handoff arms inside the timer's fresh process, so the allowlist must
-# ride the payload like the thresholds do: a session that excluded codex
-# stays excluded when /review settles in a scheduled tick. Positive control
-# first — the forwarded default must still arm — so a quoting bug that
-# empties the variable (blocking every agent) cannot pass the negative case.
+# --- scheduled settle completion preserves idle configuration ---
+# The synthetic stop runs inside the timer's fresh process and arms its idle
+# watch there, so the originating session's allowlist must ride the payload.
 settle_handoff_round() {
     # $1: env value for TMUX_IDLE_AGENTS ("" = default). Arms a codex settle
     # watch, seeds it as already settled, then runs the scheduled payload
@@ -947,11 +960,14 @@ settle_handoff_round() {
     printf '%s' "review output" > "$state_dir/%3.pane_content"
     rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
     : > "$log_file"
+    : > "$settle_notify_log"
     if [[ -n "$1" ]]; then
-        TMUX_IDLE_AGENTS="$1" CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit \
+        CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" \
+            TMUX_IDLE_AGENTS="$1" CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit \
             || return 1
     else
-        CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit || return 1
+        CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" \
+            CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit || return 1
     fi
     printf '%s' "$(printf '%s\n' "review output" | cksum)" \
         > "$state_dir/@2.@code_notify_settle_fp"
@@ -961,20 +977,20 @@ settle_handoff_round() {
     env -u TMUX_PANE /bin/sh -c "$payload"
 }
 settle_handoff_round "" || fail "default-allowlist handoff round should run cleanly"
-[[ "$(cat "$state_dir/@2.@code_notify_idle_watch" 2>/dev/null)" == *" codex "* ]] \
-    || fail "the scheduled handoff should arm codex under the forwarded default allowlist"
-rm -f "$state_dir/@2.@code_notify_idle_watch" "$state_dir/%3.pane_content" \
+[[ "$(cat "$settle_notify_log")" == *"|codex|antigravity|zsh|0" ]] \
+    || fail "scheduled completion should inherit the default idle allowlist (got: $(cat "$settle_notify_log"))"
+rm -f "$state_dir/%3.pane_content" \
     "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
 settle_handoff_round "antigravity" || fail "override-allowlist handoff round should run cleanly"
 [[ "$payload" == *"CODE_NOTIFY_TMUX_IDLE_AGENTS='antigravity'"* ]] \
     || fail "the scheduled payload should carry the session's allowlist"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "the scheduled settle stop should still retire the running marker"
-[[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
-    || fail "an excluded agent must stay excluded in the timer process"
+[[ "$(cat "$settle_notify_log")" == *"|antigravity|zsh|0" ]] \
+    || fail "synthetic completion should receive the overridden idle allowlist (got: $(cat "$settle_notify_log"))"
 rm -f "$state_dir/%3.pane_content" "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
 printf '%s' "zsh" > "$state_dir/@2.window_name"
-pass "scheduled handoff honours the forwarded idle-agent allowlist"
+pass "scheduled synthetic completion preserves idle configuration"
 
 # --- idle watch: arm gating (agent list, alert types, pane capture) ---
 # Codex/Antigravity never send an idle reminder after a completion, so their
@@ -1357,6 +1373,29 @@ tmux_agent_exit_sweep || fail "spinner-mode agent-exit sweep should succeed"
     || fail "agent exit should disarm the spinner immediately"
 pass "agent exit clears the spinner promptly"
 
+# --- spinner mode: a settled review removes the spinner before completion ---
+printf '%s' "review complete in spinner mode" > "$state_dir/%3.pane_content"
+CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit \
+    || fail "spinner-mode codex review start should succeed"
+[[ -f "$state_dir/.@code_notify_spinner_snip" ]] \
+    || fail "spinner-mode review should arm the spinner"
+spinner_review_fp="$(printf '%s\n' "review complete in spinner mode" | cksum)"
+printf '%s' "$spinner_review_fp" > "$state_dir/@2.@code_notify_settle_fp"
+printf '%s' "1000" > "$state_dir/@2.@code_notify_settle_since"
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+: > "$settle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" \
+    TMUX_SETTLE_SECONDS=0 tmux_agent_exit_sweep \
+    || fail "spinner-mode settled review sweep should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "settled spinner-mode review should drop the running epoch"
+[[ ! -f "$state_dir/.@code_notify_spinner_snip" ]] \
+    || fail "settled spinner-mode review should disarm the spinner"
+[[ "$(cat "$settle_notify_log")" == "%3|stop|codex|"*"|zsh|0" ]] \
+    || fail "spinner should be visually inactive before synthetic completion (got: $(cat "$settle_notify_log"))"
+rm -f "$state_dir/%3.pane_content"
+pass "settled review removes the spinner before synthetic completion"
+
 # --- spinner mode: env var override forces it off ---
 : > "$log_file"
 CODE_NOTIFY_TMUX_SPINNER=false tmux_running_start || fail "env-forced static running-start should succeed"
@@ -1465,6 +1504,17 @@ CODE_NOTIFY_TMUX_RUNNING=false tmux_prompt_submit || fail "disabled prompt-submi
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "disabled prompt-submit must not store an epoch"
 pass "disabled prompt-submit still engage-clears"
+
+# Antigravity uses its first PreToolUse as the engage signal. That reaches the
+# generic running-start path rather than tmux_prompt_submit, and must still
+# clear a waiting badge when the running indicator itself is disabled.
+tmux_badge_set "🟢" engage || fail "engage badge for the disabled running-start test should succeed"
+CODE_NOTIFY_TMUX_RUNNING=false tmux_running_start || fail "disabled running-start should succeed"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "running-start must engage-clear with the indicator disabled (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "disabled running-start must not store an epoch"
+pass "disabled running-start still engage-clears"
 
 # --- clear command structure ---
 cmd=$(tmux_badge_build_clear_command) || fail "clear command should build inside tmux"
@@ -1723,8 +1773,57 @@ EOF
         || fail "codex UserPromptSubmit should swap the event badge for the running icon (got: $(window_name))"
     [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "running" ]] \
         || fail "codex UserPromptSubmit should leave a running-mode marker"
-    rm -f "$HOME/.codex/hooks.json"
     pass "notifier end-to-end: codex UserPromptSubmit swaps badge for running marker"
+
+    # Codex /review emits no native stop. Once its pane settles, the sweep must
+    # remove the running rendering first, synthesize the normal completion
+    # (🟢 + toast), and arm the same idle watch as a native stop. If the
+    # completed review remains untouched, that watch later replaces 🟢 with 🥱.
+    printf '%s' "codex review findings" > "$state_dir/%3.pane_content"
+    review_fp="$(printf '%s\n' "codex review findings" | cksum)"
+    printf '%s' "$review_fp" > "$state_dir/@2.@code_notify_settle_fp"
+    printf '%s' "1000" > "$state_dir/@2.@code_notify_settle_since"
+    rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled" \
+        "$HOME/.claude/notifications/state"/* 2>/dev/null || true
+    : > "$tn_log"
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        CODE_NOTIFY_SKIP_CODEX_DESKTOP_CHECK=1 CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
+        CODE_NOTIFY_NOTIFIER_PATH="$NOTIFIER" TMUX_SETTLE_SECONDS=0 \
+        tmux_agent_exit_sweep \
+        || fail "settled codex review should synthesize completion cleanly"
+    [[ "$(window_name)" == "🟢 zsh" ]] \
+        || fail "settled review should replace running with the completion badge (got: $(window_name))"
+    [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+        || fail "settled review completion should remove the running epoch"
+    iw="$(cat "$state_dir/@2.@code_notify_idle_watch" 2>/dev/null)"
+    [[ "$iw" == "%3 "*" codex "* ]] \
+        || fail "settled review completion should arm the codex idle watch (got: $iw)"
+    grep -q "Task Complete" "$tn_log" \
+        || fail "settled review should deliver a task-complete notification"
+
+    review_idle_fp="$(printf '%s\n' "codex review findings" | cksum)"
+    printf '%s' "%3 1000 $review_idle_fp stable codex code-notify" \
+        > "$state_dir/@2.@code_notify_idle_watch"
+    rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+    : > "$tn_log"
+    # Even a still-focused window is demonstrably untouched: the idle watch
+    # held through the full threshold, so 🥱 must replace 🟢 rather than taking
+    # the generic waiting-event visible-window skip.
+    export FAKE_TMUX_BADGE_INFO='@2|on|1|zsh'
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        CODE_NOTIFY_NOTIFIER_PATH="$NOTIFIER" tmux_agent_exit_sweep \
+        || fail "settled review idle sweep should run cleanly"
+    for _ in $(seq 1 100); do [[ "$(window_name)" == "🥱 zsh" ]] && break; sleep 0.1; done
+    [[ "$(window_name)" == "🥱 zsh" ]] \
+        || fail "review idle reminder should replace the completion badge (got: $(window_name))"
+    for _ in $(seq 1 100); do grep -q "Input Required" "$tn_log" 2>/dev/null && break; sleep 0.1; done
+    grep -q "Input Required" "$tn_log" \
+        || fail "untouched review should deliver the later idle notification"
+    export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+    rm -f "$HOME/.codex/hooks.json" "$state_dir"/* "$state_dir"/.@code_notify_* \
+        "$HOME/.claude/notifications/state"/* 2>/dev/null || true
+    printf '%s' "zsh" > "$state_dir/@2.window_name"
+    pass "notifier end-to-end: settled review completes, then idles"
 
     # A codex stop arms the post-completion idle watch (codex sends nothing
     # further once a turn ends), and a pane that then holds still past the

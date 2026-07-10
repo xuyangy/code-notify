@@ -249,9 +249,9 @@ tmux_badge_name_is_badged() {
 # @code_notify_clear_mode so the sweep, which runs agent-blind, can honour it):
 #   - "glance" (default): cleared by the sweep/focus hook the moment the user
 #     visits the window
-#   - "engage": only the owning agent's prompt-submit hook
-#     (tmux_badge_clear_current) clears it; the sweep skips it and no focus
-#     hook is armed for it, so it survives glances — even glances triggered by
+#   - "engage": only an owning-agent work signal clears it (prompt-submit for
+#     Claude/Codex, first PreToolUse for Antigravity); the sweep skips it and no
+#     focus hook is armed, so it survives glances — even glances triggered by
 #     another agent's badge activity on the same server
 #   - "running": the agent-is-working marker (see tmux_running_start). Set
 #     even on the visible window — the user just submitted a prompt there and
@@ -386,7 +386,7 @@ tmux_badge_clear() {
 # should still be cleaned up.
 #
 # Engage-clear badges (@code_notify_clear_mode=engage) are skipped entirely:
-# they clear on the owning agent's prompt-submit, and sweeping them here would
+# they clear on the owning agent's next work signal, and sweeping them here would
 # reintroduce glance-clearing through another agent's badge activity. They are
 # also not counted toward keeping the focus hook alive — the hook only serves
 # glance badges. Badges with no saved mode (written by older versions) are
@@ -399,10 +399,10 @@ tmux_badge_sweep() {
     local window_id visible mode orig remaining=0
     while IFS='|' read -r window_id visible mode orig; do
         [[ -n "$orig" ]] || continue
-        # Engage badges clear on prompt-submit, running markers on the
-        # terminating event (or staleness, handled by the running sweep below);
-        # neither may clear on a mere glance, and neither counts toward keeping
-        # the focus hook alive — it only serves glance badges.
+        # Engage badges clear on the owning agent's next work signal; running
+        # markers clear on the terminating event (or staleness, handled by the
+        # running sweep below). Neither may clear on a mere glance, and neither
+        # counts toward keeping the focus hook alive — it only serves glance badges.
         if [[ "$mode" == "engage" ]] || [[ "$mode" == "running" ]]; then continue; fi
         if [[ "$visible" == "1" ]]; then
             tmux_badge_clear "$window_id"   # clear always drops the orig-name option
@@ -582,9 +582,10 @@ tmux_running_settle_arm() {
     local pane_re='^%[0-9]+$'
     [[ "$pane_id" =~ $pane_re ]] || return 0
     tmux set-option -w -t "$window_id" @code_notify_settle_pane "$pane_id" 2>/dev/null
-    # The settle stop hands a hook-less turn end to the idle watch, which
-    # must invoke the notifier with an agent and project the sweep process
-    # cannot reconstruct — record them now, while the hook context has them.
+    # The settle stop synthesizes the missing completion through the notifier,
+    # which also arms the post-completion idle watch. Both paths need an agent
+    # and project the sweep process cannot reconstruct — record them now, while
+    # the prompt hook still has that context.
     # Project is best-effort: hooks run with the agent's working directory
     # as cwd. Agent first, project last, so embedded spaces survive the
     # positional parse.
@@ -667,20 +668,35 @@ tmux_idle_watch_disarm() {
 
 # Deliver the synthetic idle reminder through the real notifier so it
 # inherits the whole idle_prompt pipeline — the 🥱 title and badge, sounds,
-# per-subtype rate limiting, snooze, the kill switch, and the focused-window
-# badge skip. TMUX_PANE is set to the watched pane so the badge and
-# click-to-focus target the right window; detached because a persistent
-# alert must not block the sweep tick. CODE_NOTIFY_NOTIFIER_PATH exists for
-# tests to substitute a stub.
+# per-subtype rate limiting, snooze, and the kill switch. Unlike a native
+# waiting event, this watch has already proved the pane remained untouched for
+# the full idle window, so force the badge to apply even if that tmux window is
+# still marked visible: 🥱 must replace the earlier 🟢. TMUX_PANE targets the
+# watched pane; detached delivery keeps a persistent alert from blocking the
+# sweep tick. CODE_NOTIFY_NOTIFIER_PATH exists for tests to substitute a stub.
 tmux_idle_watch_notify() {
     local pane_id="$1" agent="$2" project="$3" notifier
     tmux_idle_prompt_enabled || return 0
     notifier="${CODE_NOTIFY_NOTIFIER_PATH:-${TMUX_BADGE_LIB_PATH%/*}/../core/notifier.sh}"
     [[ -f "$notifier" ]] || return 0
     ( printf '%s' '{"type":"idle_prompt"}' \
-        | TMUX_PANE="$pane_id" bash "$notifier" notification "$agent" "$project" ) >/dev/null 2>&1 &
+        | CODE_NOTIFY_TMUX_BADGE_VISIBLE=true TMUX_PANE="$pane_id" \
+          bash "$notifier" notification "$agent" "$project" ) >/dev/null 2>&1 &
     disown 2>/dev/null || true
     return 0
+}
+
+# Deliver a completion for a turn that ended without its native stop hook
+# (currently Codex /review). The sweep removes the running state first, then
+# calls this synchronously so the normal stop pipeline can apply the 🟢 badge,
+# send the completion toast, and arm the later idle reminder before the sweep
+# decides whether another tick is needed. TMUX_PANE restores the originating
+# context because a tmux run-shell timer has no pane of its own.
+tmux_settle_watch_notify() {
+    local pane_id="$1" agent="$2" project="$3" notifier
+    notifier="${CODE_NOTIFY_NOTIFIER_PATH:-${TMUX_BADGE_LIB_PATH%/*}/../core/notifier.sh}"
+    [[ -f "$notifier" ]] || return 1
+    TMUX_PANE="$pane_id" bash "$notifier" stop "$agent" "$project" >/dev/null 2>&1
 }
 
 # One short tmux-server timer checks tracked agent PIDs. Repeating one-shots
@@ -832,14 +848,16 @@ tmux_agent_exit_sweep() {
         if [[ "$mode" == "running" ]]; then
             tmux_badge_clear "$window_id"
         fi
-        # A hook-less turn end still deserves the post-completion nudge, so
-        # hand the window to the idle watch with the identity recorded at
-        # settle-arm time. No completion toast is synthesized — "went quiet"
-        # is too weak a signal to announce as success — but "idle and
-        # unattended" is exactly what the nudge reports.
+        # Run the missing terminal event through the real notifier after the
+        # running rendering is gone. That applies the normal completion badge
+        # and toast, then arms the same idle watch as a native stop. If the
+        # notifier is unavailable, retain the old idle-only fallback so a
+        # hook-less review does not remain silently unattended forever.
         if [[ -n "$settle_ctx" ]]; then
             read -r iagent iproject <<< "$settle_ctx"
-            tmux_idle_watch_arm "$iagent" "$iproject" "$window_id" "$settle_pane"
+            if ! tmux_settle_watch_notify "$settle_pane" "$iagent" "$iproject"; then
+                tmux_idle_watch_arm "$iagent" "$iproject" "$window_id" "$settle_pane"
+            fi
             live=1
         fi
     done < <(tmux list-windows -a -F \
@@ -1031,7 +1049,13 @@ tmux_spinner_disarm_if_idle() {
 # dispatch; the notifier's prompt intercept uses tmux_prompt_submit below,
 # which folds the engage-clear and this marker into one target capture.
 tmux_running_start() {
-    tmux_running_enabled || return 0
+    if ! tmux_running_enabled; then
+        # Starting or resuming work is still an engage-clear signal when the
+        # running indicator is disabled. This is also Antigravity's clear path:
+        # its first PreToolUse replaces the prompt-submit event it does not emit.
+        tmux_badge_clear_current
+        return 0
+    fi
     tmux_focus_available || return 0
     local target session_id window_id pane_id
     target=$(tmux_focus_capture_target) || return 0

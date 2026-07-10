@@ -93,6 +93,83 @@ chmod +x "$fake_bin"/*
 
 fake_path="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
+fake_tmux_dir="$test_dir/tmux"
+mkdir -p "$fake_tmux_dir"
+cat > "$fake_bin/tmux" <<'EOF'
+#!/bin/bash
+echo "$*" >> "$FAKE_TMUX_LOG"
+args=("$@")
+if [[ "${args[0]}" == "-S" ]]; then
+    args=("${args[@]:2}")
+fi
+cmd="${args[0]}"
+args=("${args[@]:1}")
+target=""
+fmt=""
+unset_opt=0
+rest=()
+while (( ${#args[@]} )); do
+    a="${args[0]}"
+    case "$a" in
+        -t) target="${args[1]}"; args=("${args[@]:2}") ;;
+        -F) fmt="${args[1]}"; args=("${args[@]:2}") ;;
+        -*) [[ "$a" == -*u* ]] && unset_opt=1; args=("${args[@]:1}") ;;
+        *) rest+=("$a"); args=("${args[@]:1}") ;;
+    esac
+done
+case "$cmd" in
+    display-message)
+        case "${rest[0]}" in
+            '#{session_id} #{window_id} #{pane_id}') printf '%s\n' '$1 @2 %3' ;;
+            *'#{window_id}|#{automatic-rename}|#{&&:#{window_active},#{session_attached}}|#{window_name}'*)
+                printf '%s\n' "@2|on|${FAKE_TMUX_VISIBLE:-1}|$(cat "$FAKE_TMUX_STATE/@2.window_name")"
+                ;;
+            '#{window_name}') cat "$FAKE_TMUX_STATE/${target}.window_name" 2>/dev/null; echo ;;
+            *) printf '%s\n' "$FAKE_TMUX_TARGET" ;;
+        esac
+        ;;
+    list-windows)
+        if [[ "$fmt" == *window_active* ]]; then
+            mode=$(cat "$FAKE_TMUX_STATE/@2.@code_notify_clear_mode" 2>/dev/null)
+            orig=$(cat "$FAKE_TMUX_STATE/@2.@code_notify_orig_name" 2>/dev/null)
+            printf '%s\n' "@2|${FAKE_TMUX_VISIBLE:-1}|$mode|$orig"
+        elif [[ -f "$FAKE_TMUX_STATE/@2.@code_notify_running" ]]; then
+            since=$(cat "$FAKE_TMUX_STATE/@2.@code_notify_running")
+            mode=$(cat "$FAKE_TMUX_STATE/@2.@code_notify_clear_mode" 2>/dev/null)
+            printf '%s\n' "@2|$since|$mode"
+        fi
+        ;;
+    show-options)
+        cat "$FAKE_TMUX_STATE/${target}.${rest[0]}" 2>/dev/null
+        ;;
+    set-option)
+        if (( unset_opt )); then
+            rm -f "$FAKE_TMUX_STATE/${target}.${rest[0]}"
+        else
+            printf '%s' "${rest[1]}" > "$FAKE_TMUX_STATE/${target}.${rest[0]}"
+        fi
+        ;;
+    rename-window)
+        printf '%s' "${rest[0]}" > "$FAKE_TMUX_STATE/${target}.window_name"
+        ;;
+    set-hook)
+        printf '%s\n' "$*" >> "$FAKE_TMUX_HOOK_LOG"
+        ;;
+esac
+exit 0
+EOF
+chmod +x "$fake_bin/tmux"
+export FAKE_TMUX_LOG="$fake_tmux_dir/calls.log"
+export FAKE_TMUX_HOOK_LOG="$fake_tmux_dir/hooks.log"
+export FAKE_TMUX_STATE="$fake_tmux_dir/state"
+mkdir -p "$FAKE_TMUX_STATE"
+: > "$FAKE_TMUX_HOOK_LOG"
+export TMUX="$test_dir/sock,12345,0"
+export TMUX_PANE="%3"
+export FAKE_TMUX_TARGET='$1 @2 %3'
+export FAKE_TMUX_VISIBLE=1
+printf '%s' "zsh" > "$FAKE_TMUX_STATE/@2.window_name"
+
 ws() { printf '"workspacePaths":["/tmp/work/%s"]' "$1"; }
 
 # Match the user's Antigravity permission configuration: git commands are
@@ -192,6 +269,31 @@ grep -q "Task Complete - projBusy" "$notification_log" \
 # ...and it must stay silent (no approval banner for non-run_command tools).
 grep -q "projBusy" "$notification_log" \
     && fail "non-run_command PreToolUse emitted a notification (should be silent)"
+
+# 6c) Antigravity uses engage-clear badge state. A real focus sweep must leave
+#     both completion and idle badges in place.
+before_hook_lines="$(wc -l < "$FAKE_TMUX_HOOK_LOG")"
+run_agy_notifier "$fake_path" "Stop" \
+    "{\"conversationId\":\"c-focus\",\"error\":\"\",$(ws projFocus)}"
+[[ "$(cat "$FAKE_TMUX_STATE/@2.@code_notify_clear_mode")" == "engage" ]] \
+    || fail "Antigravity completion badge should use engage-clear mode"
+after_hook_lines="$(wc -l < "$FAKE_TMUX_HOOK_LOG")"
+[[ "$after_hook_lines" -eq "$before_hook_lines" ]] \
+    || fail "Antigravity completion badge should not arm the focus-clear hook"
+bash "$SCRIPT_DIR/../lib/code-notify/utils/tmux.sh" badge-sweep
+[[ "$(cat "$FAKE_TMUX_STATE/@2.window_name")" == "🟢 zsh" ]] \
+    || fail "Antigravity completion badge should remain after a focus sweep"
+
+export FAKE_TMUX_VISIBLE=0
+printf '%s' '{"type":"idle_prompt"}' \
+    | PATH="$fake_path" CODE_NOTIFY_TAIL_SYNC=1 \
+      bash "$NOTIFIER" notification antigravity projFocus
+[[ "$(cat "$FAKE_TMUX_STATE/@2.window_name")" == "🥱 zsh" ]] \
+    || fail "Antigravity idle prompt should replace the completion badge"
+export FAKE_TMUX_VISIBLE=1
+bash "$SCRIPT_DIR/../lib/code-notify/utils/tmux.sh" badge-sweep
+[[ "$(cat "$FAKE_TMUX_STATE/@2.window_name")" == "🥱 zsh" ]] \
+    || fail "Antigravity idle prompt badge should remain after a focus sweep"
 
 # 7) Regression (P1): error alerts must honour the kill switch (cn off). With the
 #    disabled marker present, a PostToolUse error must NOT be delivered.

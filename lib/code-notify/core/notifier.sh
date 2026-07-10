@@ -27,6 +27,9 @@ NOTIFIER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # would be mistaken for a Claude/Codex spinner-resume hook.
 if [[ "$RAW_ARG1" != agy:* ]] && [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "UserPromptSubmit" ]]; then
     source "$NOTIFIER_DIR/../utils/tmux.sh"
+    # Let tmux.sh associate the marker with the actual agent process, so an
+    # explicit tool exit can clear it even though Codex has no SessionEnd hook.
+    CODE_NOTIFY_TMUX_AGENT_NAME="${RAW_ARG2:-}"
     # One capture serves both halves: the event badge clears (engage-clear)
     # and the running marker — the agent is now working — replaces it.
     tmux_prompt_submit 2>/dev/null || true
@@ -45,6 +48,7 @@ if [[ "$RAW_ARG1" != agy:* ]] && {
     [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "ResumeAfterInput" ]]
 }; then
     source "$NOTIFIER_DIR/../utils/tmux.sh"
+    CODE_NOTIFY_TMUX_AGENT_NAME="${RAW_ARG2:-}"
     tmux_running_resume_after_input 2>/dev/null || true
     exit 0
 fi
@@ -624,6 +628,7 @@ if [[ "$RAW_ARG1" == "codex" ]]; then
 elif [[ "$RAW_ARG1" == agy:* ]]; then
     # Antigravity CLI: "agy:<Event>" + payload on stdin.
     TOOL_NAME="antigravity"
+    CODE_NOTIFY_TMUX_AGENT_NAME="$TOOL_NAME"
     AGY_EVENT="${RAW_ARG1#agy:}"
     if [[ ! -t 0 ]]; then
         HOOK_DATA=$(cat 2>/dev/null || true)
@@ -708,6 +713,12 @@ else
         HOOK_DATA=$(cat 2>/dev/null || true)
     fi
 fi
+
+# tmux helpers use this only to find the agent ancestor of a hook shell. It is
+# deliberately set after TOOL_NAME has been resolved rather than inferred from
+# a pane command, which can temporarily be a child tool such as git or bash.
+# shellcheck disable=SC2034  # read by the sourced tmux.sh, not this file
+CODE_NOTIFY_TMUX_AGENT_NAME="$TOOL_NAME"
 
 # Antigravity PostToolUse with no error: arm the debounced "task complete" and
 # return immediately (no banner for intermediate steps).

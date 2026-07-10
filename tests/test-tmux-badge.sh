@@ -81,6 +81,19 @@ case "$cmd" in
         # options so epoch round-trips are exercised for real.
         if [[ "$fmt" == *window_active* ]]; then
             printf '%s\n' "$FAKE_TMUX_WINDOWS"
+        elif [[ "$fmt" == *code_notify_agent_pid* ]]; then
+            # Real tmux emits EVERY window, with an empty field when the
+            # option is unset — the sweep must cope with untracked windows,
+            # so list every window any state file mentions, not just tracked.
+            seen=" "
+            for f in "$FAKE_TMUX_STATE"/@*.*; do
+                [[ -e "$f" ]] || continue
+                w="${f##*/}"; w="${w%%.*}"
+                case "$seen" in *" $w "*) continue ;; esac
+                seen="$seen$w "
+                pid=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_agent_pid" 2>/dev/null)
+                printf '%s|%s\n' "$w" "$pid"
+            done
         else
             for f in "$FAKE_TMUX_STATE"/*.@code_notify_running; do
                 [[ -e "$f" ]] || continue
@@ -124,6 +137,29 @@ export HOME="$test_dir/home"
 mkdir -p "$HOME"
 
 source "$ROOT_DIR/lib/code-notify/utils/tmux.sh"
+
+# A hook launcher commonly has `codex` in its `sh -c` command line. The exit
+# tracker must skip that short-lived wrapper and retain the actual agent parent.
+resolved_agent_pid=$( (
+    ps() {
+        # ppid+comm and command are queried separately; answer each shape.
+        if [[ "$*" == *command=* ]]; then
+            case "${*: -1}" in
+                100) printf '%s\n' '/bin/sh -c notifier.sh stop codex' ;;
+                200) printf '%s\n' '/usr/local/bin/codex --resume' ;;
+            esac
+        else
+            case "${*: -1}" in
+                100) printf '%s\n' '  200 /bin/sh' ;;
+                200) printf '%s\n' '    1 /usr/local/bin/codex' ;;
+            esac
+        fi
+    }
+    tmux_agent_exit_resolve_pid codex 100
+) )
+[[ "$resolved_agent_pid" == "200" ]] \
+    || fail "agent exit tracker should skip a shell wrapper (got: $resolved_agent_pid)"
+pass "agent exit tracker resolves the real agent process"
 
 export TMUX="$test_dir/sock,12345,0"
 export TMUX_PANE="%3"
@@ -550,6 +586,75 @@ tmux_running_stop || fail "running-stop should succeed"
 [[ ! -f "$state_dir/@2.@code_notify_clear_mode" ]] || fail "running-stop should drop the badge state"
 pass "running-stop clears marker and epoch"
 
+# --- exiting an agent clears its running marker instead of waiting for TTL ---
+# Hooks record the owning agent PID in real use. An impossible PID simulates a
+# user quitting Codex/Claude (or closing the terminal) without a Stop hook.
+tmux_running_start || fail "running-start before agent-exit cleanup should succeed"
+printf '%s' "999999" > "$state_dir/@2.@code_notify_agent_pid"
+tmux_agent_exit_sweep || fail "agent-exit sweep should succeed"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "agent exit should restore the static running badge (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "agent exit should drop the running epoch"
+[[ ! -f "$state_dir/@2.@code_notify_agent_pid" ]] \
+    || fail "agent exit should drop the tracked process"
+pass "agent exit clears the static running marker promptly"
+
+# --- an exited agent also clears a pending completion/input badge ---
+# Back to a hidden window: an engage badge skips a visible one (visible_action
+# defaults to skip), which would make every badge_set below a silent no-op.
+export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+tmux_badge_set "🟢" engage || fail "badge before agent-exit cleanup should succeed"
+printf '%s' "999999" > "$state_dir/@2.@code_notify_agent_pid"
+tmux_agent_exit_sweep || fail "badge agent-exit sweep should succeed"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "agent exit should restore an event badge (got: $(window_name))"
+[[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] \
+    || fail "agent exit should drop pending badge state"
+pass "agent exit clears a pending event badge promptly"
+
+# --- agent exit cleanup is scoped to the owning window ---
+# A tmux server can have several Codex/Claude/agy panes. A dead process in one
+# must not clear an unrelated live agent's marker or badge.
+tmux_badge_set "🟢" engage || fail "dead-window badge setup should succeed"
+printf '%s' "999999" > "$state_dir/@2.@code_notify_agent_pid"
+printf '%s' "code" > "$state_dir/@5.@code_notify_orig_name"
+printf '%s' "off" > "$state_dir/@5.@code_notify_autorename"
+printf '%s' "🌕 code" > "$state_dir/@5.@code_notify_badged_name"
+printf '%s' "running" > "$state_dir/@5.@code_notify_clear_mode"
+printf '%s' "🌕 code" > "$state_dir/@5.window_name"
+printf '%s' "$(date +%s)" > "$state_dir/@5.@code_notify_running"
+printf '%s' "$$" > "$state_dir/@5.@code_notify_agent_pid"
+tmux_agent_exit_sweep || fail "multi-window agent-exit sweep should succeed"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "dead agent cleanup should restore only its own window (got: $(window_name))"
+[[ "$(cat "$state_dir/@5.window_name")" == "🌕 code" ]] \
+    || fail "live agent window must retain its running marker"
+[[ -f "$state_dir/@5.@code_notify_agent_pid" ]] \
+    || fail "live agent window must retain its tracked process"
+rm -f "$state_dir/@5.@code_notify_orig_name" "$state_dir/@5.@code_notify_autorename" \
+    "$state_dir/@5.@code_notify_badged_name" "$state_dir/@5.@code_notify_clear_mode" \
+    "$state_dir/@5.@code_notify_running" "$state_dir/@5.@code_notify_agent_pid" "$state_dir/@5.window_name"
+pass "agent exit cleanup is scoped to the owning window"
+
+# --- the sweep leaves untracked windows alone ---
+# Real tmux lists every window, with an empty pid field when the option is
+# unset — e.g. an agy StopFinal badge, whose disowned watcher can never
+# resolve an agent pid. Those badges live by glance/engage/TTL rules and must
+# survive the exit sweep, even while a tracked agent keeps it re-arming.
+tmux_badge_set "🟢" engage || fail "untracked badge setup should succeed"
+[[ "$(window_name)" == "🟢 zsh" ]] || fail "precondition: window should carry the untracked badge"
+rm -f "$state_dir/@2.@code_notify_agent_pid"                # never tracked
+printf '%s' "$$" > "$state_dir/@5.@code_notify_agent_pid"   # live tracked window elsewhere
+tmux_agent_exit_sweep || fail "untracked-window sweep should succeed"
+[[ "$(window_name)" == "🟢 zsh" ]] \
+    || fail "sweep must not clear an untracked window's badge (got: $(window_name))"
+[[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "engage" ]] \
+    || fail "sweep must not drop an untracked window's badge state"
+rm -f "$state_dir/@5.@code_notify_agent_pid"
+tmux_badge_clear "@2"
+pass "agent-exit sweep leaves untracked windows alone"
+
 # --- an input pause resumes only on a later lifecycle signal ---
 tmux_running_start || fail "running-start before input pause should succeed"
 tmux_running_pause_for_input || fail "input pause should succeed"
@@ -772,6 +877,16 @@ tmux_running_stop || fail "spinner-mode running-stop should succeed"
 [[ "$(cat "$state_dir/.status-interval")" == "10" ]] || fail "last running-stop should restore status-interval"
 export FAKE_TMUX_WINDOWS=""
 pass "spinner-mode running-stop disarms when idle"
+
+# --- spinner mode: an exited agent disarms without waiting for TTL ---
+tmux_running_start || fail "spinner-mode running-start before agent exit should succeed"
+printf '%s' "999999" > "$state_dir/@2.@code_notify_agent_pid"
+tmux_agent_exit_sweep || fail "spinner-mode agent-exit sweep should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "agent exit should drop the spinner running epoch"
+[[ ! -f "$state_dir/.@code_notify_spinner_snip" ]] \
+    || fail "agent exit should disarm the spinner immediately"
+pass "agent exit clears the spinner promptly"
 
 # --- spinner mode: env var override forces it off ---
 : > "$log_file"

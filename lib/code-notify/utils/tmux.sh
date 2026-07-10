@@ -269,6 +269,7 @@ tmux_badge_apply() {
     tmux rename-window -t "$window_id" "$icon $orig_name" 2>/dev/null || return 1
     tmux set-option -w -t "$window_id" @code_notify_badged_name "$icon $orig_name" 2>/dev/null
     tmux set-option -w -t "$window_id" @code_notify_clear_mode "$clear_mode" 2>/dev/null
+    tmux_agent_exit_track "$window_id"
     # A glance badge now exists, so arm the focus hook that clears it on the
     # next visit. Cheap and idempotent, so setting it per badge is fine. Engage
     # and running badges don't arm it — engage clears on prompt-submit, running
@@ -355,6 +356,7 @@ tmux_badge_clear() {
     tmux set-option -wu -t "$window_id" @code_notify_autorename 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_badged_name 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_clear_mode 2>/dev/null
+    tmux_agent_exit_untrack "$window_id"
 }
 
 # Clear badges the user has implicitly acknowledged: any badged window that is
@@ -451,9 +453,123 @@ tmux_badge_clear_current() {
 TMUX_RUNNING_TTL="${CODE_NOTIFY_TMUX_RUNNING_TTL:-14400}"
 TMUX_RUNNING_ICON="${CODE_NOTIFY_TMUX_RUNNING_ICON:-🌕}"
 TMUX_SPINNER_ENABLED_FILE="$HOME/.claude/notifications/tmux-spinner-enabled"
+# Seconds between exit checks while an agent owns a running marker or event
+# badge. Set to 0 to rely on the TTL safety net only.
+TMUX_AGENT_EXIT_POLL_SECONDS="${CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS:-5}"
 
 tmux_running_enabled() {
     [[ "${CODE_NOTIFY_TMUX_RUNNING:-}" != "false" ]] && tmux_badge_enabled
+}
+
+# Hooks are normally launched through a short-lived shell, so $PPID is not
+# necessarily the agent itself. Walk its ancestors and retain the process that
+# actually owns the configured agent command. Once that process exits, the
+# tmux marker is no longer meaningful even if the agent did not emit Stop
+# (for example /exit, Ctrl-C, or a terminal close).
+tmux_agent_exit_resolve_pid() {
+    local agent="$1" pid="$2" info parent executable command hops=0
+    [[ "$agent" =~ ^(claude|codex|gemini|antigravity|agy)$ ]] || return 1
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    while [[ "$pid" =~ ^[0-9]+$ ]] && (( hops < 12 )); do
+        # ppid+comm come from one call (a space-embedding comm — an app
+        # bundle path — would shift a combined three-field read); command
+        # gets its own call so its embedded spaces cannot collide either.
+        info=$(ps -o ppid= -o comm= -p "$pid" 2>/dev/null) || return 1
+        read -r parent executable <<< "$info"
+        executable="${executable%% *}"
+        command=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
+        # A hook command is commonly run as `sh -c ... codex`; its command
+        # line mentions the agent even though that shell vanishes immediately.
+        # Never track an interpreter wrapper — keep walking to the real agent.
+        case "${executable##*/}" in
+            sh|bash|zsh|dash|fish) command="" ;;
+        esac
+        case "$agent" in
+            claude) [[ "$command" == *claude* || "$command" == *Claude* ]] && { printf '%s' "$pid"; return 0; } ;;
+            codex) [[ "$command" == *codex* || "$command" == *Codex* ]] && { printf '%s' "$pid"; return 0; } ;;
+            gemini) [[ "$command" == *gemini* || "$command" == *Gemini* ]] && { printf '%s' "$pid"; return 0; } ;;
+            antigravity|agy) [[ "$command" == *antigravity* || "$command" == *Antigravity* || "$command" == *agy* ]] && { printf '%s' "$pid"; return 0; } ;;
+        esac
+        [[ "$parent" =~ ^[0-9]+$ ]] && [[ "$parent" != "$pid" ]] || return 1
+        pid="$parent"
+        hops=$((hops + 1))
+    done
+    return 1
+}
+
+tmux_agent_exit_untrack() {
+    local window_id="$1"
+    tmux set-option -wu -t "$window_id" @code_notify_agent_pid 2>/dev/null
+}
+
+# Record the owning agent's PID for the current window. CODE_NOTIFY_TMUX_AGENT_NAME
+# is set by notifier.sh; direct tmux utility callers intentionally do not start
+# a monitor because they have no reliable agent process to associate with it.
+tmux_agent_exit_track() {
+    local window_id="$1" pid
+    [[ "${TMUX_AGENT_EXIT_POLL_SECONDS:-0}" =~ ^[0-9]+$ ]] || return 0
+    (( TMUX_AGENT_EXIT_POLL_SECONDS > 0 )) || return 0
+    pid=$(tmux_agent_exit_resolve_pid "${CODE_NOTIFY_TMUX_AGENT_NAME:-}" "${PPID:-}") || return 0
+    tmux set-option -w -t "$window_id" @code_notify_agent_pid "$pid" 2>/dev/null || return 0
+    tmux_agent_exit_schedule_sweep
+}
+
+# One short tmux-server timer checks tracked agent PIDs. Repeating one-shots
+# avoid a resident daemon and stop automatically when the last marker clears.
+tmux_agent_exit_schedule_sweep() {
+    [[ "${TMUX_AGENT_EXIT_POLL_SECONDS:-0}" =~ ^[0-9]+$ ]] || return 0
+    (( TMUX_AGENT_EXIT_POLL_SECONDS > 0 )) || return 0
+    [[ -n "$TMUX_BADGE_LIB_PATH" ]] && [[ -f "$TMUX_BADGE_LIB_PATH" ]] || return 0
+    local pending tmux_bin socket_path q_lib q_tmux q_socket q_env q_poll inner
+    pending=$(tmux show-options -gqv @code_notify_agent_exit_sweep_scheduled 2>/dev/null)
+    [[ -z "$pending" ]] || return 0
+    tmux_bin=$(command -v tmux) || return 0
+    socket_path="${TMUX%%,*}"
+    [[ -n "$socket_path" ]] || return 0
+    q_lib=$(tmux_focus_shell_quote "$TMUX_BADGE_LIB_PATH")
+    q_tmux=$(tmux_focus_shell_quote "$tmux_bin")
+    q_socket=$(tmux_focus_shell_quote "$socket_path")
+    q_env=$(tmux_focus_shell_quote "$TMUX")
+    # Pass the interval through like the TTL sweep passes the TTL: the timer's
+    # fresh process would otherwise fall back to the default, so a custom
+    # interval would only survive the first firing.
+    q_poll=$(tmux_focus_shell_quote "$TMUX_AGENT_EXIT_POLL_SECONDS")
+    inner="$q_tmux -S $q_socket set-option -gu @code_notify_agent_exit_sweep_scheduled; "
+    inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS=$q_poll "
+    inner+="bash $q_lib agent-exit-sweep; fi"
+    inner="${inner//\#/##}"
+    tmux run-shell -b -d "$TMUX_AGENT_EXIT_POLL_SECONDS" "$inner" 2>/dev/null || return 0
+    tmux set-option -g @code_notify_agent_exit_sweep_scheduled 1 2>/dev/null
+}
+
+tmux_agent_exit_sweep() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local window_id pid live=0
+    while IFS='|' read -r window_id pid; do
+        [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
+        # list-windows emits every window, with an empty field when the
+        # option is unset. Untracked windows are strictly out of scope —
+        # their badges (e.g. an agy StopFinal completion, whose disowned
+        # watcher can never resolve an agent pid) live by the normal
+        # glance/engage/TTL rules, not by this monitor.
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        if kill -0 "$pid" 2>/dev/null; then
+            live=1
+            continue
+        fi
+        # The associated agent is gone: remove both renderings, any pending
+        # input-resume state, and an event badge without disturbing a manual
+        # window rename (tmux_badge_clear already preserves one).
+        tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
+        tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+        tmux_badge_clear "$window_id"
+        tmux_agent_exit_untrack "$window_id"
+    done < <(tmux list-windows -a -F '#{window_id}|#{@code_notify_agent_pid}' 2>/dev/null)
+    if [[ "$live" -eq 1 ]]; then
+        tmux_agent_exit_schedule_sweep
+    fi
+    tmux_spinner_disarm_if_idle
+    return 0
 }
 
 # The env var (when set) wins over the flag file, so a single session can
@@ -647,6 +763,7 @@ tmux_running_start() {
     # A new prompt or a resumed tool turn supersedes any earlier input wait.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     if tmux_running_spinner_enabled; then
+        tmux_agent_exit_track "$window_id"
         tmux_spinner_arm
     else
         tmux_badge_set "$TMUX_RUNNING_ICON" running
@@ -689,6 +806,7 @@ tmux_prompt_submit() {
         # No rename in spinner mode: drop the event badge and arm the snippet
         # (a show-options no-op when already armed).
         tmux_badge_clear "$window_id"
+        tmux_agent_exit_track "$window_id"
         tmux_spinner_arm
     else
         tmux_badge_apply "$window_id" "$autorename" "$name" "$TMUX_RUNNING_ICON" running
@@ -711,6 +829,7 @@ tmux_running_stop() {
     # A genuine terminal event must also retire a stale "waiting for input"
     # marker. tmux_running_pause_for_input sets it again after this cleanup.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+    tmux_agent_exit_untrack "$window_id"
     local since mode
     since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
     if [[ -n "$since" ]]; then
@@ -945,6 +1064,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         running-stop) tmux_running_stop ;;
         running-pause) tmux_running_pause_for_input ;;
         running-resume) tmux_running_resume_after_input ;;
+        agent-exit-sweep) tmux_agent_exit_sweep ;;
         running-sweep) tmux_running_sweep_stale ;;
     esac
 fi

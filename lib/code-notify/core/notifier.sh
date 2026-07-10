@@ -619,14 +619,19 @@ schedule_agy_debounced_stop() {
 
     # Snapshot the pane for the settle gate (see the comment block above the
     # token helpers). Empty when disabled or outside tmux, which turns the
-    # gate off in the watcher.
+    # gate off in the watcher. The deadline deliberately excludes the delay:
+    # CODE_NOTIFY_AGY_DEBOUNCE_SECONDS may be fractional ("0.25") — sleep
+    # accepts that, but bash integer arithmetic aborts the whole hook on it,
+    # so the delay must never appear in $((...)). Measuring the bound from
+    # arming rather than from the first wake costs at most one quiet window
+    # of postponement headroom.
     local settle_fp="" settle_deadline settle_max
     settle_max="${CODE_NOTIFY_AGY_SETTLE_MAX_SECONDS:-120}"
     [[ "$settle_max" =~ ^[0-9]+$ ]] || settle_max=120
     if (( settle_max > 0 )) && tmux_focus_available; then
         settle_fp="$(tmux_resume_poll_fingerprint "$TMUX_PANE")"
     fi
-    settle_deadline=$((now + delay + settle_max))
+    settle_deadline=$((now + settle_max))
 
     (
         while :; do

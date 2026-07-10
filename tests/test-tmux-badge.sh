@@ -71,6 +71,7 @@ case "$cmd" in
         case "${rest[0]}" in
             *"|"*) printf '%s\n' "$FAKE_TMUX_BADGE_INFO" ;;
             '#{window_name}') cat "$FAKE_TMUX_STATE/${target}.window_name" 2>/dev/null; echo ;;
+            '#{window_id}') printf '%s\n' "${FAKE_TMUX_PANE_WINDOW-@2}" ;;
             *) printf '%s\n' "$FAKE_TMUX_TARGET" ;;
         esac
         ;;
@@ -137,7 +138,9 @@ case "$cmd" in
         printf '%s' "${rest[0]}" > "$FAKE_TMUX_STATE/${target}.window_name"
         ;;
     capture-pane)
-        cat "$FAKE_TMUX_STATE/${target}.pane_content" 2>/dev/null
+        # Real capture-pane fails on a vanished pane; mirror that so the
+        # fail-propagation in tmux_resume_poll_fingerprint is exercised.
+        cat "$FAKE_TMUX_STATE/${target}.pane_content" 2>/dev/null || exit 1
         ;;
 esac
 exit 0
@@ -757,6 +760,34 @@ grep -q "^run-shell -b -d 2 " "$log_file" \
     || fail "the poll should keep watching after a glance"
 pass "glance advances activity but does not resume"
 
+# --- a vanished pane must not read as a content change ---
+# capture-pane fails on a closed split; cksum of that empty pipe would be a
+# valid-looking checksum that differs from the snapshot, resuming a window
+# whose agent is gone (nothing would ever correct it — the agent fires no
+# more hooks). The failure must propagate and keep the window waiting.
+rm -f "$state_dir/%3.pane_content"   # the watched split was closed
+tmux_resume_poll_sweep || fail "poll sweep with a vanished pane should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a vanished pane must not restore the running epoch"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "a vanished pane should keep its pause marker for the hooks"
+printf '%s' "approval dialog" > "$state_dir/%3.pane_content"
+pass "vanished pane keeps waiting instead of resuming"
+
+# --- a pane moved to another window must not resume the recorded one ---
+# break-pane keeps the pane id alive under a different window; its content
+# says nothing about the recorded window's dialog.
+export FAKE_TMUX_PANE_WINDOW='@9'
+printf '%s' "content of some other window" > "$state_dir/%3.pane_content"
+tmux_resume_poll_sweep || fail "poll sweep with a moved pane should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a moved pane's content must not resume the recorded window"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "a moved pane should keep the recorded window's pause marker"
+unset FAKE_TMUX_PANE_WINDOW
+printf '%s' "approval dialog" > "$state_dir/%3.pane_content"
+pass "moved pane keeps the recorded window waiting"
+
 # --- a content change resumes the indicator with the configured icon ---
 rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
 printf '%s' "tool output streaming" > "$state_dir/%3.pane_content"   # user answered
@@ -817,6 +848,22 @@ grep -q "^run-shell -b -d 2 " "$log_file" \
     || fail "an idle-style pause should still retain the resume marker"
 rm -f "$state_dir/@2.@code_notify_resume_pending"
 pass "idle-style pause keeps the marker without arming the poll"
+
+# --- a watched pause with an uncapturable pane must not arm the poll ---
+# Without a snapshot the poll has nothing sound to compare against; the
+# lifecycle hooks stay the resume path, exactly as before the poll existed.
+rm -f "$state_dir/.@code_notify_resume_poll_scheduled" "$state_dir/%3.pane_content"
+tmux_running_start || fail "running-start before the no-snapshot test should succeed"
+: > "$log_file"
+tmux_running_pause_for_input watch || fail "watched pause without a capturable pane should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_pause_fp" ]] \
+    || fail "an uncapturable pane must not leave a dialog snapshot"
+grep -q "^run-shell -b -d 2 " "$log_file" \
+    && fail "an uncapturable pane must not schedule the resume poll"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "the pause marker should still be retained for the hooks"
+rm -f "$state_dir/@2.@code_notify_resume_pending"
+pass "watched pause without a snapshot leaves resume to the hooks"
 
 # --- ordinary tool lifecycle signals must not start a spinner ---
 : > "$log_file"
@@ -1297,6 +1344,7 @@ EOF
     # running there, and toast-click/typing activity would light the spinner.
     [[ ! -f "$state_dir/.@code_notify_resume_poll_scheduled" ]] \
         || fail "a generic notification must not arm the activity poll"
+    printf '%s' "permission dialog" > "$state_dir/%3.pane_content"
     : > "$log_file"
     CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
         PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
@@ -1314,7 +1362,7 @@ EOF
     rm -f "$state_dir/@2.@code_notify_resume_pending" "$state_dir/@2.@code_notify_running" \
         "$state_dir/@2.@code_notify_clear_mode" "$state_dir/@2.@code_notify_orig_name" \
         "$state_dir/@2.@code_notify_autorename" "$state_dir/@2.@code_notify_badged_name" \
-        "$state_dir/@2.@code_notify_pause_fp" \
+        "$state_dir/@2.@code_notify_pause_fp" "$state_dir/%3.pane_content" \
         "$state_dir/.@code_notify_resume_poll_scheduled" 2>/dev/null || true
     printf '%s' "zsh" > "$state_dir/@2.window_name"
     pass "notifier end-to-end: permission request arms the activity poll"

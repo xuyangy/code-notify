@@ -909,15 +909,20 @@ tmux_running_pause_for_input() {
     # selecting the window delivers a focus event and the TUI repaints,
     # identically. The snapshot option doubles as the watch flag: pauses
     # without it (idle reminders) are never resumed by the poll.
-    local pane_re='^%[0-9]+$'
+    local pane_re='^%[0-9]+$' snapshot=""
     if [[ "$watch" == "watch" ]] && [[ "$pane_id" =~ $pane_re ]] && tmux_running_enabled; then
+        snapshot=$(tmux_resume_poll_fingerprint "$pane_id") || snapshot=""
+    fi
+    if [[ -n "$snapshot" ]]; then
         tmux set-option -w -t "$window_id" @code_notify_pause_fp \
-            "$pane_id $(tmux_resume_poll_fingerprint "$pane_id")" 2>/dev/null
+            "$pane_id $snapshot" 2>/dev/null
         tmux_resume_poll_schedule
     else
-        # A non-watch pause supersedes any earlier dialog snapshot; a stale
-        # one would let an alive poll chain (serving another window) resume
-        # this idle window on the next content change.
+        # No watch, or the dialog could not be snapshotted: drop any earlier
+        # snapshot instead of arming on bad data. A stale one would let an
+        # alive poll chain (serving another window) resume this window on the
+        # next content change; an uncapturable pane leaves the lifecycle
+        # hooks as the resume path, as before the poll existed.
         tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     fi
     return 0
@@ -1016,10 +1021,14 @@ tmux_resume_poll_schedule() {
 # Checksum of a pane's visible content, used to tell an answered dialog from
 # a merely re-rendered one. cksum is POSIX and lives in /usr/bin, so it
 # resolves even under run-shell's minimal PATH; its "sum size" output is
-# treated as an opaque token.
+# treated as an opaque token. Fails with no output when the pane cannot be
+# captured — piping capture-pane straight into cksum would hide that failure
+# as the (valid-looking) checksum of empty input, and a vanished pane would
+# read as "content changed".
 tmux_resume_poll_fingerprint() {
-    local pane_id="$1"
-    tmux capture-pane -p -t "$pane_id" 2>/dev/null | cksum 2>/dev/null
+    local pane_id="$1" content
+    content=$(tmux capture-pane -p -t "$pane_id" 2>/dev/null) || return 1
+    printf '%s\n' "$content" | cksum 2>/dev/null
 }
 
 # Resume the running indicator on watched windows whose pane content changed
@@ -1050,6 +1059,15 @@ tmux_resume_poll_sweep() {
             [[ -n "$fp_saved" ]]; } || continue
         (( now - pending < TMUX_RESUME_POLL_TTL )) || continue
         if [[ ! "$activity" =~ ^[0-9]+$ ]] || (( activity <= pending + 1 )); then
+            waiting=1
+            continue
+        fi
+        # The recorded pane can vanish (its split closed) or move to another
+        # window (break-pane) while the dialog waits; an empty or
+        # wrong-window capture must not read as "content changed". Such
+        # windows stay in waiting state until a hook, the agent-exit
+        # monitor, or the poll TTL retires them.
+        if [[ "$(tmux display-message -p -t "$pane" '#{window_id}' 2>/dev/null)" != "$window_id" ]]; then
             waiting=1
             continue
         fi

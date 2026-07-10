@@ -271,4 +271,23 @@ grep -q "Task Complete - projSettleCancel" "$notification_log" \
 grep -q "Error - projSettleCancel" "$notification_log" \
     || fail "mid-settle error was not reported"
 
+# 10) Regression: a fractional debounce interval ("0.25" is valid for sleep)
+#     must not hit bash integer arithmetic — that aborts the whole hook and no
+#     watcher ever arms. Outside tmux (TMUX cleared), the completion must
+#     still be delivered.
+printf '%s' "{\"conversationId\":\"c-frac\",\"error\":\"\",$(ws projFrac)}" \
+| PATH="$fake_path" \
+  TMUX='' TMUX_PANE='' \
+  CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
+  CODE_NOTIFY_AGY_DEBOUNCE_SECONDS=0.25 \
+  CODE_NOTIFY_TAIL_SYNC=1 \
+  bash "$NOTIFIER" "agy:PostToolUse" "antigravity"
+wait_for_lines "$notification_log" "$(( $(wc -l < "$notification_log") + 1 ))" \
+    || fail "fractional debounce interval did not deliver a completion"
+grep -q "Task Complete - projFrac" "$notification_log" \
+    || fail "fractional debounce completion was not delivered"
+# The delivering StopFinal process may still be writing its own state files;
+# give it a moment so the EXIT trap's rm -rf does not race a live writer.
+sleep 1
+
 pass "Antigravity maps PreToolUse/PostToolUse/Stop into the correct notifications"

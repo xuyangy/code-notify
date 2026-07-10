@@ -81,6 +81,16 @@ case "$cmd" in
         # options so epoch round-trips are exercised for real.
         if [[ "$fmt" == *window_active* ]]; then
             printf '%s\n' "$FAKE_TMUX_WINDOWS"
+        elif [[ "$fmt" == *resume_pending* ]]; then
+            # The resume poll pairs each pending epoch with the window's
+            # activity clock; the latter comes from a per-window state file so
+            # tests can move it independently of the pause epoch.
+            for f in "$FAKE_TMUX_STATE"/@*.@code_notify_resume_pending; do
+                [[ -e "$f" ]] || continue
+                w="${f##*/}"; w="${w%%.*}"
+                act=$(cat "$FAKE_TMUX_STATE/${w}.window_activity" 2>/dev/null)
+                printf '%s|%s|%s\n' "$w" "$(cat "$f")" "$act"
+            done
         elif [[ "$fmt" == *code_notify_agent_pid* ]]; then
             # Real tmux emits EVERY window, with an empty field when the
             # option is unset — the sweep must cope with untracked windows,
@@ -685,6 +695,71 @@ tmux_running_resume_after_input || fail "input resume should succeed"
     || fail "input resume should restore the static running icon (got: $(window_name))"
 tmux_running_stop || fail "cleanup after input resume should succeed"
 pass "input pause resumes the running indicator once"
+
+# --- an input pause schedules the activity resume poll ---
+# No hook fires when the user answers an approval dialog, so the pause parks a
+# short run-shell timer on the server that watches #{window_activity}.
+rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
+tmux_running_start || fail "running-start before the poll-schedule test should succeed"
+: > "$log_file"
+tmux_running_pause_for_input || fail "input pause for the poll-schedule test should succeed"
+grep -q "^run-shell -b -d 2 " "$log_file" \
+    || fail "an input pause should schedule the 2s activity poll"
+[[ -f "$state_dir/.@code_notify_resume_poll_scheduled" ]] \
+    || fail "the pending poll should be recorded in @code_notify_resume_poll_scheduled"
+pass "input pause schedules the activity resume poll"
+
+# --- a quiet window keeps the poll alive without resuming ---
+# Run the timer payload exactly as tmux would (/bin/sh -c, no TMUX_PANE).
+# Activity one second past the pause epoch is within the grace period — the
+# dialog's own render straggling into the next second — and must not resume.
+payload=$(sed -n 's/^run-shell -b -d 2 \(.*\)$/\1/p' "$log_file" | head -n 1)
+[[ -n "$payload" ]] || fail "the poll payload should be extractable from the run-shell call"
+pending=$(cat "$state_dir/@2.@code_notify_resume_pending")
+printf '%s' "$((pending + 1))" > "$state_dir/@2.window_activity"
+: > "$log_file"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the poll payload should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "activity within the grace period must not restore the running epoch"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "a quiet window should keep its pause marker"
+grep -q "^run-shell -b -d 2 " "$log_file" \
+    || fail "the poll should reschedule while a pause marker remains"
+pass "quiet window keeps the poll alive without resuming"
+
+# --- activity past the grace period resumes the indicator ---
+rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
+printf '%s' "$((pending + 2))" > "$state_dir/@2.window_activity"   # user answered
+: > "$log_file"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the resuming poll payload should run cleanly"
+[[ "$(cat "$state_dir/@2.@code_notify_running")" =~ ^[0-9]+$ ]] \
+    || fail "post-answer activity should restore the running epoch"
+[[ ! -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "the poll resume should consume the pause marker"
+[[ "$(window_name)" == "🌕 zsh" ]] \
+    || fail "the poll resume should restore the static running icon (got: $(window_name))"
+grep -q "^run-shell -b -d 2 " "$log_file" \
+    && fail "the poll must not reschedule once no pause marker remains"
+rm -f "$state_dir/@2.window_activity"
+tmux_running_stop || fail "cleanup after the poll resume should succeed"
+pass "activity after an answer resumes the indicator via the poll"
+
+# --- an unanswered request past the poll TTL stops the chain ---
+# A dialog left open must not tick a 2s timer forever; the marker stays for
+# the lifecycle hooks, but the poll chain dies.
+tmux_running_start || fail "running-start for the poll TTL test should succeed"
+tmux_running_pause_for_input || fail "input pause for the poll TTL test should succeed"
+printf '%s' "1000" > "$state_dir/@2.@code_notify_resume_pending"   # ancient pause
+printf '%s' "1000" > "$state_dir/@2.window_activity"               # nothing since
+rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
+: > "$log_file"
+tmux_resume_poll_sweep || fail "poll sweep on an expired pause should succeed"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "an expired pause should keep its marker for the lifecycle hooks"
+grep -q "^run-shell -b -d 2 " "$log_file" \
+    && fail "the poll must not reschedule past TMUX_RESUME_POLL_TTL"
+rm -f "$state_dir/@2.@code_notify_resume_pending" "$state_dir/@2.window_activity"
+pass "unanswered request past the poll TTL stops the chain"
 
 # --- ordinary tool lifecycle signals must not start a spinner ---
 : > "$log_file"

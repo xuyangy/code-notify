@@ -471,6 +471,17 @@ TMUX_SPINNER_ENABLED_FILE="$HOME/.claude/notifications/tmux-spinner-enabled"
 # Seconds between exit checks while an agent owns a running marker or event
 # badge. Set to 0 to rely on the TTL safety net only.
 TMUX_AGENT_EXIT_POLL_SECONDS="${CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS:-5}"
+# Seconds between #{window_activity} checks while a window is paused for an
+# input/approval request. Claude Code fires no hook when the user answers an
+# approval dialog — the earliest one is the approved tool's PostToolUse,
+# minutes away for a long command — but answering repaints the agent's TUI,
+# which bumps the window's activity clock past the pause epoch. Set to 0 to
+# disable and rely on the tool lifecycle hooks alone.
+TMUX_RESUME_POLL_SECONDS="${CODE_NOTIFY_TMUX_RESUME_POLL_SECONDS:-2}"
+# How long an unanswered request keeps the poll alive. A dialog left open
+# overnight should not tick a timer every 2 seconds forever; past this age the
+# chain stops and the lifecycle hooks remain the resume path.
+TMUX_RESUME_POLL_TTL="${CODE_NOTIFY_TMUX_RESUME_POLL_TTL:-900}"
 
 tmux_running_enabled() {
     [[ "${CODE_NOTIFY_TMUX_RUNNING:-}" != "false" ]] && tmux_badge_enabled
@@ -878,6 +889,11 @@ tmux_running_pause_for_input() {
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
     tmux set-option -w -t "$window_id" @code_notify_resume_pending "$(date +%s)" 2>/dev/null
+    # The answer itself emits no hook (see TMUX_RESUME_POLL_SECONDS), so watch
+    # the window's activity clock while the request is outstanding.
+    if tmux_running_enabled; then
+        tmux_resume_poll_schedule
+    fi
     return 0
 }
 
@@ -896,6 +912,90 @@ tmux_running_resume_after_input() {
     [[ -n "$pending" ]] || return 0
 
     tmux_running_start
+    return 0
+}
+
+# Window-targeted variant of tmux_running_start for contexts with no pane of
+# their own (the resume poll's run-shell payload). Skips agent-exit tracking —
+# there is no hook-process ancestry to resolve a PID from here; the next real
+# hook event re-tracks, and the TTL sweep covers runs that never get one.
+tmux_running_resume_window() {
+    local window_id="$1"
+    tmux_running_enabled || return 0
+    tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
+    tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+    if tmux_running_spinner_enabled; then
+        # Same shape as tmux_running_start: the waiting badge must not sit
+        # next to a live spinner.
+        tmux_badge_clear "$window_id"
+        tmux_spinner_arm
+    else
+        tmux_badge_set "$TMUX_RUNNING_ICON" running "$window_id"
+    fi
+    tmux_running_schedule_sweep $((TMUX_RUNNING_TTL + 2))
+    return 0
+}
+
+# One short tmux-server timer watches paused windows for pane activity, the
+# earliest observable sign that the user answered an approval/input dialog
+# (Claude Code emits no hook at answer time — only when the approved tool
+# completes). Same pattern as tmux_agent_exit_schedule_sweep: repeating
+# one-shots, a global flag prevents stacking, and the chain stops as soon as
+# no pause marker remains (or the outstanding ones outlive the poll TTL). The
+# interval and TTL ride along in the payload's environment so custom values
+# survive past the first firing.
+tmux_resume_poll_schedule() {
+    [[ "${TMUX_RESUME_POLL_SECONDS:-0}" =~ ^[0-9]+$ ]] || return 0
+    (( TMUX_RESUME_POLL_SECONDS > 0 )) || return 0
+    [[ -n "$TMUX_BADGE_LIB_PATH" ]] && [[ -f "$TMUX_BADGE_LIB_PATH" ]] || return 0
+    local pending tmux_bin socket_path q_lib q_tmux q_socket q_env q_poll q_ttl inner
+    pending=$(tmux show-options -gqv @code_notify_resume_poll_scheduled 2>/dev/null)
+    [[ -z "$pending" ]] || return 0
+    tmux_bin=$(command -v tmux) || return 0
+    socket_path="${TMUX%%,*}"
+    [[ -n "$socket_path" ]] || return 0
+    q_lib=$(tmux_focus_shell_quote "$TMUX_BADGE_LIB_PATH")
+    q_tmux=$(tmux_focus_shell_quote "$tmux_bin")
+    q_socket=$(tmux_focus_shell_quote "$socket_path")
+    q_env=$(tmux_focus_shell_quote "$TMUX")
+    q_poll=$(tmux_focus_shell_quote "$TMUX_RESUME_POLL_SECONDS")
+    q_ttl=$(tmux_focus_shell_quote "$TMUX_RESUME_POLL_TTL")
+    inner="$q_tmux -S $q_socket set-option -gu @code_notify_resume_poll_scheduled; "
+    inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_RESUME_POLL_SECONDS=$q_poll "
+    inner+="CODE_NOTIFY_TMUX_RESUME_POLL_TTL=$q_ttl bash $q_lib resume-poll; fi"
+    inner="${inner//\#/##}"
+    tmux run-shell -b -d "$TMUX_RESUME_POLL_SECONDS" "$inner" 2>/dev/null || return 0
+    tmux set-option -g @code_notify_resume_poll_scheduled 1 2>/dev/null
+    return 0
+}
+
+# Resume the running indicator on windows whose pane produced output after the
+# pause epoch: the user answered the dialog. #{window_activity} is
+# second-granular and the dialog's own render (plus any bell) lands in the
+# same second as — or straggles into the second after — the pause epoch, so
+# two full seconds of clearance are required before activity counts as an
+# answer. A real answer keeps repainting (the agent's own progress spinner
+# runs for the whole tool call), so the grace only adds to the poll latency,
+# never loses a resume. False positives (unrelated output, the user typing
+# into a question) merely show the spinner early; the next hook event
+# re-derives the true state.
+tmux_resume_poll_sweep() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local now window_id pending activity waiting=0
+    now=$(date +%s)
+    while IFS='|' read -r window_id pending activity; do
+        [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
+        [[ "$pending" =~ ^[0-9]+$ ]] || continue
+        if [[ "$activity" =~ ^[0-9]+$ ]] && (( activity > pending + 1 )); then
+            tmux_running_resume_window "$window_id"
+        elif (( now - pending < TMUX_RESUME_POLL_TTL )); then
+            waiting=1
+        fi
+    done < <(tmux list-windows -a -F \
+        '#{window_id}|#{@code_notify_resume_pending}|#{window_activity}' 2>/dev/null)
+    if [[ "$waiting" -eq 1 ]]; then
+        tmux_resume_poll_schedule
+    fi
     return 0
 }
 
@@ -1085,6 +1185,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         running-pause) tmux_running_pause_for_input ;;
         running-resume) tmux_running_resume_after_input ;;
         agent-exit-sweep) tmux_agent_exit_sweep ;;
+        resume-poll) tmux_resume_poll_sweep ;;
         running-sweep) tmux_running_sweep_stale ;;
     esac
 fi

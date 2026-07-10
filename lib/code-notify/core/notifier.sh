@@ -331,6 +331,18 @@ agy_permissions_file() {
     printf '%s' "${CODE_NOTIFY_AGY_SETTINGS:-$HOME/.gemini/antigravity-cli/settings.json}"
 }
 
+# Antigravity 1.1.1 can pass the model's serialized CommandLine to PreToolUse,
+# including one pair of double quotes around the whole command (for example,
+# `"git diff"`). Its permission engine removes that wrapper before matching and
+# execution, so mirror that normalization before reconstructing its decision.
+agy_normalize_command_line() {
+    local cmd="$1"
+    if [[ ${#cmd} -ge 2 ]] && [[ "${cmd:0:1}" == '"' ]] && [[ "${cmd: -1}" == '"' ]]; then
+        cmd="${cmd:1:${#cmd}-2}"
+    fi
+    printf '%s' "$cmd"
+}
+
 # Resolve what agy will do with a command against its own permission lists:
 # prints "auto" when it runs without prompting (matched allow, or auto-denied),
 # or "ask" when it pauses for the user. Precedence is deny > ask > allow (per
@@ -341,6 +353,7 @@ agy_permissions_file() {
 # Unreadable/absent settings or no parser -> "ask" (never suppress blindly).
 agy_permission_decision() {
     local cmd="$1" settings out
+    cmd="$(agy_normalize_command_line "$cmd")"
     settings="$(agy_permissions_file)"
     [[ -f "$settings" ]] || { printf 'ask'; return 0; }
 
@@ -402,13 +415,17 @@ PY
 # command may auto-run while a chained one prompts, and over-notifying beats
 # swallowing a real prompt.
 agy_command_needs_approval() {
-    local cmd="$1"
+    local cmd
+    cmd="$(agy_normalize_command_line "$1")"
     [[ -n "$cmd" ]] || return 0
     # shellcheck disable=SC2016  # these are literal shell-operator glob patterns
     case "$cmd" in
         *';'* | *'|'* | *'&'* | *'`'* | *'$('* | *'>'* | *'<'* | *$'\n'*) return 0 ;;
     esac
-    [[ "$(agy_permission_decision "$cmd")" != "auto" ]]
+    # Pass the raw command: agy_permission_decision normalizes too, and agy
+    # strips exactly one wrapper pair, so stripping here and again there would
+    # over-normalize (e.g. ""git diff"" -> git diff) and could swallow a prompt.
+    [[ "$(agy_permission_decision "$1")" != "auto" ]]
 }
 
 # True when permission_prompt alerts are enabled. The notifier does not source

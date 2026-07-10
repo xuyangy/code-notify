@@ -188,8 +188,10 @@ run_agy_notifier "$fake_path" "PreToolUse" \
     "{\"conversationId\":\"c-pre\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"echo hi\"}},$(ws projInput)}"
 
 # 1b) A git command covered by permissions.allow auto-runs and must be silent.
+# Antigravity 1.1.1 wraps the model-provided CommandLine in an extra pair of
+# quotes in the hook payload, while stripping them for permission evaluation.
 run_agy_notifier "$fake_path" "PreToolUse" \
-    "{\"conversationId\":\"c-allowed\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"git diff\"}},$(ws projAllowed)}"
+    "{\"conversationId\":\"c-allowed\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"\\\"git diff\\\"\"}},$(ws projAllowed)}"
 
 # 2) PostToolUse with a STRUCTURED error -> Error (must not be read as success).
 run_agy_notifier "$fake_path" "PostToolUse" \

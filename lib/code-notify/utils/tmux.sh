@@ -588,6 +588,7 @@ tmux_agent_exit_sweep() {
         # window rename (tmux_badge_clear already preserves one).
         tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
         tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+        tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
         tmux_badge_clear "$window_id"
         tmux_agent_exit_untrack "$window_id"
     done < <(tmux list-windows -a -F '#{window_id}|#{@code_notify_agent_pid}' 2>/dev/null)
@@ -788,6 +789,7 @@ tmux_running_start() {
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
     # A new prompt or a resumed tool turn supersedes any earlier input wait.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     if tmux_running_spinner_enabled; then
         # The spinner is rendered independently from the window name, so it
         # does not naturally replace a waiting/event badge the way the static
@@ -833,6 +835,7 @@ tmux_prompt_submit() {
 
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     if tmux_running_spinner_enabled; then
         # No rename in spinner mode: drop the event badge and arm the snippet
         # (a show-options no-op when already armed).
@@ -860,6 +863,7 @@ tmux_running_stop() {
     # A genuine terminal event must also retire a stale "waiting for input"
     # marker. tmux_running_pause_for_input sets it again after this cleanup.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     tmux_agent_exit_untrack "$window_id"
     local since mode
     since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
@@ -899,9 +903,22 @@ tmux_running_pause_for_input() {
     [[ "$window_id" =~ $window_re ]] || return 0
     tmux set-option -w -t "$window_id" @code_notify_resume_pending "$(date +%s)" 2>/dev/null
     # The answer itself emits no hook (see TMUX_RESUME_POLL_SECONDS), so watch
-    # the window's activity clock while the dialog is outstanding.
-    if [[ "$watch" == "watch" ]] && tmux_running_enabled; then
+    # the pane while the dialog is outstanding. The snapshot taken here is the
+    # dialog as rendered: the poll resumes only when the pane CONTENT changes,
+    # because #{window_activity} alone also advances on a mere glance —
+    # selecting the window delivers a focus event and the TUI repaints,
+    # identically. The snapshot option doubles as the watch flag: pauses
+    # without it (idle reminders) are never resumed by the poll.
+    local pane_re='^%[0-9]+$'
+    if [[ "$watch" == "watch" ]] && [[ "$pane_id" =~ $pane_re ]] && tmux_running_enabled; then
+        tmux set-option -w -t "$window_id" @code_notify_pause_fp \
+            "$pane_id $(tmux_resume_poll_fingerprint "$pane_id")" 2>/dev/null
         tmux_resume_poll_schedule
+    else
+        # A non-watch pause supersedes any earlier dialog snapshot; a stale
+        # one would let an alive poll chain (serving another window) resume
+        # this idle window on the next content change.
+        tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     fi
     return 0
 }
@@ -933,6 +950,7 @@ tmux_running_resume_window() {
     tmux_running_enabled || return 0
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     if tmux_running_spinner_enabled; then
         # Same shape as tmux_running_start: the waiting badge must not sit
         # next to a live spinner.
@@ -945,19 +963,25 @@ tmux_running_resume_window() {
     return 0
 }
 
-# One short tmux-server timer watches paused windows for pane activity, the
-# earliest observable sign that the user answered an approval/input dialog
-# (Claude Code emits no hook at answer time — only when the approved tool
-# completes). Same pattern as tmux_agent_exit_schedule_sweep: repeating
+# One short tmux-server timer watches paused windows for a content change,
+# the earliest observable sign that the user answered an approval/input
+# dialog (Claude Code emits no hook at answer time — only when the approved
+# tool completes). Same pattern as tmux_agent_exit_schedule_sweep: repeating
 # one-shots, a global flag prevents stacking, and the chain stops as soon as
-# no pause marker remains (or the outstanding ones outlive the poll TTL). The
-# interval and TTL ride along in the payload's environment so custom values
-# survive past the first firing.
+# no watched pause remains (or the outstanding ones outlive the poll TTL).
+# The poll settings and the active running-indicator configuration ride along
+# in the payload's environment: the timer's fresh process would otherwise
+# fall back to defaults, flipping a session that forced e.g.
+# CODE_NOTIFY_TMUX_SPINNER=false back to the flag-file rendering (or losing a
+# custom icon/TTL) the moment it resumes. Empty values behave exactly like
+# unset ones in the corresponding checks, so unset overrides pass through
+# harmlessly.
 tmux_resume_poll_schedule() {
     [[ "${TMUX_RESUME_POLL_SECONDS:-0}" =~ ^[0-9]+$ ]] || return 0
     (( TMUX_RESUME_POLL_SECONDS > 0 )) || return 0
     [[ -n "$TMUX_BADGE_LIB_PATH" ]] && [[ -f "$TMUX_BADGE_LIB_PATH" ]] || return 0
     local pending tmux_bin socket_path q_lib q_tmux q_socket q_env q_poll q_ttl inner
+    local q_running q_spinner q_badge q_icon q_rttl
     pending=$(tmux show-options -gqv @code_notify_resume_poll_scheduled 2>/dev/null)
     [[ -z "$pending" ]] || return 0
     tmux_bin=$(command -v tmux) || return 0
@@ -969,39 +993,74 @@ tmux_resume_poll_schedule() {
     q_env=$(tmux_focus_shell_quote "$TMUX")
     q_poll=$(tmux_focus_shell_quote "$TMUX_RESUME_POLL_SECONDS")
     q_ttl=$(tmux_focus_shell_quote "$TMUX_RESUME_POLL_TTL")
+    # Enablement flags forward the raw env overrides (persistent flag files
+    # are re-read fresh by the fired process); icon and running-TTL forward
+    # the resolved values, matching the running-sweep timer.
+    q_running=$(tmux_focus_shell_quote "${CODE_NOTIFY_TMUX_RUNNING:-}")
+    q_spinner=$(tmux_focus_shell_quote "${CODE_NOTIFY_TMUX_SPINNER:-}")
+    q_badge=$(tmux_focus_shell_quote "${CODE_NOTIFY_TMUX_BADGE:-}")
+    q_icon=$(tmux_focus_shell_quote "$TMUX_RUNNING_ICON")
+    q_rttl=$(tmux_focus_shell_quote "$TMUX_RUNNING_TTL")
     inner="$q_tmux -S $q_socket set-option -gu @code_notify_resume_poll_scheduled; "
     inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_RESUME_POLL_SECONDS=$q_poll "
-    inner+="CODE_NOTIFY_TMUX_RESUME_POLL_TTL=$q_ttl bash $q_lib resume-poll; fi"
+    inner+="CODE_NOTIFY_TMUX_RESUME_POLL_TTL=$q_ttl "
+    inner+="CODE_NOTIFY_TMUX_RUNNING=$q_running CODE_NOTIFY_TMUX_SPINNER=$q_spinner "
+    inner+="CODE_NOTIFY_TMUX_BADGE=$q_badge CODE_NOTIFY_TMUX_RUNNING_ICON=$q_icon "
+    inner+="CODE_NOTIFY_TMUX_RUNNING_TTL=$q_rttl bash $q_lib resume-poll; fi"
     inner="${inner//\#/##}"
     tmux run-shell -b -d "$TMUX_RESUME_POLL_SECONDS" "$inner" 2>/dev/null || return 0
     tmux set-option -g @code_notify_resume_poll_scheduled 1 2>/dev/null
     return 0
 }
 
-# Resume the running indicator on windows whose pane produced output after the
-# pause epoch: the user answered the dialog. #{window_activity} is
-# second-granular and the dialog's own render (plus any bell) lands in the
-# same second as — or straggles into the second after — the pause epoch, so
-# two full seconds of clearance are required before activity counts as an
-# answer. A real answer keeps repainting (the agent's own progress spinner
-# runs for the whole tool call), so the grace only adds to the poll latency,
-# never loses a resume. False positives (unrelated output, the user typing
-# into a question) merely show the spinner early; the next hook event
+# Checksum of a pane's visible content, used to tell an answered dialog from
+# a merely re-rendered one. cksum is POSIX and lives in /usr/bin, so it
+# resolves even under run-shell's minimal PATH; its "sum size" output is
+# treated as an opaque token.
+tmux_resume_poll_fingerprint() {
+    local pane_id="$1"
+    tmux capture-pane -p -t "$pane_id" 2>/dev/null | cksum 2>/dev/null
+}
+
+# Resume the running indicator on watched windows whose pane content changed
+# after the pause: the user answered the dialog. Two filters precede the
+# content check. Per-pause TTL first: a request nobody answers stops being
+# polled after TMUX_RESUME_POLL_TTL even while a fresher pause keeps the
+# chain alive — its retained marker stays answerable through the tool
+# lifecycle hooks. Then #{window_activity} as a cheap pre-filter: no pane
+# output at all since the pause (with one second of grace for the dialog's
+# own render straggling past the epoch) means no answer, without spawning a
+# capture. Activity alone is NOT sufficient to resume — visiting the window
+# delivers a focus event and the TUI repaints identically, so only a changed
+# fingerprint counts. False positives that remain (the user scrolling,
+# typing into a question) merely show the spinner early; the next hook event
 # re-derives the true state.
 tmux_resume_poll_sweep() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
-    local now window_id pending activity waiting=0
+    local now window_id pending activity fp pane fp_saved fp_now waiting=0
     now=$(date +%s)
-    while IFS='|' read -r window_id pending activity; do
+    while IFS='|' read -r window_id pending activity fp; do
         [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
         [[ "$pending" =~ ^[0-9]+$ ]] || continue
-        if [[ "$activity" =~ ^[0-9]+$ ]] && (( activity > pending + 1 )); then
+        # Only watch-mode pauses carry a dialog snapshot ("%pane sum size");
+        # idle-style pauses resume through their hooks, never through the poll.
+        pane="${fp%% *}"
+        fp_saved="${fp#* }"
+        { [[ "$pane" =~ ^%[0-9]+$ ]] && [[ "$fp_saved" != "$fp" ]] &&
+            [[ -n "$fp_saved" ]]; } || continue
+        (( now - pending < TMUX_RESUME_POLL_TTL )) || continue
+        if [[ ! "$activity" =~ ^[0-9]+$ ]] || (( activity <= pending + 1 )); then
+            waiting=1
+            continue
+        fi
+        fp_now=$(tmux_resume_poll_fingerprint "$pane")
+        if [[ -n "$fp_now" ]] && [[ "$fp_now" != "$fp_saved" ]]; then
             tmux_running_resume_window "$window_id"
-        elif (( now - pending < TMUX_RESUME_POLL_TTL )); then
+        else
             waiting=1
         fi
     done < <(tmux list-windows -a -F \
-        '#{window_id}|#{@code_notify_resume_pending}|#{window_activity}' 2>/dev/null)
+        '#{window_id}|#{@code_notify_resume_pending}|#{window_activity}|#{@code_notify_pause_fp}' 2>/dev/null)
     if [[ "$waiting" -eq 1 ]]; then
         tmux_resume_poll_schedule
     fi

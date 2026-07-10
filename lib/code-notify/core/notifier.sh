@@ -1208,6 +1208,19 @@ case "$HOOK_TYPE" in
         if [[ "$AGY_STOP_FINAL_CLEANUP" != "1" ]]; then
             tmux_running_stop 2>/dev/null || true
         fi
+        # Codex and Antigravity send nothing further once a turn ends —
+        # there is no equivalent of Claude's native idle_prompt reminder —
+        # so a completed window could sit unattended forever. Arm the tmux
+        # idle watch: if the pane's content holds still for the idle window
+        # after this completion, one synthetic idle_prompt fires through
+        # this notifier. Agent gating (TMUX_IDLE_AGENTS), alert-type gating
+        # and tmux availability all live inside the helper; outside tmux
+        # this is a no-op. Deliberately before the suppression check below:
+        # a rate-limited completion is still a completion the user has not
+        # seen, and the nudge run self-gates on snooze/kill switch anyway.
+        if [[ "$HOOK_TYPE" == "stop" ]]; then
+            tmux_idle_watch_arm_current "$TOOL_NAME" "$PROJECT_NAME" 2>/dev/null || true
+        fi
         ;;
 esac
 

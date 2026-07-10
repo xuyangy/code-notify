@@ -107,7 +107,8 @@ case "$cmd" in
                 pid=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_agent_pid" 2>/dev/null)
                 run=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_running" 2>/dev/null)
                 sp=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_settle_pane" 2>/dev/null)
-                printf '%s|%s|%s|%s\n' "$w" "$pid" "$run" "$sp"
+                iw=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_idle_watch" 2>/dev/null)
+                printf '%s|%s|%s|%s|%s\n' "$w" "$pid" "$run" "$sp" "$iw"
             done
         else
             for f in "$FAKE_TMUX_STATE"/*.@code_notify_running; do
@@ -909,8 +910,149 @@ TMUX_SETTLE_SECONDS=0 tmux_agent_exit_sweep || fail "settling tick should succee
     || fail "the settle stop should restore the window name (got: $(window_name))"
 [[ ! -f "$state_dir/@2.@code_notify_settle_pane" ]] \
     || fail "the settle stop should disarm the watch"
-rm -f "$state_dir/%3.pane_content"
+# A hook-less turn end hands the window to the post-completion idle watch,
+# carrying the identity recorded at settle-arm time so the eventual nudge
+# can name the agent and project.
+iw="$(cat "$state_dir/@2.@code_notify_idle_watch" 2>/dev/null)"
+{ [[ "$iw" == "%3 "* ]] && [[ "$iw" == *" codex "* ]]; } \
+    || fail "the settle stop should hand off to the idle watch (got: $iw)"
+rm -f "$state_dir/@2.@code_notify_idle_watch" "$state_dir/%3.pane_content"
 pass "settled codex pane retires the running marker"
+
+# --- idle watch: arm gating (agent list, alert types, pane capture) ---
+# Codex/Antigravity never send an idle reminder after a completion, so their
+# stop events arm a post-completion idle watch; Claude nudges natively and
+# must not be watched. The nudge is an alert type (idle_prompt), so the arm
+# also honours the notify-types file, and an uncapturable pane never arms.
+printf '%s' "turn finished, waiting" > "$state_dir/%3.pane_content"
+tmux_idle_watch_arm_current codex projX || fail "idle arm for codex should succeed"
+iw="$(cat "$state_dir/@2.@code_notify_idle_watch" 2>/dev/null)"
+[[ "$iw" == "%3 "* ]] || fail "idle arm should record the watched pane (got: $iw)"
+[[ "$iw" == *" codex projX" ]] \
+    || fail "idle arm should record agent and project (got: $iw)"
+rm -f "$state_dir/@2.@code_notify_idle_watch"
+tmux_idle_watch_arm_current antigravity projX || fail "idle arm for antigravity should succeed"
+[[ "$(cat "$state_dir/@2.@code_notify_idle_watch" 2>/dev/null)" == *" antigravity projX" ]] \
+    || fail "antigravity (agy StopFinal path) should arm the idle watch too"
+rm -f "$state_dir/@2.@code_notify_idle_watch"
+tmux_idle_watch_arm_current claude projX || fail "idle arm for claude should no-op cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "claude must not get an idle watch (it has a native idle_prompt)"
+mkdir -p "$HOME/.claude/notifications"
+printf '%s' "permission_prompt" > "$HOME/.claude/notifications/notify-types"
+tmux_idle_watch_arm_current codex projX \
+    || fail "idle arm with idle_prompt disabled should no-op cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "a disabled idle_prompt alert type must not arm the idle watch"
+rm -f "$HOME/.claude/notifications/notify-types" "$state_dir/%3.pane_content"
+tmux_idle_watch_arm_current codex projX \
+    || fail "idle arm without a capturable pane should no-op cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "an uncapturable pane must not arm the idle watch"
+pass "idle watch arms for hook-less agents only, gated on alert type and capture"
+
+# --- idle watch: sweep lifecycle (young / fired / changed / vanished) ---
+# The stub notifier logs its identity-bearing invocation; delivery is
+# detached, so assertions on the log wait briefly.
+idle_notify_log="$test_dir/idle-notify.log"
+cat > "$fake_bin/notifier-stub" <<EOF
+#!/bin/bash
+printf '%s|%s|%s|%s|' "\$TMUX_PANE" "\$1" "\$2" "\$3" >> "$idle_notify_log"
+cat >> "$idle_notify_log"
+printf '\n' >> "$idle_notify_log"
+EOF
+chmod +x "$fake_bin/notifier-stub"
+wait_for_idle_log() {
+    local i
+    for i in $(seq 1 50); do
+        [[ -s "$idle_notify_log" ]] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+printf '%s' "turn finished, waiting" > "$state_dir/%3.pane_content"
+tmux_idle_watch_arm_current codex projX || fail "idle arm for the sweep tests should succeed"
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+: > "$log_file"
+: > "$idle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_agent_exit_sweep \
+    || fail "sweep with a young idle watch should succeed"
+[[ -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "a young idle watch must survive the tick"
+[[ ! -s "$idle_notify_log" ]] || fail "a young idle watch must not notify"
+grep -q "^run-shell -b -d 5 " "$log_file" \
+    || fail "an armed idle watch should keep the sweep chain alive"
+pass "young idle watch keeps the sweep ticking without notifying"
+
+# Stillness past the threshold fires the synthetic idle_prompt once, with the
+# watched pane in TMUX_PANE and the recorded identity in argv, then consumes
+# the watch and lets the chain die.
+idle_fp="$(printf '%s\n' "turn finished, waiting" | cksum)"
+printf '%s' "%3 1000 $idle_fp codex projX" > "$state_dir/@2.@code_notify_idle_watch"
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+: > "$log_file"
+: > "$idle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_agent_exit_sweep \
+    || fail "idle-firing sweep should succeed"
+wait_for_idle_log || fail "stillness past the threshold should invoke the notifier"
+[[ "$(cat "$idle_notify_log")" == '%3|notification|codex|projX|{"type":"idle_prompt"}' ]] \
+    || fail "the synthetic nudge should carry pane, event, agent, project and payload (got: $(cat "$idle_notify_log"))"
+[[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "the fired idle watch should be consumed"
+grep -q "^run-shell -b -d 5 " "$log_file" \
+    && fail "the sweep chain must die once nothing is watched"
+pass "stillness past the threshold fires the synthetic idle nudge once"
+
+# A content change means the user is already there: disarm silently, even
+# past the threshold.
+printf '%s' "turn finished, waiting" > "$state_dir/%3.pane_content"
+tmux_idle_watch_arm_current codex projX || fail "re-arm for the change test should succeed"
+printf '%s' "%3 1000 $idle_fp codex projX" > "$state_dir/@2.@code_notify_idle_watch"
+printf '%s' "user typed something" > "$state_dir/%3.pane_content"
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+: > "$log_file"
+: > "$idle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_agent_exit_sweep \
+    || fail "sweep after a content change should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "changed content should disarm the idle watch"
+sleep 0.3
+[[ ! -s "$idle_notify_log" ]] || fail "changed content must not notify"
+grep -q "^run-shell -b -d 5 " "$log_file" \
+    && fail "a disarmed idle watch must not keep the chain alive"
+pass "content change disarms the idle watch without notifying"
+
+# A vanished pane disarms silently too — after a completed turn there is no
+# recovery path worth keeping open, and cksum-of-empty must not read as a
+# stable pane.
+printf '%s' "turn finished, waiting" > "$state_dir/%3.pane_content"
+tmux_idle_watch_arm_current codex projX || fail "re-arm for the vanish test should succeed"
+printf '%s' "%3 1000 $idle_fp codex projX" > "$state_dir/@2.@code_notify_idle_watch"
+rm -f "$state_dir/%3.pane_content"   # the watched split was closed
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+: > "$idle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_agent_exit_sweep \
+    || fail "sweep with a vanished idle pane should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "a vanished pane should disarm the idle watch"
+sleep 0.3
+[[ ! -s "$idle_notify_log" ]] || fail "a vanished pane must not notify"
+pass "vanished pane disarms the idle watch silently"
+
+# --- acknowledgment paths cancel the pending nudge ---
+# Clearing the badge (glance visit, cleanup) and the click-to-clear command
+# both mean the user attended the window.
+printf '%s' "turn finished, waiting" > "$state_dir/%3.pane_content"
+tmux_badge_set "🟢" glance || fail "badge for the acknowledgment test should succeed"
+tmux_idle_watch_arm_current codex projX || fail "idle arm for the acknowledgment test should succeed"
+tmux_badge_clear "@2" || fail "badge clear should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "clearing the badge should disarm the idle watch"
+clear_cmd=$(tmux_badge_build_clear_command) || fail "clear command should build"
+[[ "$clear_cmd" == *"@code_notify_idle_watch"* ]] \
+    || fail "the click-to-clear command should disarm the idle watch"
+rm -f "$state_dir/%3.pane_content"
+pass "badge clear and notification click cancel the pending idle nudge"
 
 # --- ordinary tool lifecycle signals must not start a spinner ---
 : > "$log_file"
@@ -1508,6 +1650,47 @@ EOF
         || fail "codex UserPromptSubmit should leave a running-mode marker"
     rm -f "$HOME/.codex/hooks.json"
     pass "notifier end-to-end: codex UserPromptSubmit swaps badge for running marker"
+
+    # A codex stop arms the post-completion idle watch (codex sends nothing
+    # further once a turn ends), and a pane that then holds still past the
+    # threshold delivers a synthetic idle_prompt back through the real
+    # notifier: 🥱 badge on the origin window, toast via terminal-notifier.
+    rm -f "$state_dir"/* "$HOME/.claude/notifications/state"/* 2>/dev/null || true
+    printf '%s' "zsh" > "$state_dir/@2.window_name"
+    printf '%s' "codex done, waiting" > "$state_dir/%3.pane_content"
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        CODE_NOTIFY_SKIP_CODEX_DESKTOP_CHECK=1 CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" stop codex testproj > /dev/null 2>&1 \
+        || fail "notifier.sh stop codex (idle-arm) should exit cleanly"
+    iw="$(cat "$state_dir/@2.@code_notify_idle_watch" 2>/dev/null)"
+    [[ "$iw" == "%3 "*" codex testproj" ]] \
+        || fail "codex stop should arm the idle watch with agent and project (got: $iw)"
+    # Backdate past the threshold and run the sweep exactly as the timer
+    # would (fresh process, script dispatch); the synthetic notification
+    # must come back through the real notifier.
+    idle_fp="$(printf '%s\n' "codex done, waiting" | cksum)"
+    printf '%s' "%3 1000 $idle_fp codex testproj" > "$state_dir/@2.@code_notify_idle_watch"
+    rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+    : > "$tn_log"
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$ROOT_DIR/lib/code-notify/utils/tmux.sh" agent-exit-sweep \
+        || fail "idle sweep should run cleanly"
+    for _ in $(seq 1 100); do [[ "$(window_name)" == "🥱 zsh" ]] && break; sleep 0.1; done
+    [[ "$(window_name)" == "🥱 zsh" ]] \
+        || fail "the synthetic idle nudge should badge the window (got: $(window_name))"
+    [[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+        || fail "the fired idle watch should be consumed"
+    # The badge is written just before the toast is sent; wait for the
+    # detached delivery separately.
+    for _ in $(seq 1 100); do grep -q "Codex" "$tn_log" 2>/dev/null && break; sleep 0.1; done
+    grep -q "Codex" "$tn_log" \
+        || fail "the synthetic nudge should reach terminal-notifier"
+    rm -f "$state_dir"/* "$state_dir"/.@code_notify_* \
+        "$HOME/.claude/notifications/state"/* 2>/dev/null || true
+    printf '%s' "zsh" > "$state_dir/@2.window_name"
+    pass "notifier end-to-end: codex stop arms the idle watch and the nudge fires"
 fi
 
 echo "All tmux badge tests passed"

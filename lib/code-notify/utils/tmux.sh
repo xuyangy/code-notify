@@ -372,6 +372,10 @@ tmux_badge_clear() {
     tmux set-option -wu -t "$window_id" @code_notify_badged_name 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_clear_mode 2>/dev/null
     tmux_agent_exit_untrack "$window_id"
+    # A cleared badge means the user acknowledged this window (glance-clear
+    # visit, notification click, or the cleanup paths), so a pending
+    # post-completion idle nudge is moot.
+    tmux set-option -wu -t "$window_id" @code_notify_idle_watch 2>/dev/null
 }
 
 # Clear badges the user has implicitly acknowledged: any badged window that is
@@ -493,6 +497,21 @@ TMUX_RESUME_POLL_TTL="${CODE_NOTIFY_TMUX_RESUME_POLL_TTL:-900}"
 # static while working must not be listed.
 TMUX_SETTLE_AGENTS="${CODE_NOTIFY_TMUX_SETTLE_AGENTS:-codex}"
 TMUX_SETTLE_SECONDS="${CODE_NOTIFY_TMUX_SETTLE_SECONDS:-15}"
+# Agents with no native idle reminder (pipe-separated). Claude nudges by
+# itself once it has been waiting for input for a while (its idle_prompt
+# notification); Codex and Antigravity never do, so their windows can sit in
+# "complete" state indefinitely with no follow-up. For agents listed here a
+# turn end arms an idle watch: once the pane's rendered content has held
+# still for TMUX_IDLE_SECONDS after the completion — the user never came
+# back — one synthetic idle_prompt notification fires through the notifier.
+# This is a tmux-derived approximation of the reminder, not native idle
+# support: any repaint disarms the watch, so its failure mode is a missed
+# nudge, never a false one, and outside tmux nothing is watched at all. The
+# watch rides the agent-exit sweep, so
+# CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS=0 disables it as well.
+TMUX_IDLE_AGENTS="${CODE_NOTIFY_TMUX_IDLE_AGENTS:-codex|antigravity}"
+# Seconds of post-completion stillness before the nudge. 0 disables.
+TMUX_IDLE_SECONDS="${CODE_NOTIFY_TMUX_IDLE_SECONDS:-60}"
 
 tmux_running_enabled() {
     [[ "${CODE_NOTIFY_TMUX_RUNNING:-}" != "false" ]] && tmux_badge_enabled
@@ -563,6 +582,14 @@ tmux_running_settle_arm() {
     local pane_re='^%[0-9]+$'
     [[ "$pane_id" =~ $pane_re ]] || return 0
     tmux set-option -w -t "$window_id" @code_notify_settle_pane "$pane_id" 2>/dev/null
+    # The settle stop hands a hook-less turn end to the idle watch, which
+    # must invoke the notifier with an agent and project the sweep process
+    # cannot reconstruct — record them now, while the hook context has them.
+    # Project is best-effort: hooks run with the agent's working directory
+    # as cwd. Agent first, project last, so embedded spaces survive the
+    # positional parse.
+    tmux set-option -w -t "$window_id" @code_notify_settle_ctx \
+        "$agent $(basename "$PWD")" 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_settle_fp 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_settle_since 2>/dev/null
     # The settle check rides the agent-exit sweep; make sure it is ticking
@@ -574,8 +601,83 @@ tmux_running_settle_arm() {
 tmux_running_settle_disarm() {
     local window_id="$1"
     tmux set-option -wu -t "$window_id" @code_notify_settle_pane 2>/dev/null
+    tmux set-option -wu -t "$window_id" @code_notify_settle_ctx 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_settle_fp 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_settle_since 2>/dev/null
+}
+
+# True when idle_prompt alerts are enabled — same notify-types file config.sh
+# writes (normalized, pipe-separated; an absent file means the default, which
+# is idle_prompt only). The synthetic idle nudge bypasses hook installation,
+# so unlike Claude's native reminder it must consult the alert types itself:
+# checked at arm time to avoid pointless watches, and again at delivery so
+# removing idle_prompt mid-watch still silences an already-armed nudge.
+tmux_idle_prompt_enabled() {
+    local types_file="$HOME/.claude/notifications/notify-types"
+    local current="idle_prompt"
+    [[ -f "$types_file" ]] && current="$(cat "$types_file" 2>/dev/null)"
+    [[ "$current" == *idle_prompt* ]]
+}
+
+# Arm the post-completion idle watch (see TMUX_IDLE_AGENTS) on a window whose
+# turn just ended. Records everything the eventual synthetic notification
+# needs — none of which the sweep process can reconstruct on its own: the
+# pane to observe, the arm epoch, the content snapshot, and the agent/project
+# identity. cksum emits two whitespace-separated fields (sum and size), so
+# the packed layout is "pane epoch sum size agent project", project last so
+# embedded whitespace survives the positional parse. An uncapturable pane
+# simply never arms — with the turn over there is no recovery path worth
+# keeping open.
+tmux_idle_watch_arm() {
+    local agent="$1" project="$2" window_id="$3" pane_id="$4" fp
+    [[ "${TMUX_IDLE_SECONDS:-0}" =~ ^[0-9]+$ ]] || return 0
+    (( TMUX_IDLE_SECONDS > 0 )) || return 0
+    [[ -n "$agent" ]] || return 0
+    [[ "|$TMUX_IDLE_AGENTS|" == *"|$agent|"* ]] || return 0
+    tmux_idle_prompt_enabled || return 0
+    local pane_re='^%[0-9]+$'
+    [[ "$pane_id" =~ $pane_re ]] || return 0
+    fp=$(tmux_resume_poll_fingerprint "$pane_id") || return 0
+    [[ -n "$fp" ]] || return 0
+    tmux set-option -w -t "$window_id" @code_notify_idle_watch \
+        "$pane_id $(date +%s) $fp $agent $project" 2>/dev/null
+    # Rides the agent-exit sweep; make sure it is ticking even though the
+    # stop that led here just retired the turn's PID tracking.
+    tmux_agent_exit_schedule_sweep
+    return 0
+}
+
+# Notifier-facing entry: resolve the calling hook's window/pane, then arm.
+tmux_idle_watch_arm_current() {
+    local agent="$1" project="$2"
+    tmux_focus_available || return 0
+    local target session_id window_id pane_id
+    target=$(tmux_focus_capture_target) || return 0
+    read -r session_id window_id pane_id <<< "$target"
+    [[ "$window_id" =~ ^@[0-9]+$ ]] || return 0
+    tmux_idle_watch_arm "$agent" "$project" "$window_id" "$pane_id"
+}
+
+tmux_idle_watch_disarm() {
+    tmux set-option -wu -t "$1" @code_notify_idle_watch 2>/dev/null
+}
+
+# Deliver the synthetic idle reminder through the real notifier so it
+# inherits the whole idle_prompt pipeline — the 🥱 title and badge, sounds,
+# per-subtype rate limiting, snooze, the kill switch, and the focused-window
+# badge skip. TMUX_PANE is set to the watched pane so the badge and
+# click-to-focus target the right window; detached because a persistent
+# alert must not block the sweep tick. CODE_NOTIFY_NOTIFIER_PATH exists for
+# tests to substitute a stub.
+tmux_idle_watch_notify() {
+    local pane_id="$1" agent="$2" project="$3" notifier
+    tmux_idle_prompt_enabled || return 0
+    notifier="${CODE_NOTIFY_NOTIFIER_PATH:-${TMUX_BADGE_LIB_PATH%/*}/../core/notifier.sh}"
+    [[ -f "$notifier" ]] || return 0
+    ( printf '%s' '{"type":"idle_prompt"}' \
+        | TMUX_PANE="$pane_id" bash "$notifier" notification "$agent" "$project" ) >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    return 0
 }
 
 # One short tmux-server timer checks tracked agent PIDs. Repeating one-shots
@@ -596,14 +698,19 @@ tmux_agent_exit_schedule_sweep() {
     q_env=$(tmux_focus_shell_quote "$TMUX")
     # Pass the interval through like the TTL sweep passes the TTL: the timer's
     # fresh process would otherwise fall back to the default, so a custom
-    # interval would only survive the first firing. The settle threshold rides
-    # along for the same reason.
+    # interval would only survive the first firing. The settle and idle
+    # thresholds ride along for the same reason, and the notifier override so
+    # tests exercising the fired payload keep their stub (empty behaves as
+    # unset).
     q_poll=$(tmux_focus_shell_quote "$TMUX_AGENT_EXIT_POLL_SECONDS")
-    local q_settle
+    local q_settle q_idle q_notifier
     q_settle=$(tmux_focus_shell_quote "$TMUX_SETTLE_SECONDS")
+    q_idle=$(tmux_focus_shell_quote "$TMUX_IDLE_SECONDS")
+    q_notifier=$(tmux_focus_shell_quote "${CODE_NOTIFY_NOTIFIER_PATH:-}")
     inner="$q_tmux -S $q_socket set-option -gu @code_notify_agent_exit_sweep_scheduled; "
     inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS=$q_poll "
     inner+="CODE_NOTIFY_TMUX_SETTLE_SECONDS=$q_settle "
+    inner+="CODE_NOTIFY_TMUX_IDLE_SECONDS=$q_idle CODE_NOTIFY_NOTIFIER_PATH=$q_notifier "
     inner+="bash $q_lib agent-exit-sweep; fi"
     inner="${inner//\#/##}"
     tmux run-shell -b -d "$TMUX_AGENT_EXIT_POLL_SECONDS" "$inner" 2>/dev/null || return 0
@@ -612,10 +719,11 @@ tmux_agent_exit_schedule_sweep() {
 
 tmux_agent_exit_sweep() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
-    local now window_id pid since settle_pane live=0
-    local fp_now fp_prev settle_since mode
+    local now window_id pid since settle_pane idle_watch live=0
+    local fp_now fp_prev settle_since settle_ctx mode
+    local ipane isince ifp1 ifp2 iagent iproject
     now=$(date +%s)
-    while IFS='|' read -r window_id pid since settle_pane; do
+    while IFS='|' read -r window_id pid since settle_pane idle_watch; do
         [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
         # list-windows emits every window, with empty fields when the options
         # are unset. Windows that are neither PID-tracked nor settle-watched
@@ -634,9 +742,36 @@ tmux_agent_exit_sweep() {
                 tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
                 tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
                 tmux_running_settle_disarm "$window_id"
+                tmux_idle_watch_disarm "$window_id"
                 tmux_badge_clear "$window_id"
                 tmux_agent_exit_untrack "$window_id"
                 continue
+            fi
+        fi
+        # Post-completion idle watch (see TMUX_IDLE_AGENTS): the turn is
+        # over, so a pane still bearing the exact content it ended on means
+        # the user has not engaged the finished window — nudge once. Any
+        # other observation disarms silently (content changed, pane vanished
+        # or moved windows, capture failed, the feature got disabled
+        # mid-watch): with the turn over there is no later hook to hand off
+        # to, and a changed pane means the user is already there. This keeps
+        # the watch's lifetime hard-bounded at roughly TMUX_IDLE_SECONDS
+        # plus one tick.
+        if [[ -n "$idle_watch" ]]; then
+            read -r ipane isince ifp1 ifp2 iagent iproject <<< "$idle_watch"
+            if [[ "$ipane" =~ ^%[0-9]+$ ]] && [[ "$isince" =~ ^[0-9]+$ ]] &&
+                [[ "${TMUX_IDLE_SECONDS:-0}" =~ ^[0-9]+$ ]] && (( TMUX_IDLE_SECONDS > 0 )) &&
+                [[ "$(tmux display-message -p -t "$ipane" '#{window_id}' 2>/dev/null)" == "$window_id" ]] &&
+                fp_now=$(tmux_resume_poll_fingerprint "$ipane") &&
+                [[ "$fp_now" == "$ifp1 $ifp2" ]]; then
+                if (( now - isince >= TMUX_IDLE_SECONDS )); then
+                    tmux_idle_watch_disarm "$window_id"
+                    tmux_idle_watch_notify "$ipane" "$iagent" "$iproject"
+                else
+                    live=1
+                fi
+            else
+                tmux_idle_watch_disarm "$window_id"
             fi
         fi
         # Settle watch (see TMUX_SETTLE_AGENTS): while a watched agent's
@@ -669,6 +804,7 @@ tmux_agent_exit_sweep() {
         # window — drop the marker, clear the running rename (an event badge
         # that replaced it is left alone), and stop tracking; the next hook
         # event re-arms everything.
+        settle_ctx=$(tmux show-options -wqv -t "$window_id" @code_notify_settle_ctx 2>/dev/null)
         tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
         tmux_running_settle_disarm "$window_id"
         tmux_agent_exit_untrack "$window_id"
@@ -676,8 +812,18 @@ tmux_agent_exit_sweep() {
         if [[ "$mode" == "running" ]]; then
             tmux_badge_clear "$window_id"
         fi
+        # A hook-less turn end still deserves the post-completion nudge, so
+        # hand the window to the idle watch with the identity recorded at
+        # settle-arm time. No completion toast is synthesized — "went quiet"
+        # is too weak a signal to announce as success — but "idle and
+        # unattended" is exactly what the nudge reports.
+        if [[ -n "$settle_ctx" ]]; then
+            read -r iagent iproject <<< "$settle_ctx"
+            tmux_idle_watch_arm "$iagent" "$iproject" "$window_id" "$settle_pane"
+            live=1
+        fi
     done < <(tmux list-windows -a -F \
-        '#{window_id}|#{@code_notify_agent_pid}|#{@code_notify_running}|#{@code_notify_settle_pane}' 2>/dev/null)
+        '#{window_id}|#{@code_notify_agent_pid}|#{@code_notify_running}|#{@code_notify_settle_pane}|#{@code_notify_idle_watch}' 2>/dev/null)
     if [[ "$live" -eq 1 ]]; then
         tmux_agent_exit_schedule_sweep
     fi
@@ -873,9 +1019,11 @@ tmux_running_start() {
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
-    # A new prompt or a resumed tool turn supersedes any earlier input wait.
+    # A new prompt or a resumed tool turn supersedes any earlier input wait —
+    # and any pending post-completion idle nudge.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
+    tmux_idle_watch_disarm "$window_id"
     tmux_running_settle_arm "$window_id" "$pane_id"
     if tmux_running_spinner_enabled; then
         # The spinner is rendered independently from the window name, so it
@@ -923,6 +1071,7 @@ tmux_prompt_submit() {
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
+    tmux_idle_watch_disarm "$window_id"
     tmux_running_settle_arm "$window_id" "$TMUX_PANE"
     if tmux_running_spinner_enabled; then
         # No rename in spinner mode: drop the event badge and arm the snippet
@@ -949,10 +1098,12 @@ tmux_running_stop() {
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
     # A genuine terminal event must also retire a stale "waiting for input"
-    # marker. tmux_running_pause_for_input sets it again after this cleanup.
+    # marker. tmux_running_pause_for_input sets it again after this cleanup,
+    # and the notifier's stop path re-arms the idle watch after it.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     tmux_running_settle_disarm "$window_id"
+    tmux_idle_watch_disarm "$window_id"
     tmux_agent_exit_untrack "$window_id"
     local since mode
     since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
@@ -1045,6 +1196,7 @@ tmux_running_resume_window() {
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
+    tmux_idle_watch_disarm "$window_id"
     if tmux_running_spinner_enabled; then
         # Same shape as tmux_running_start: the waiting badge must not sit
         # next to a live spinner.
@@ -1238,6 +1390,7 @@ tmux_running_sweep_stale() {
         fi
         tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
         tmux_running_settle_disarm "$window_id"
+        tmux_idle_watch_disarm "$window_id"
         if [[ "$mode" == "running" ]]; then
             tmux_badge_clear "$window_id"
         fi
@@ -1321,6 +1474,10 @@ tmux_badge_build_clear_command() {
 
     local cmd
     cmd="t() { $q_tmux -S $q_socket \"\$@\" 2>/dev/null; }; "
+    # Clicking the notification means the user attended this window, so a
+    # pending post-completion idle nudge is moot — even when the badge was
+    # already cleared by some other path.
+    cmd+="t set-option -wu -t $q_window @code_notify_idle_watch; "
     cmd+="n=\$(t show-options -wqv -t $q_window @code_notify_orig_name); "
     cmd+="if [ -n \"\$n\" ]; then "
     # Same manual-rename guard as tmux_badge_clear: only restore when the

@@ -696,18 +696,18 @@ tmux_running_resume_after_input || fail "input resume should succeed"
 tmux_running_stop || fail "cleanup after input resume should succeed"
 pass "input pause resumes the running indicator once"
 
-# --- an input pause schedules the activity resume poll ---
-# No hook fires when the user answers an approval dialog, so the pause parks a
-# short run-shell timer on the server that watches #{window_activity}.
+# --- a watched input pause schedules the activity resume poll ---
+# No hook fires when the user answers an approval dialog, so a "watch" pause
+# parks a short run-shell timer on the server that follows #{window_activity}.
 rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
 tmux_running_start || fail "running-start before the poll-schedule test should succeed"
 : > "$log_file"
-tmux_running_pause_for_input || fail "input pause for the poll-schedule test should succeed"
+tmux_running_pause_for_input watch || fail "watched pause for the poll-schedule test should succeed"
 grep -q "^run-shell -b -d 2 " "$log_file" \
-    || fail "an input pause should schedule the 2s activity poll"
+    || fail "a watched input pause should schedule the 2s activity poll"
 [[ -f "$state_dir/.@code_notify_resume_poll_scheduled" ]] \
     || fail "the pending poll should be recorded in @code_notify_resume_poll_scheduled"
-pass "input pause schedules the activity resume poll"
+pass "watched input pause schedules the activity resume poll"
 
 # --- a quiet window keeps the poll alive without resuming ---
 # Run the timer payload exactly as tmux would (/bin/sh -c, no TMUX_PANE).
@@ -748,7 +748,7 @@ pass "activity after an answer resumes the indicator via the poll"
 # A dialog left open must not tick a 2s timer forever; the marker stays for
 # the lifecycle hooks, but the poll chain dies.
 tmux_running_start || fail "running-start for the poll TTL test should succeed"
-tmux_running_pause_for_input || fail "input pause for the poll TTL test should succeed"
+tmux_running_pause_for_input watch || fail "input pause for the poll TTL test should succeed"
 printf '%s' "1000" > "$state_dir/@2.@code_notify_resume_pending"   # ancient pause
 printf '%s' "1000" > "$state_dir/@2.window_activity"               # nothing since
 rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
@@ -760,6 +760,23 @@ grep -q "^run-shell -b -d 2 " "$log_file" \
     && fail "the poll must not reschedule past TMUX_RESUME_POLL_TTL"
 rm -f "$state_dir/@2.@code_notify_resume_pending" "$state_dir/@2.window_activity"
 pass "unanswered request past the poll TTL stops the chain"
+
+# --- an idle-style pause must not arm the activity poll ---
+# An idle reminder pauses without "watch": no turn is running, so pane
+# activity after it (clicking the toast, typing the next prompt) must not
+# light the spinner. UserPromptSubmit is its resume signal.
+rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
+tmux_running_start || fail "running-start before the idle-pause test should succeed"
+: > "$log_file"
+tmux_running_pause_for_input || fail "idle-style pause should succeed"
+grep -q "^run-shell -b -d 2 " "$log_file" \
+    && fail "a pause without watch must not schedule the activity poll"
+[[ ! -f "$state_dir/.@code_notify_resume_poll_scheduled" ]] \
+    || fail "a pause without watch must not record a pending poll"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "an idle-style pause should still retain the resume marker"
+rm -f "$state_dir/@2.@code_notify_resume_pending"
+pass "idle-style pause keeps the marker without arming the poll"
 
 # --- ordinary tool lifecycle signals must not start a spinner ---
 : > "$log_file"
@@ -1233,6 +1250,31 @@ EOF
         "$state_dir/@2.@code_notify_badged_name" 2>/dev/null || true
     printf '%s' "zsh" > "$state_dir/@2.window_name"
     pass "notifier end-to-end: input response restores the running marker"
+
+    # A permission request is an answerable mid-turn dialog: on top of the
+    # pause marker it must arm the activity resume poll. The untyped
+    # notification above (an idle-style pause) must not have — no turn is
+    # running there, and toast-click/typing activity would light the spinner.
+    [[ ! -f "$state_dir/.@code_notify_resume_poll_scheduled" ]] \
+        || fail "a generic notification must not arm the activity poll"
+    : > "$log_file"
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" notification claude testproj > /dev/null 2>&1 \
+        <<< '{"message": "Claude needs your permission to use Bash"}' \
+        || fail "notifier.sh permission request should exit cleanly"
+    [[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+        || fail "permission request should retain a tmux resume marker"
+    grep -q "^run-shell -b -d 2 " "$log_file" \
+        || fail "permission request should schedule the 2s activity poll"
+    [[ -f "$state_dir/.@code_notify_resume_poll_scheduled" ]] \
+        || fail "permission request should record the pending poll"
+    rm -f "$state_dir/@2.@code_notify_resume_pending" "$state_dir/@2.@code_notify_running" \
+        "$state_dir/@2.@code_notify_clear_mode" "$state_dir/@2.@code_notify_orig_name" \
+        "$state_dir/@2.@code_notify_autorename" "$state_dir/@2.@code_notify_badged_name" \
+        "$state_dir/.@code_notify_resume_poll_scheduled" 2>/dev/null || true
+    printf '%s' "zsh" > "$state_dir/@2.window_name"
+    pass "notifier end-to-end: permission request arms the activity poll"
 
     # Codex reaches the notifier via its hooks.json as `notifier.sh stop codex`,
     # so RAW_ARG1 is "stop" and only TOOL_NAME is "codex". With no

@@ -1139,11 +1139,21 @@ case "$HOOK_TYPE" in
         # completed authentication flow rather than a question the user must
         # answer. Preserve the pause so a subsequent tool lifecycle hook can
         # put the running indicator back immediately after the user responds.
-        if [[ "$NOTIFICATION_SUBTYPE" != "auth_success" ]]; then
-            tmux_running_pause_for_input 2>/dev/null || true
-        else
-            tmux_running_stop 2>/dev/null || true
-        fi
+        # Only answerable mid-turn dialogs watch pane activity for the answer
+        # itself: an idle reminder means no turn is running, so activity after
+        # it (clicking the toast, typing the next prompt) must not light the
+        # spinner — UserPromptSubmit is its real resume signal.
+        case "$NOTIFICATION_SUBTYPE" in
+            "auth_success")
+                tmux_running_stop 2>/dev/null || true
+                ;;
+            "permission_prompt"|"elicitation_dialog")
+                tmux_running_pause_for_input watch 2>/dev/null || true
+                ;;
+            *)
+                tmux_running_pause_for_input 2>/dev/null || true
+                ;;
+        esac
         ;;
     "PreToolUse")
         # The managed Claude AskUserQuestion hook uses this event. Once its

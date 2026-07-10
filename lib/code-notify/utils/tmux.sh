@@ -879,7 +879,16 @@ tmux_running_stop() {
 # back once the user has answered. A separate option is essential: PostToolUse
 # fires after every tool, so using the absence of @code_notify_running alone
 # would incorrectly mark completed or idle turns as active.
+#
+# Pass "watch" as $1 for answerable mid-turn dialogs (permission prompts, MCP
+# elicitations), where answering resumes the turn without any hook firing:
+# those additionally arm the activity poll (see TMUX_RESUME_POLL_SECONDS).
+# Pauses that merely mark an idle agent (idle reminders) must not watch — no
+# turn is running, so any pane activity after them (clicking the toast focuses
+# and repaints the TUI, typing the next prompt echoes) would light the spinner
+# with nothing going on.
 tmux_running_pause_for_input() {
+    local watch="${1:-}"
     tmux_focus_available || return 0
     tmux_running_stop
 
@@ -890,8 +899,8 @@ tmux_running_pause_for_input() {
     [[ "$window_id" =~ $window_re ]] || return 0
     tmux set-option -w -t "$window_id" @code_notify_resume_pending "$(date +%s)" 2>/dev/null
     # The answer itself emits no hook (see TMUX_RESUME_POLL_SECONDS), so watch
-    # the window's activity clock while the request is outstanding.
-    if tmux_running_enabled; then
+    # the window's activity clock while the dialog is outstanding.
+    if [[ "$watch" == "watch" ]] && tmux_running_enabled; then
         tmux_resume_poll_schedule
     fi
     return 0
@@ -1182,7 +1191,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         badge-clear-current) tmux_badge_clear_current ;;
         running-start) tmux_running_start ;;
         running-stop) tmux_running_stop ;;
-        running-pause) tmux_running_pause_for_input ;;
+        running-pause) tmux_running_pause_for_input "${2:-}" ;;
         running-resume) tmux_running_resume_after_input ;;
         agent-exit-sweep) tmux_agent_exit_sweep ;;
         resume-poll) tmux_resume_poll_sweep ;;

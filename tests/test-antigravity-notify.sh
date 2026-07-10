@@ -217,4 +217,58 @@ stop_once_count="$(grep -c "Task Complete - projStopOnce" "$notification_log")"
 [[ "$stop_once_count" == "1" ]] \
     || fail "native Stop produced $stop_once_count completion alerts (expected 1)"
 
+# 9) Settle gate: inside tmux, a pane still painting after the last step means
+#    the model is generating — the watcher must postpone the completion until
+#    the pane holds still for a full quiet window, then fire it. The fake tmux
+#    serves capture-pane from a file the test mutates; everything else no-ops.
+pane_content="$test_dir/pane_content"
+cat > "$fake_bin/tmux" <<EOF
+#!/bin/bash
+if [[ "\${1:-}" == "capture-pane" ]]; then
+    cat "$pane_content" 2>/dev/null
+fi
+exit 0
+EOF
+chmod +x "$fake_bin/tmux"
+
+run_agy_notifier_tmux() {
+    printf '%s' "$2" \
+    | PATH="$fake_path" \
+      TMUX="$test_dir/sock,1,0" \
+      TMUX_PANE="%9" \
+      CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
+      CODE_NOTIFY_AGY_DEBOUNCE_SECONDS=1 \
+      CODE_NOTIFY_TAIL_SYNC=1 \
+      bash "$NOTIFIER" "agy:$1" "antigravity"
+}
+
+printf '%s' "model streaming, frame 1" > "$pane_content"
+run_agy_notifier_tmux "PostToolUse" \
+    "{\"conversationId\":\"c-settle\",\"error\":\"\",$(ws projSettle)}"
+# The pane keeps painting through the first quiet window: not done yet.
+printf '%s' "model streaming, frame 2" > "$pane_content"
+sleep 1.4
+grep -q "Task Complete - projSettle" "$notification_log" \
+    && fail "completion fired while the pane was still painting"
+# The pane settles; the next full quiet window must deliver the completion.
+wait_for_lines "$notification_log" "$(( $(wc -l < "$notification_log") + 1 ))" \
+    || fail "settled pane did not deliver the postponed completion"
+grep -q "Task Complete - projSettle" "$notification_log" \
+    || fail "postponed completion was not the settle-gate delivery"
+
+# 9b) A step arriving mid-settle must still cancel the loop: arm with a
+#     painting pane, then report an error in the same conversation while the
+#     watcher is postponing. No completion may follow.
+printf '%s' "still painting A" > "$pane_content"
+run_agy_notifier_tmux "PostToolUse" \
+    "{\"conversationId\":\"c-settle-cancel\",\"error\":\"\",$(ws projSettleCancel)}"
+printf '%s' "still painting B" > "$pane_content"
+run_agy_notifier_tmux "PostToolUse" \
+    "{\"conversationId\":\"c-settle-cancel\",\"error\":{\"message\":\"mid-settle failure\"},$(ws projSettleCancel)}"
+sleep 2.5
+grep -q "Task Complete - projSettleCancel" "$notification_log" \
+    && fail "mid-settle error did not cancel the postponed completion"
+grep -q "Error - projSettleCancel" "$notification_log" \
+    || fail "mid-settle error was not reported"
+
 pass "Antigravity maps PreToolUse/PostToolUse/Stop into the correct notifications"

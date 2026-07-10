@@ -439,6 +439,18 @@ agy_permission_prompt_enabled() {
 # global stop rate limit keep this in check; repeated completions are not cooled
 # down per conversation, because that would also swallow legitimate completions
 # of quick back-to-back turns in the same session.
+#
+# Inside tmux the watcher additionally gates the completion on the pane having
+# SETTLED: agy paints the pane continuously while generating and its idle
+# prompt is static, so "no step for a quiet window" only counts as done once
+# the pane content (capture-pane checksum) also held still for a full window.
+# A changing pane re-arms the watcher instead of firing, which closes the
+# long-generation hole above. The postponement is bounded by
+# CODE_NOTIFY_AGY_SETTLE_MAX_SECONDS (default 120, 0 disables the gate): past
+# it the watcher fires on the step-quiet signal alone, so a pane that never
+# settles (unexpected animation, another process writing to it) degrades to
+# the old behavior instead of never notifying. Outside tmux there is no pane
+# to observe and the step-quiet heuristic stands alone, as before.
 
 # Path of the per-conversation debounce token. The token is the single source of
 # truth for "is a completion still pending": a newer step or an error overwrites
@@ -605,14 +617,40 @@ schedule_agy_debounced_stop() {
     # is effectively free on the per-step hot path.
     maybe_prune_agy_debounce_tokens "$now"
 
+    # Snapshot the pane for the settle gate (see the comment block above the
+    # token helpers). Empty when disabled or outside tmux, which turns the
+    # gate off in the watcher.
+    local settle_fp="" settle_deadline settle_max
+    settle_max="${CODE_NOTIFY_AGY_SETTLE_MAX_SECONDS:-120}"
+    [[ "$settle_max" =~ ^[0-9]+$ ]] || settle_max=120
+    if (( settle_max > 0 )) && tmux_focus_available; then
+        settle_fp="$(tmux_resume_poll_fingerprint "$TMUX_PANE")"
+    fi
+    settle_deadline=$((now + delay + settle_max))
+
     (
-        sleep "$delay"
-        # Only the latest activity wins; a newer step or an error overwrites the
-        # token, so earlier/cancelled watchers bail out here.
-        [[ "$(cat "$tokenfile" 2>/dev/null)" == "$token" ]] || exit 0
-        # Carry the token into StopFinal so that the completion is revalidated
-        # after the watcher crosses the process boundary.
-        printf '%s' "$HOOK_DATA" | "$SELF_NOTIFIER" "agy:StopFinal" "antigravity" "$token" >/dev/null 2>&1
+        while :; do
+            sleep "$delay"
+            # Only the latest activity wins; a newer step or an error overwrites
+            # the token, so earlier/cancelled watchers bail out here — checked
+            # every round, so a step arriving mid-settle cancels the loop too.
+            [[ "$(cat "$tokenfile" 2>/dev/null)" == "$token" ]] || exit 0
+            # Settle gate: a pane that painted during the quiet window is a
+            # model still generating, not a finished turn — re-arm on the new
+            # snapshot. Past the deadline (or when capture fails) fire on the
+            # step-quiet signal alone.
+            if [[ -n "$settle_fp" ]] && (( $(date +%s) < settle_deadline )); then
+                fp_now="$(tmux_resume_poll_fingerprint "$TMUX_PANE")"
+                if [[ -n "$fp_now" ]] && [[ "$fp_now" != "$settle_fp" ]]; then
+                    settle_fp="$fp_now"
+                    continue
+                fi
+            fi
+            # Carry the token into StopFinal so that the completion is
+            # revalidated after the watcher crosses the process boundary.
+            printf '%s' "$HOOK_DATA" | "$SELF_NOTIFIER" "agy:StopFinal" "antigravity" "$token" >/dev/null 2>&1
+            exit 0
+        done
     ) >/dev/null 2>&1 &
     disown 2>/dev/null || true
 }

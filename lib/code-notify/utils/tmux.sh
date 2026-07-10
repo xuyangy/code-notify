@@ -1163,26 +1163,26 @@ tmux_running_pause_for_input() {
     [[ "$window_id" =~ $window_re ]] || return 0
     tmux set-option -w -t "$window_id" @code_notify_resume_pending "$(date +%s)" 2>/dev/null
     # The answer itself emits no hook (see TMUX_RESUME_POLL_SECONDS), so watch
-    # the pane while the dialog is outstanding. The snapshot taken here is the
-    # dialog as rendered: the poll resumes only when the pane CONTENT changes,
+    # the pane while the dialog is outstanding. The deferred snapshot is the
+    # settled dialog as rendered: the poll resumes only when pane CONTENT changes,
     # because #{window_activity} alone also advances on a mere glance —
     # selecting the window delivers a focus event and the TUI repaints,
     # identically. The snapshot option doubles as the watch flag: pauses
     # without it (idle reminders) are never resumed by the poll.
-    local pane_re='^%[0-9]+$' snapshot=""
+    local pane_re='^%[0-9]+$'
     if [[ "$watch" == "watch" ]] && [[ "$pane_id" =~ $pane_re ]] && tmux_running_enabled; then
-        snapshot=$(tmux_resume_poll_fingerprint "$pane_id") || snapshot=""
-    fi
-    if [[ -n "$snapshot" ]]; then
+        # Do not snapshot synchronously inside the notification hook. While
+        # this command is running, Claude/Codex renders the hook's transient
+        # status message alongside the still-unanswered dialog; its removal
+        # would otherwise look like an answer at the first poll and replace
+        # the waiting badge with the running indicator. Store only the pane
+        # now; the first poll records a baseline after the hook UI has settled.
         tmux set-option -w -t "$window_id" @code_notify_pause_fp \
-            "$pane_id $snapshot" 2>/dev/null
+            "$pane_id" 2>/dev/null
         tmux_resume_poll_schedule
     else
-        # No watch, or the dialog could not be snapshotted: drop any earlier
-        # snapshot instead of arming on bad data. A stale one would let an
-        # alive poll chain (serving another window) resume this window on the
-        # next content change; an uncapturable pane leaves the lifecycle
-        # hooks as the resume path, as before the poll existed.
+        # No watch: drop any earlier snapshot instead of letting an alive poll
+        # chain (serving another window) resume this window on a later change.
         tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     fi
     return 0
@@ -1312,13 +1312,29 @@ tmux_resume_poll_sweep() {
     while IFS='|' read -r window_id pending activity fp; do
         [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
         [[ "$pending" =~ ^[0-9]+$ ]] || continue
-        # Only watch-mode pauses carry a dialog snapshot ("%pane sum size");
-        # idle-style pauses resume through their hooks, never through the poll.
+        # Only watch-mode pauses carry a pane id, followed (after the first
+        # poll) by a dialog snapshot. Idle-style pauses carry neither and
+        # resume through their hooks, never through the poll.
         pane="${fp%% *}"
         fp_saved="${fp#* }"
-        { [[ "$pane" =~ ^%[0-9]+$ ]] && [[ "$fp_saved" != "$fp" ]] &&
-            [[ -n "$fp_saved" ]]; } || continue
+        [[ "$pane" =~ ^%[0-9]+$ ]] || continue
         (( now - pending < TMUX_RESUME_POLL_TTL )) || continue
+        # The pause hook itself temporarily changes the rendered TUI. Defer
+        # the baseline until this first timer tick, after that status has gone
+        # away, so hook completion cannot be mistaken for user input.
+        if [[ "$fp_saved" == "$fp" ]] || [[ -z "$fp_saved" ]]; then
+            if [[ "$(tmux display-message -p -t "$pane" '#{window_id}' 2>/dev/null)" != "$window_id" ]]; then
+                waiting=1
+                continue
+            fi
+            fp_now=$(tmux_resume_poll_fingerprint "$pane")
+            if [[ -n "$fp_now" ]]; then
+                tmux set-option -w -t "$window_id" @code_notify_pause_fp \
+                    "$pane $fp_now" 2>/dev/null
+            fi
+            waiting=1
+            continue
+        fi
         if [[ ! "$activity" =~ ^[0-9]+$ ]] || (( activity <= pending + 1 )); then
             waiting=1
             continue

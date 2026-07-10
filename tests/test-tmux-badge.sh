@@ -707,10 +707,12 @@ tmux_running_resume_after_input || fail "input resume should succeed"
 tmux_running_stop || fail "cleanup after input resume should succeed"
 pass "input pause resumes the running indicator once"
 
-# --- a watched input pause snapshots the dialog and schedules the poll ---
+# --- a watched input pause defers its snapshot and schedules the poll ---
 # No hook fires when the user answers an approval dialog, so a "watch" pause
-# saves a checksum of the rendered dialog and parks a short run-shell timer on
-# the server. The payload carries the poll settings AND the active
+# records its pane and parks a short run-shell timer on the server. It must not
+# checksum synchronously: the hook's own transient status line is still on
+# screen and its disappearance is not a user answer. The payload carries the
+# poll settings AND the active
 # running-indicator configuration — the timer's fresh process would otherwise
 # resume with default icon/spinner/TTL, flipping per-session overrides.
 rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
@@ -723,29 +725,32 @@ grep -q "^run-shell -b -d 2 " "$log_file" \
     || fail "a watched input pause should schedule the 2s resume poll"
 [[ -f "$state_dir/.@code_notify_resume_poll_scheduled" ]] \
     || fail "the pending poll should be recorded in @code_notify_resume_poll_scheduled"
-[[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "* ]] \
-    || fail "a watched pause should save the pane's dialog snapshot"
+[[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3" ]] \
+    || fail "a watched pause should defer its dialog snapshot"
 grep "^run-shell -b -d 2 " "$log_file" | grep -q "CODE_NOTIFY_TMUX_RUNNING_ICON='🚀'" \
     || fail "the poll payload should carry the running-indicator configuration"
-pass "watched pause snapshots the dialog and schedules the poll"
+pass "watched pause defers the dialog snapshot and schedules the poll"
 
-# --- a quiet window keeps the poll alive without resuming ---
+# --- the first poll baselines the settled dialog without resuming ---
 # Run the timer payload exactly as tmux would (/bin/sh -c, no TMUX_PANE).
-# Activity one second past the pause epoch is within the grace period — the
-# dialog's own render straggling into the next second — and must not resume.
+# The notification hook's status UI may have disappeared since the pause; the
+# first poll must absorb that change as its baseline, not call it an answer.
 payload=$(sed -n 's/^run-shell -b -d 2 \(.*\)$/\1/p' "$log_file" | head -n 1)
 [[ -n "$payload" ]] || fail "the poll payload should be extractable from the run-shell call"
 pending=$(cat "$state_dir/@2.@code_notify_resume_pending")
-printf '%s' "$((pending + 1))" > "$state_dir/@2.window_activity"
+printf '%s' "approval dialog after hook status cleared" > "$state_dir/%3.pane_content"
+printf '%s' "$((pending + 5))" > "$state_dir/@2.window_activity"
 : > "$log_file"
 env -u TMUX_PANE /bin/sh -c "$payload" || fail "the poll payload should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
-    || fail "activity within the grace period must not restore the running epoch"
+    || fail "the first poll must not restore the running epoch"
 [[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
     || fail "a quiet window should keep its pause marker"
+[[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "* ]] \
+    || fail "the first poll should save the settled dialog baseline"
 grep -q "^run-shell -b -d 2 " "$log_file" \
     || fail "the poll should reschedule while a pause marker remains"
-pass "quiet window keeps the poll alive without resuming"
+pass "first poll baselines hook UI changes without resuming"
 
 # --- a glance (activity without content change) must not resume ---
 # Visiting the waiting window delivers a focus event and the TUI repaints the
@@ -849,24 +854,34 @@ grep -q "^run-shell -b -d 2 " "$log_file" \
     || fail "a pause without watch must not leave a dialog snapshot"
 [[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
     || fail "an idle-style pause should still retain the resume marker"
-rm -f "$state_dir/@2.@code_notify_resume_pending"
+rm -f "$state_dir/@2.@code_notify_resume_pending" \
+    "$state_dir/@2.@code_notify_pause_fp" \
+    "$state_dir/.@code_notify_resume_poll_scheduled"
 pass "idle-style pause keeps the marker without arming the poll"
 
-# --- a watched pause with an uncapturable pane must not arm the poll ---
-# Without a snapshot the poll has nothing sound to compare against; the
-# lifecycle hooks stay the resume path, exactly as before the poll existed.
+# --- an uncapturable pane keeps only the deferred watch marker ---
+# Capture is deliberately deferred until the hook UI settles. If that first
+# capture fails, the poll keeps the pane-only marker and retries; it must never
+# manufacture a checksum or resume the window from missing content.
 rm -f "$state_dir/.@code_notify_resume_poll_scheduled" "$state_dir/%3.pane_content"
 tmux_running_start || fail "running-start before the no-snapshot test should succeed"
 : > "$log_file"
 tmux_running_pause_for_input watch || fail "watched pause without a capturable pane should succeed"
-[[ ! -f "$state_dir/@2.@code_notify_pause_fp" ]] \
-    || fail "an uncapturable pane must not leave a dialog snapshot"
+[[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3" ]] \
+    || fail "a deferred watch should initially retain only its pane id"
+tmux_resume_poll_sweep || fail "the first uncapturable-pane poll should succeed"
+[[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3" ]] \
+    || fail "a failed baseline capture must not create a dialog checksum"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a failed baseline capture must not resume the running indicator"
 grep -q "^run-shell -b -d 2 " "$log_file" \
-    && fail "an uncapturable pane must not schedule the resume poll"
+    || fail "an uncapturable pane should remain watched for a later capture"
 [[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
     || fail "the pause marker should still be retained for the hooks"
-rm -f "$state_dir/@2.@code_notify_resume_pending"
-pass "watched pause without a snapshot leaves resume to the hooks"
+rm -f "$state_dir/@2.@code_notify_resume_pending" \
+    "$state_dir/@2.@code_notify_pause_fp" \
+    "$state_dir/.@code_notify_resume_poll_scheduled"
+pass "uncapturable pane remains paused while the baseline is retried"
 
 # --- codex running marker arms the settle watch; claude's does not ---
 # Codex ends /review without any turn-end hook, so its running marker gets a
@@ -1602,8 +1617,8 @@ EOF
         || fail "notifier.sh permission request should exit cleanly"
     [[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
         || fail "permission request should retain a tmux resume marker"
-    [[ "$(cat "$state_dir/@2.@code_notify_pause_fp" 2>/dev/null)" == "%3 "* ]] \
-        || fail "permission request should save the pane's dialog snapshot"
+    [[ "$(cat "$state_dir/@2.@code_notify_pause_fp" 2>/dev/null)" == "%3" ]] \
+        || fail "permission request should defer its dialog snapshot"
     grep -q "^run-shell -b -d 2 " "$log_file" \
         || fail "permission request should schedule the 2s resume poll"
     [[ -f "$state_dir/.@code_notify_resume_poll_scheduled" ]] \

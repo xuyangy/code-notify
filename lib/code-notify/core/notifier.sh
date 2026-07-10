@@ -1257,8 +1257,8 @@ case "$HOOK_TYPE" in
         VOICE_MESSAGE="$MESSAGE"
         ;;
     "SubagentStart")
-        TITLE="$TOOL_DISPLAY 🌱"
-        BADGE_ICON="🌱"
+        TITLE="$TOOL_DISPLAY 🍃"
+        BADGE_ICON="🍃"
         SUBTITLE="Subagent Started"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY started a subagent" \
@@ -1269,8 +1269,8 @@ case "$HOOK_TYPE" in
         SOUND="Pop"
         ;;
     "SubagentStop")
-        TITLE="$TOOL_DISPLAY 🍃"
-        BADGE_ICON="🍃"
+        TITLE="$TOOL_DISPLAY 🍂"
+        BADGE_ICON="🍂"
         SUBTITLE="Subagent Complete"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY subagent completed" \

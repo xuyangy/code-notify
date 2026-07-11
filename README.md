@@ -176,8 +176,8 @@ Project-scoped Claude hooks override the global mute file, so `cn off` will not 
 
 ### tmux Running Spinner
 
-By default, an active Claude or Codex agent is marked with a static 🌕 icon in
-its tmux window name. To show an animated 🌑🌒🌓🌔🌕🌖🌗🌘 indicator in tmux's
+By default, an active Claude, Codex, or Antigravity agent is marked with a static
+🌕 icon in its tmux window name. To show an animated 🌑🌒🌓🌔🌕🌖🌗🌘 indicator in tmux's
 status line instead:
 
 ```bash

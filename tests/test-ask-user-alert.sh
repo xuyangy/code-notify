@@ -126,4 +126,91 @@ if not any(
     raise SystemExit("custom Bash hook was removed")
 PYTHON
 
-echo "PASS: ask_user alert preserves custom PreToolUse hooks"
+# Runtime regression: Claude follows an AskUserQuestion PreToolUse event with a
+# generic permission_prompt Notification for the same question UI. The latter
+# must not replace the specific question alert. Correlation is session-scoped
+# and one-shot so genuine approvals still get through.
+notifier="$ROOT_DIR/lib/code-notify/core/notifier.sh"
+fake_bin="$test_dir/bin"
+log_dir="$test_dir/log"
+mkdir -p "$fake_bin" "$log_dir" "$CLAUDE_HOME/logs"
+
+case "$(uname -s)" in
+    Darwin)
+        notification_log="$log_dir/terminal-notifier.log"
+        cat > "$fake_bin/terminal-notifier" <<EOF
+#!/bin/bash
+if [[ "\${1:-}" == "-help" ]]; then exit 0; fi
+printf '%s\n' "\$*" >> "$notification_log"
+EOF
+        ;;
+    Linux)
+        notification_log="$log_dir/notify-send.log"
+        cat > "$fake_bin/notify-send" <<EOF
+#!/bin/bash
+printf '%s\n' "\$*" >> "$notification_log"
+EOF
+        ;;
+    *)
+        echo "SKIP: unsupported OS for ask_user delivery test"
+        echo "PASS: ask_user alert preserves custom PreToolUse hooks"
+        exit 0
+        ;;
+esac
+chmod +x "$fake_bin"/*
+fake_path="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+run_notifier() {
+    local hook_type="$1" payload="$2"
+    printf '%s\n' "$payload" | env -u TMUX -u TMUX_PANE \
+        PATH="$fake_path" \
+        CODE_NOTIFY_TAIL_SYNC=1 \
+        bash "$notifier" "$hook_type" claude test-project
+}
+
+line_count() {
+    if [[ -f "$notification_log" ]]; then
+        wc -l < "$notification_log" | tr -d ' '
+    else
+        printf '%s\n' 0
+    fi
+}
+
+question_payload() {
+    local session_id="$1" question="$2"
+    printf '{"session_id":"%s","hook_event_name":"PreToolUse","tool_name":"AskUserQuestion","tool_use_id":"tool-question","tool_input":{"questions":[{"question":"%s"}]}}' \
+        "$session_id" "$question"
+}
+
+permission_payload() {
+    local session_id="$1"
+    printf '{"session_id":"%s","hook_event_name":"Notification","message":"Claude needs your permission","notification_type":"permission_prompt"}' \
+        "$session_id"
+}
+
+run_notifier PreToolUse "$(question_payload session-a 'Which database should I use?')"
+[[ "$(line_count)" == "1" ]] || fail "question notification was not delivered"
+grep -q "Which database should I use?" "$notification_log" ||
+    fail "question text was missing from the notification"
+
+run_notifier notification "$(permission_payload session-a)"
+[[ "$(line_count)" == "1" ]] ||
+    fail "same-session permission duplicate replaced the question notification"
+
+# The marker is consumed, so a real subsequent approval in the same session
+# must not be hidden.
+run_notifier notification "$(permission_payload session-a)"
+[[ "$(line_count)" == "2" ]] ||
+    fail "a later same-session permission request was suppressed"
+
+# A question in one Claude session must not suppress another session's real
+# approval request; its own immediate duplicate is still discarded afterward.
+run_notifier PreToolUse "$(question_payload session-b 'Which API should I call?')"
+run_notifier notification "$(permission_payload session-c)"
+[[ "$(line_count)" == "4" ]] ||
+    fail "cross-session permission request was suppressed"
+run_notifier notification "$(permission_payload session-b)"
+[[ "$(line_count)" == "4" ]] ||
+    fail "second question's permission duplicate was delivered"
+
+echo "PASS: ask_user alert preserves hooks and suppresses only its duplicate permission notification"

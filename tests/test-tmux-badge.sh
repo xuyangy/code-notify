@@ -1651,6 +1651,30 @@ EOF
         && fail "Claude badge-set must not arm the glance-clear focus hook"
     pass "notifier end-to-end: Claude badges without glance-clearing"
 
+    # AskUserQuestion has its own specific PreToolUse alert. Claude immediately
+    # follows it with a generic permission_prompt Notification for the same UI;
+    # that duplicate must not replace either the 🙋 badge or desktop alert.
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" PreToolUse claude testproj > /dev/null 2>&1 \
+        <<< '{"session_id":"question-session","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which database?"}]}}' \
+        || fail "notifier.sh AskUserQuestion should exit cleanly"
+    [[ "$(window_name)" == "🙋 zsh" ]] \
+        || fail "AskUserQuestion should set the question badge (got: $(window_name))"
+    grep -q "Which database?" "$tn_log" \
+        || fail "AskUserQuestion should deliver the question notification"
+    question_notification_checksum="$(cksum < "$tn_log")"
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" notification claude testproj > /dev/null 2>&1 \
+        <<< '{"session_id":"question-session","message":"Claude needs your permission","notification_type":"permission_prompt"}' \
+        || fail "notifier.sh duplicate permission event should exit cleanly"
+    [[ "$(window_name)" == "🙋 zsh" ]] \
+        || fail "duplicate permission event replaced the question badge (got: $(window_name))"
+    [[ "$(cksum < "$tn_log")" == "$question_notification_checksum" ]] \
+        || fail "duplicate permission event replaced the desktop question notification"
+    pass "notifier end-to-end: question survives its generic permission duplicate"
+
     # UserPromptSubmit: the user handed this window work, so the event badge
     # clears and the running marker (agent now working) replaces it.
     CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \

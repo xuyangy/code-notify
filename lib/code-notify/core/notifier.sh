@@ -117,6 +117,15 @@ print(value if isinstance(value, str) else "", end="")
             # default token and concurrent turns cancel each other's completion.
             printf '%s' "$json" | sed -nE 's/.*"conversationId"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
             ;;
+        "session_id")
+            # Claude lifecycle and Notification hooks share this identifier.
+            # It lets the notifier correlate an AskUserQuestion PreToolUse
+            # event with Claude's generic permission_prompt for the same UI.
+            printf '%s' "$json" | sed -nE 's/.*"session_id"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
+            ;;
+        "tool_name")
+            printf '%s' "$json" | sed -nE 's/.*"tool_name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
+            ;;
     esac
 }
 
@@ -869,6 +878,67 @@ get_legacy_rate_limit_file() {
     printf '%s/%s\n' "$NOTIFICATIONS_DIR" "$key"
 }
 
+# Claude emits two hook events for one AskUserQuestion UI: the specific
+# PreToolUse event (which supplies the question text) followed immediately by
+# a generic permission_prompt Notification. Without correlating them, the
+# generic event replaces both the 🙋 tmux badge and the macOS notification
+# group with a misleading approval alert.
+#
+# Keep a short-lived, session-scoped marker for the specific event. The first
+# matching permission prompt atomically consumes it, so a later real approval
+# request in the same session is still delivered. The age check is a fallback
+# for interrupted/older Claude installs where the generic event never arrives.
+ASK_USER_PERMISSION_DUPLICATE_WINDOW_SECONDS="${CODE_NOTIFY_ASK_USER_DUPLICATE_WINDOW_SECONDS:-15}"
+
+get_ask_user_pending_file() {
+    local session_id hook_scope
+    session_id=$(json_extract_string "$HOOK_DATA" "session_id")
+    [[ -n "$session_id" ]] || return 1
+    # Global and project-scoped hooks can both be enabled. Keep one marker per
+    # registration scope so each scope's generic Notification consumes only
+    # the marker created by its matching PreToolUse command.
+    hook_scope="${RAW_ARG3:-global}"
+    get_rate_limit_file "pending_ask_user_${TOOL_NAME}_${hook_scope}_${session_id}"
+}
+
+mark_ask_user_pending() {
+    local tool_name marker_file marker_tmp
+    [[ "$TOOL_NAME" == "claude" ]] || return 0
+    [[ "$HOOK_TYPE" == "PreToolUse" ]] || return 0
+
+    # The managed PreToolUse command is matcher-scoped to AskUserQuestion, but
+    # retain this payload check so a manually reused notifier command cannot
+    # suppress an unrelated approval notification.
+    tool_name=$(json_extract_string "$HOOK_DATA" "tool_name")
+    [[ "$tool_name" == "AskUserQuestion" ]] || return 0
+    marker_file=$(get_ask_user_pending_file) || return 0
+
+    mkdir -p "$RATE_LIMIT_DIR"
+    marker_tmp="${marker_file}.tmp.$$"
+    date +%s > "$marker_tmp" || return 0
+    mv -f "$marker_tmp" "$marker_file" 2>/dev/null || rm -f "$marker_tmp"
+}
+
+consume_recent_ask_user_pending() {
+    local marker_file claim_file marked_at now age window
+    marker_file=$(get_ask_user_pending_file) || return 1
+    [[ -f "$marker_file" ]] || return 1
+
+    # Claim by rename so concurrent/repeated Notification hooks cannot both
+    # consume the same question marker.
+    claim_file="${marker_file}.claim.$$"
+    mv "$marker_file" "$claim_file" 2>/dev/null || return 1
+    marked_at=$(cat "$claim_file" 2>/dev/null || true)
+    rm -f "$claim_file"
+
+    window="$ASK_USER_PERMISSION_DUPLICATE_WINDOW_SECONDS"
+    [[ "$window" =~ ^[0-9]+$ ]] || window=15
+    [[ "$marked_at" =~ ^[0-9]+$ ]] || return 1
+    now=$(date +%s)
+    age=$((now - marked_at))
+    (( age >= 0 && age <= window ))
+}
+
 get_notification_subtype() {
     # Match approval/permission tokens against the structured type field when
     # the payload has one, so free-form message text containing words like
@@ -1158,6 +1228,20 @@ if [[ "$HOOK_TYPE" == "notification" ]]; then
     else
         NOTIFICATION_SUBTYPE=$(get_notification_subtype)
     fi
+fi
+
+# Prefer the specific AskUserQuestion notification over Claude's immediately
+# following generic permission alert. Exit before any running-state, badge,
+# audio, channel, or desktop-notification side effects so the 🙋 state remains
+# intact. Other sessions and the next permission prompt in this session do not
+# share the consumed marker and proceed normally.
+if [[ "$HOOK_TYPE" == "PreToolUse" ]]; then
+    mark_ask_user_pending
+elif [[ "$TOOL_NAME" == "claude" ]] &&
+    [[ "$HOOK_TYPE" == "notification" ]] &&
+    [[ "$NOTIFICATION_SUBTYPE" == "permission_prompt" ]] &&
+    consume_recent_ask_user_pending; then
+    exit 0
 fi
 
 # Map the current event to the canonical key stored by `cn alerts persist add`.

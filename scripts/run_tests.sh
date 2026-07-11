@@ -319,11 +319,11 @@ else
     test_fail "Claude event alert hooks failed"
 fi
 
-test_start "ask_user alert preservation"
+test_start "ask_user notification lifecycle"
 if bash tests/test-ask-user-alert.sh >/dev/null 2>&1; then
     test_pass
 else
-    test_fail "ask_user alert preservation failed"
+    test_fail "ask_user notification lifecycle failed"
 fi
 
 # Test 24: UserPromptSubmit badge-clear hook installs/removes across jq+python

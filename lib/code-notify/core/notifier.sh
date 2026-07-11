@@ -47,6 +47,18 @@ if [[ "$RAW_ARG1" != agy:* ]] && {
     [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "PostToolUse" ]] ||
     [[ "${CLAUDE_HOOK_TYPE:-$RAW_ARG1}" == "ResumeAfterInput" ]]
 }; then
+    # Fast gate: that marker is mirrored to a flag file per paused window (see
+    # tmux_resume_flag_set) precisely so this hook — which the agent runs
+    # synchronously around every tool call — can stat a directory instead of
+    # sourcing the tmux library and making two server round-trips just to
+    # learn nothing is pending. Outside tmux, or with no flag for this
+    # server's socket, there is nothing to resume. A stale flag only costs
+    # the full path below; a lost flag is healed by the resume poll.
+    [[ -n "${TMUX:-}" ]] || exit 0
+    RESUME_SOCKET_BASE="${TMUX%%,*}"
+    RESUME_SOCKET_BASE="${RESUME_SOCKET_BASE##*/}"
+    RESUME_FLAGS=("$HOME/.claude/notifications/state/resume-pending/${RESUME_SOCKET_BASE:-default}".*)
+    [[ -e "${RESUME_FLAGS[0]}" ]] || exit 0
     source "$NOTIFIER_DIR/../utils/tmux.sh"
     CODE_NOTIFY_TMUX_AGENT_NAME="${RAW_ARG2:-}"
     tmux_running_resume_after_input 2>/dev/null || true

@@ -775,6 +775,7 @@ tmux_agent_exit_sweep() {
                 # (tmux_badge_clear already preserves one).
                 tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
                 tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+                tmux_resume_flag_clear "$window_id"
                 tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
                 tmux_running_settle_disarm "$window_id"
                 tmux_idle_watch_disarm "$window_id"
@@ -1084,6 +1085,7 @@ tmux_running_start() {
     # A new prompt or a resumed tool turn supersedes any earlier input wait —
     # and any pending post-completion idle nudge.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+    tmux_resume_flag_clear "$window_id"
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     tmux_idle_watch_disarm "$window_id"
     tmux_running_settle_arm "$window_id" "$pane_id"
@@ -1132,6 +1134,7 @@ tmux_prompt_submit() {
 
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+    tmux_resume_flag_clear "$window_id"
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     tmux_idle_watch_disarm "$window_id"
     tmux_running_settle_arm "$window_id" "$TMUX_PANE"
@@ -1169,6 +1172,7 @@ tmux_running_stop() {
     # has no agent ancestry to re-resolve the PID from. An untrack that
     # nothing re-arms would orphan that badge forever once the agent exits.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+    tmux_resume_flag_clear "$window_id"
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     tmux_running_settle_disarm "$window_id"
     tmux_idle_watch_disarm "$window_id"
@@ -1182,6 +1186,45 @@ tmux_running_stop() {
         fi
     fi
     tmux_spinner_disarm_if_idle
+    return 0
+}
+
+# The notifier's per-tool-call hooks (PreToolUse/PostToolUse) only need to do
+# work while some window is paused for input, yet learning "nothing pending"
+# from the tmux server costs two client round-trips plus sourcing this library
+# on every tool call. Mirror the pause state into a flag file per paused
+# window so the hook can stat a directory before sourcing anything (see the
+# fast gate in notifier.sh). The flag is advisory in both directions: a stale
+# flag only routes hooks through the full path below (the pre-flag behavior),
+# and a lost flag is healed by the resume poll, which resumes paused windows
+# on its own. Flags are scoped by server socket basename so hooks on one
+# server don't pay for a pause on another.
+TMUX_RESUME_FLAG_DIR="$HOME/.claude/notifications/state/resume-pending"
+
+tmux_resume_flag_path() {
+    local window_id="$1" socket_base
+    socket_base="${TMUX%%,*}"
+    socket_base="${socket_base##*/}"
+    printf '%s/%s.%s' "$TMUX_RESUME_FLAG_DIR" "${socket_base:-default}" "$window_id"
+}
+
+tmux_resume_flag_set() {
+    local window_id="$1"
+    mkdir -p "$TMUX_RESUME_FLAG_DIR" 2>/dev/null || return 0
+    # Orphan GC: a window killed mid-pause takes @code_notify_resume_pending
+    # with it, so no clear site ever fires for its flag. Anything older than
+    # the running-marker TTL is certainly dead; a stale flag only costs the
+    # slow path, so this coarse bound is enough and runs on the rare pause
+    # event rather than in the per-tool-call hooks.
+    find "$TMUX_RESUME_FLAG_DIR" -type f -mmin +$((TMUX_RUNNING_TTL / 60)) \
+        -delete 2>/dev/null
+    : > "$(tmux_resume_flag_path "$window_id")" 2>/dev/null
+    return 0
+}
+
+tmux_resume_flag_clear() {
+    local window_id="$1"
+    rm -f "$(tmux_resume_flag_path "$window_id")" 2>/dev/null
     return 0
 }
 
@@ -1209,6 +1252,7 @@ tmux_running_pause_for_input() {
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
     tmux set-option -w -t "$window_id" @code_notify_resume_pending "$(date +%s)" 2>/dev/null
+    tmux_resume_flag_set "$window_id"
     # The answer itself emits no hook (see TMUX_RESUME_POLL_SECONDS), so watch
     # the pane while the dialog is outstanding. The deferred snapshot is the
     # settled dialog as rendered: the poll resumes only when pane CONTENT changes,
@@ -1262,6 +1306,7 @@ tmux_running_resume_window() {
     tmux_running_enabled || return 0
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+    tmux_resume_flag_clear "$window_id"
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     tmux_idle_watch_disarm "$window_id"
     if tmux_running_spinner_enabled; then

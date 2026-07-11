@@ -23,6 +23,12 @@ test_dir="$(mktemp -d)"
 QUOTE_SOCK="cn-badge-qtest-$$"
 quote_sock_path=""
 cleanup() {
+    # A fail after the end-to-end fake agent starts exits through this trap;
+    # reap it instead of leaving a five-minute sleep behind per failed run.
+    if [[ -n "${idle_agent_pid:-}" ]]; then
+        kill "$idle_agent_pid" 2>/dev/null || true
+        wait "$idle_agent_pid" 2>/dev/null || true
+    fi
     if [[ -n "$REAL_TMUX" ]]; then
         # || true: on skip/early-exit paths no server was started, so kill-server
         # fails on a nonexistent socket; under set -e that would abort the trap
@@ -30,6 +36,15 @@ cleanup() {
         "$REAL_TMUX" -L "$QUOTE_SOCK" kill-server 2>/dev/null || true
         [[ -n "$quote_sock_path" ]] && rm -f "$quote_sock_path"
     fi
+    # The end-to-end section fires detached notifier runs whose side effects
+    # the tests wait for, but the process itself may still be writing under
+    # the sandbox HOME (e.g. python's bytecode cache) while this rm walks the
+    # tree — "Directory not empty" would taint the exit status, so retry.
+    local i
+    for i in 1 2 3 4 5; do
+        rm -rf "$test_dir" 2>/dev/null && return 0
+        sleep 0.5
+    done
     rm -rf "$test_dir"
 }
 trap cleanup EXIT
@@ -82,18 +97,6 @@ case "$cmd" in
         # options so epoch round-trips are exercised for real.
         if [[ "$fmt" == *window_active* ]]; then
             printf '%s\n' "$FAKE_TMUX_WINDOWS"
-        elif [[ "$fmt" == *resume_pending* ]]; then
-            # The resume poll pairs each pending epoch with the window's
-            # activity clock and dialog snapshot; the activity value comes
-            # from a per-window state file so tests can move it independently
-            # of the pause epoch.
-            for f in "$FAKE_TMUX_STATE"/@*.@code_notify_resume_pending; do
-                [[ -e "$f" ]] || continue
-                w="${f##*/}"; w="${w%%.*}"
-                act=$(cat "$FAKE_TMUX_STATE/${w}.window_activity" 2>/dev/null)
-                fp=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_pause_fp" 2>/dev/null)
-                printf '%s|%s|%s|%s\n' "$w" "$(cat "$f")" "$act" "$fp"
-            done
         elif [[ "$fmt" == *code_notify_agent_pid* ]]; then
             # Real tmux emits EVERY window, with an empty field when the
             # option is unset — the sweep must cope with untracked windows,
@@ -108,7 +111,21 @@ case "$cmd" in
                 run=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_running" 2>/dev/null)
                 sp=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_settle_pane" 2>/dev/null)
                 iw=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_idle_watch" 2>/dev/null)
-                printf '%s|%s|%s|%s|%s\n' "$w" "$pid" "$run" "$sp" "$iw"
+                rp=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_resume_pending" 2>/dev/null)
+                on=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_orig_name" 2>/dev/null)
+                printf '%s|%s|%s|%s|%s|%s|%s\n' "$w" "$pid" "$run" "$sp" "$iw" "$rp" "$on"
+            done
+        elif [[ "$fmt" == *resume_pending* ]]; then
+            # The resume poll pairs each pending epoch with the window's
+            # activity clock and dialog snapshot; the activity value comes
+            # from a per-window state file so tests can move it independently
+            # of the pause epoch.
+            for f in "$FAKE_TMUX_STATE"/@*.@code_notify_resume_pending; do
+                [[ -e "$f" ]] || continue
+                w="${f##*/}"; w="${w%%.*}"
+                act=$(cat "$FAKE_TMUX_STATE/${w}.window_activity" 2>/dev/null)
+                fp=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_pause_fp" 2>/dev/null)
+                printf '%s|%s|%s|%s\n' "$w" "$(cat "$f")" "$act" "$fp"
             done
         else
             for f in "$FAKE_TMUX_STATE"/*.@code_notify_running; do
@@ -156,6 +173,10 @@ export FAKE_TMUX_STATE="$state_dir"
 # Keep the disabled-flag file inside the sandbox
 export HOME="$test_dir/home"
 mkdir -p "$HOME"
+# The real notifier falls back to python3 for JSON parsing when jq is off the
+# restricted PATH; keep its bytecode cache out of the sandbox HOME so a
+# detached run cannot repopulate the tree while the cleanup trap removes it.
+export PYTHONDONTWRITEBYTECODE=1
 
 source "$ROOT_DIR/lib/code-notify/utils/tmux.sh"
 
@@ -646,6 +667,39 @@ tmux_agent_exit_sweep || fail "badge agent-exit sweep should succeed"
     || fail "agent exit should drop pending badge state"
 pass "agent exit clears a pending event badge promptly"
 
+# --- running-stop leaves exit tracking on a window that still carries a badge ---
+# The stop pipeline calls tmux_running_stop before applying the completion
+# badge, and some callers can never re-track afterwards: a synthetic notifier
+# run (idle nudge, settle completion) has no agent ancestry to resolve a PID
+# from, and badge-set skips a visible window entirely. If running-stop dropped
+# the PID, the badge those paths leave behind would outlive the agent forever.
+tmux_badge_set "🟢" engage || fail "badge before running-stop tracking test should succeed"
+printf '%s' "$$" > "$state_dir/@2.@code_notify_agent_pid"
+tmux_running_stop || fail "running-stop for the tracking test should succeed"
+[[ "$(cat "$state_dir/@2.@code_notify_agent_pid" 2>/dev/null)" == "$$" ]] \
+    || fail "running-stop must keep the tracked agent PID for the remaining badge"
+[[ "$(window_name)" == "🟢 zsh" ]] \
+    || fail "running-stop must leave the event badge in place (got: $(window_name))"
+pass "running-stop keeps exit tracking alive for the remaining badge"
+
+# --- the sweep serves a live agent's badge but retires a bare PID ---
+# While the badge from above is up, a tick must keep the tracking (that is
+# what cleans the badge when the agent exits). Once nothing remains on the
+# window — e.g. a suppressed spinner-mode stop applied no badge — the same
+# tick must retire the PID so the sweep chain winds down instead of polling
+# for the rest of a long-lived agent session.
+tmux_agent_exit_sweep || fail "sweep over a live tracked badge should succeed"
+[[ "$(cat "$state_dir/@2.@code_notify_agent_pid" 2>/dev/null)" == "$$" ]] \
+    || fail "a live agent's badge must keep its exit tracking across ticks"
+[[ "$(window_name)" == "🟢 zsh" ]] \
+    || fail "a tick with the agent alive must leave the badge alone (got: $(window_name))"
+tmux_badge_clear "@2"
+printf '%s' "$$" > "$state_dir/@2.@code_notify_agent_pid"
+tmux_agent_exit_sweep || fail "sweep over a bare tracked window should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_agent_pid" ]] \
+    || fail "a live agent with nothing to clean must stop being polled"
+pass "sweep keeps tracking for badges, retires bare PIDs"
+
 # --- agent exit cleanup is scoped to the owning window ---
 # A tmux server can have several Codex/Claude/agy panes. A dead process in one
 # must not clear an unrelated live agent's marker or badge.
@@ -936,6 +990,10 @@ tmux_agent_exit_sweep || fail "second settle tick should succeed"
 [[ -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "a still-painting pane must keep the running marker"
 : > "$settle_notify_log"
+# The synthetic completion cannot re-resolve the agent PID (it runs in the
+# sweep's process tree), so the sweep must restore the tracking it verified —
+# otherwise the completion badge would outlive the agent forever.
+printf '%s' "$$" > "$state_dir/@2.@code_notify_agent_pid"
 CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" \
     TMUX_SETTLE_SECONDS=0 tmux_agent_exit_sweep \
     || fail "settling tick should succeed"
@@ -947,7 +1005,9 @@ CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" \
     || fail "the settle stop should disarm the watch"
 [[ "$(cat "$settle_notify_log")" == "%3|stop|codex|"*"|zsh|0" ]] \
     || fail "settle should invoke stop only after clearing the running rendering (got: $(cat "$settle_notify_log"))"
-rm -f "$state_dir/%3.pane_content"
+[[ "$(cat "$state_dir/@2.@code_notify_agent_pid" 2>/dev/null)" == "$$" ]] \
+    || fail "the settle completion must keep the exit tracking for its badge"
+rm -f "$state_dir/%3.pane_content" "$state_dir/@2.@code_notify_agent_pid"
 pass "settled codex pane retires running state before synthetic completion"
 
 # --- scheduled settle completion preserves idle configuration ---
@@ -1842,9 +1902,15 @@ EOF
         || fail "codex stop should arm the idle watch with agent and project (got: $iw)"
     # Backdate past the threshold and run the sweep exactly as the timer
     # would (fresh process, script dispatch); the synthetic notification
-    # must come back through the real notifier.
+    # must come back through the real notifier. A tracked agent PID rides
+    # along: the nudge runs outside codex's process tree and cannot
+    # re-resolve it, so its stop-pipeline cleanup must leave it in place —
+    # dropping it here is what orphaned 🥱 badges after the agent exited.
     idle_fp="$(printf '%s\n' "codex done, waiting" | cksum)"
     printf '%s' "%3 1000 $idle_fp stable codex testproj" > "$state_dir/@2.@code_notify_idle_watch"
+    sleep 300 &
+    idle_agent_pid=$!
+    printf '%s' "$idle_agent_pid" > "$state_dir/@2.@code_notify_agent_pid"
     rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
     : > "$tn_log"
     CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
@@ -1861,6 +1927,18 @@ EOF
     for _ in $(seq 1 100); do grep -q "Codex" "$tn_log" 2>/dev/null && break; sleep 0.1; done
     grep -q "Codex" "$tn_log" \
         || fail "the synthetic nudge should reach terminal-notifier"
+    [[ "$(cat "$state_dir/@2.@code_notify_agent_pid" 2>/dev/null)" == "$idle_agent_pid" ]] \
+        || fail "the synthetic nudge must keep the exit tracking for its 🥱 badge"
+    # The user quits codex with the 🥱 badge up: the next sweep tick is the
+    # only path that can clear it, and only the retained PID lets it.
+    kill "$idle_agent_pid" 2>/dev/null || true
+    wait "$idle_agent_pid" 2>/dev/null || true
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$ROOT_DIR/lib/code-notify/utils/tmux.sh" agent-exit-sweep \
+        || fail "post-exit sweep should run cleanly"
+    [[ "$(window_name)" == "zsh" ]] \
+        || fail "exiting the agent must clear the 🥱 badge (got: $(window_name))"
     rm -f "$state_dir"/* "$state_dir"/.@code_notify_* \
         "$HOME/.claude/notifications/state"/* 2>/dev/null || true
     printf '%s' "zsh" > "$state_dir/@2.window_name"

@@ -742,11 +742,13 @@ tmux_agent_exit_schedule_sweep() {
 
 tmux_agent_exit_sweep() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
-    local now window_id pid since settle_pane idle_watch live=0
+    local now window_id pid since settle_pane idle_watch resume orig live=0
     local fp_now fp_prev settle_since settle_ctx mode
     local ipane isince ifp1 ifp2 istate iagent iproject
     now=$(date +%s)
-    while IFS='|' read -r window_id pid since settle_pane idle_watch; do
+    # orig (the badge marker) reads last: it is the only field that may embed
+    # "|" (a window name), and read folds any remainder into the final var.
+    while IFS='|' read -r window_id pid since settle_pane idle_watch resume orig; do
         [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
         # list-windows emits every window, with empty fields when the options
         # are unset. Windows that are neither PID-tracked nor settle-watched
@@ -755,7 +757,17 @@ tmux_agent_exit_sweep() {
         # live by the normal glance/engage/TTL rules, not by this monitor.
         if [[ "$pid" =~ ^[0-9]+$ ]]; then
             if kill -0 "$pid" 2>/dev/null; then
-                live=1
+                if [[ -n "$since$settle_pane$idle_watch$resume$orig" ]]; then
+                    live=1
+                else
+                    # A live agent but nothing the monitor serves — no badge,
+                    # running marker, settle/idle watch, or input pause. A
+                    # suppressed terminal event (snoozed or rate-limited stop
+                    # in spinner mode) can strand a bare PID like this; retire
+                    # it so the sweep stops rescheduling for the rest of a
+                    # long-lived agent session. The next hook event re-tracks.
+                    tmux_agent_exit_untrack "$window_id"
+                fi
             else
                 # The associated agent is gone: remove both renderings, any
                 # pending input-resume/settle state, and an event badge
@@ -843,7 +855,6 @@ tmux_agent_exit_sweep() {
         settle_ctx=$(tmux show-options -wqv -t "$window_id" @code_notify_settle_ctx 2>/dev/null)
         tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
         tmux_running_settle_disarm "$window_id"
-        tmux_agent_exit_untrack "$window_id"
         mode=$(tmux show-options -wqv -t "$window_id" @code_notify_clear_mode 2>/dev/null)
         if [[ "$mode" == "running" ]]; then
             tmux_badge_clear "$window_id"
@@ -860,8 +871,15 @@ tmux_agent_exit_sweep() {
             fi
             live=1
         fi
+        # The synthetic completion runs outside the agent's process tree, so
+        # its badge could not re-resolve the PID that tmux_badge_clear dropped
+        # along with the running rendering. Restore the one this sweep already
+        # verified alive, or the completion badge outlives the agent forever.
+        if [[ "$pid" =~ ^[0-9]+$ ]]; then
+            tmux set-option -w -t "$window_id" @code_notify_agent_pid "$pid" 2>/dev/null
+        fi
     done < <(tmux list-windows -a -F \
-        '#{window_id}|#{@code_notify_agent_pid}|#{@code_notify_running}|#{@code_notify_settle_pane}|#{@code_notify_idle_watch}' 2>/dev/null)
+        '#{window_id}|#{@code_notify_agent_pid}|#{@code_notify_running}|#{@code_notify_settle_pane}|#{@code_notify_idle_watch}|#{@code_notify_resume_pending}|#{@code_notify_orig_name}' 2>/dev/null)
     if [[ "$live" -eq 1 ]]; then
         tmux_agent_exit_schedule_sweep
     fi
@@ -1144,11 +1162,16 @@ tmux_running_stop() {
     # A genuine terminal event must also retire a stale "waiting for input"
     # marker. tmux_running_pause_for_input sets it again after this cleanup,
     # and the notifier's stop path re-arms the idle watch after it.
+    # The tracked agent PID is deliberately NOT dropped here: the event badge
+    # this event leaves behind is cleaned by the agent-exit sweep, and not
+    # every path through here can re-track it — badge-set skips a visible
+    # window, and a synthetic notifier run (idle nudge, settle completion)
+    # has no agent ancestry to re-resolve the PID from. An untrack that
+    # nothing re-arms would orphan that badge forever once the agent exits.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     tmux_running_settle_disarm "$window_id"
     tmux_idle_watch_disarm "$window_id"
-    tmux_agent_exit_untrack "$window_id"
     local since mode
     since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
     if [[ -n "$since" ]]; then

@@ -24,9 +24,11 @@ printf '0' > "$quota_count"
 case "$(uname -s)" in
     Darwin)
         notifier_name="terminal-notifier"
+        expect_voice=true
         ;;
     Linux)
         notifier_name="notify-send"
+        expect_voice=false
         ;;
     *)
         echo "SKIP: unsupported OS for usage alert test"
@@ -127,7 +129,16 @@ refill_count=$(grep -c "tokens have reset" "$notify_log")
 [[ "$refill_count" -ge 2 ]] || fail "reset alert should re-arm after usage drops"
 
 grep -q "hooks.slack.com/services/T000/B000/SECRET" "$curl_log" || fail "usage alert should deliver to Slack channel"
-grep -q "token daily limit reset" "$say_log" || fail "reset voice should use the dedicated reset message"
+if [[ "$expect_voice" == "true" ]]; then
+    for _ in $(seq 1 40); do
+        [[ -f "$say_log" ]] && [[ $(wc -l < "$say_log") -ge 2 ]] && break
+        sleep 0.05
+    done
+    [[ -f "$say_log" ]] && [[ $(wc -l < "$say_log") -ge 2 ]] \
+        || fail "reset voice should play for both reset transitions"
+    grep -q "token daily limit reset" "$say_log" \
+        || fail "reset voice should use the dedicated reset message"
+fi
 
 : > "$notify_log"
 : > "$say_log"

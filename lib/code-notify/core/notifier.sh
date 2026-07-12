@@ -1726,7 +1726,9 @@ send_linux_notification() {
                 --expire-time="$(( $(persist_get_timeout_seconds) * 1000 ))"
             )
         fi
-        notify-send "$TITLE" "$MESSAGE" "${ns_args[@]}" 2>/dev/null
+        # notify-send has no subtitle field. Include it in the summary so the
+        # event type and originating project remain visible on Linux.
+        notify-send "$TITLE - $SUBTITLE" "$MESSAGE" "${ns_args[@]}" 2>/dev/null
     elif command -v zenity &> /dev/null; then
         zenity --notification \
             --text="$TITLE\n$MESSAGE" \

@@ -36,6 +36,21 @@ test_fail() {
     TESTS_FAILED=$((TESTS_FAILED + 1))
 }
 
+run_test_script() {
+    local script="$1"
+    local output
+    output="$(mktemp)"
+
+    if bash "$script" >"$output" 2>&1; then
+        rm -f "$output"
+        return 0
+    fi
+
+    sed 's/^/  /' "$output"
+    rm -f "$output"
+    return 1
+}
+
 # Change to project root
 cd "$(dirname "$0")/.."
 CURRENT_VERSION="$(awk -F'"' '/^VERSION=/{print $2}' bin/code-notify)"
@@ -125,7 +140,7 @@ fi
 
 # Test 10: project enable warns when Claude trust is missing
 test_start "project trust warning"
-if bash tests/test-project-trust-warning.sh >/dev/null 2>&1; then
+if run_test_script tests/test-project-trust-warning.sh; then
     test_pass
 else
     test_fail "project trust warning behavior failed"
@@ -133,7 +148,7 @@ fi
 
 # Test 11: explicit all aliases map to global behavior
 test_start "all tool aliases"
-if bash tests/test-all-alias.sh >/dev/null 2>&1; then
+if run_test_script tests/test-all-alias.sh; then
     test_pass
 else
     test_fail "all aliases failed"
@@ -149,7 +164,7 @@ fi
 
 # Test 13: repeated notification states are deduped
 test_start "notification dedupe"
-if bash tests/test-notification-dedupe.sh >/dev/null 2>&1; then
+if run_test_script tests/test-notification-dedupe.sh; then
     test_pass
 else
     test_fail "notification dedupe failed"
@@ -157,7 +172,7 @@ fi
 
 # Test 14: Codex payloads are parsed into notifications correctly
 test_start "codex payload parsing"
-if bash tests/test-codex-notify.sh >/dev/null 2>&1; then
+if run_test_script tests/test-codex-notify.sh; then
     test_pass
 else
     test_fail "codex payload parsing failed"
@@ -165,7 +180,7 @@ fi
 
 # Test 14b: Antigravity (agy) event payloads map to the right notifications
 test_start "antigravity payload parsing"
-if bash tests/test-antigravity-notify.sh >/dev/null 2>&1; then
+if run_test_script tests/test-antigravity-notify.sh; then
     test_pass
 else
     test_fail "antigravity payload parsing failed"
@@ -173,7 +188,7 @@ fi
 
 # Test 14b2: Antigravity tool-name extraction works without jq/python3
 test_start "antigravity tool-name fallback"
-if bash tests/test-agy-tool-name-fallback.sh >/dev/null 2>&1; then
+if run_test_script tests/test-agy-tool-name-fallback.sh; then
     test_pass
 else
     test_fail "antigravity tool-name fallback failed"
@@ -181,7 +196,7 @@ fi
 
 # Test 14b3: Antigravity approval banner is scoped to commands agy will prompt on
 test_start "antigravity permission decision"
-if bash tests/test-agy-permission-decision.sh >/dev/null 2>&1; then
+if run_test_script tests/test-agy-permission-decision.sh; then
     test_pass
 else
     test_fail "antigravity permission decision failed"
@@ -189,7 +204,7 @@ fi
 
 # Test 14c: Antigravity status reads agy's managed plugin copy as ground truth
 test_start "antigravity status source"
-if bash tests/test-antigravity-status.sh >/dev/null 2>&1; then
+if run_test_script tests/test-antigravity-status.sh; then
     test_pass
 else
     test_fail "antigravity status source failed"
@@ -197,7 +212,7 @@ fi
 
 # Test 14d: Antigravity hook commands survive spaces in the staging/HOME path
 test_start "antigravity spaced paths"
-if bash tests/test-antigravity-spaces.sh >/dev/null 2>&1; then
+if run_test_script tests/test-antigravity-spaces.sh; then
     test_pass
 else
     test_fail "antigravity spaced paths failed"
@@ -205,35 +220,35 @@ fi
 
 # Test 15: Windows PowerShell status regex stays .NET-safe
 test_start "delivery channels"
-if bash tests/test-channels.sh >/dev/null 2>&1; then
+if run_test_script tests/test-channels.sh; then
     test_pass
 else
     test_fail "delivery channels failed"
 fi
 
 test_start "snooze"
-if bash tests/test-snooze.sh >/dev/null 2>&1; then
+if run_test_script tests/test-snooze.sh; then
     test_pass
 else
     test_fail "snooze failed"
 fi
 
 test_start "persistent alerts"
-if bash tests/test-persistent-alerts.sh >/dev/null 2>&1; then
+if run_test_script tests/test-persistent-alerts.sh; then
     test_pass
 else
     test_fail "persistent alerts failed"
 fi
 
 test_start "usage alerts"
-if bash tests/test-usage-alerts.sh >/dev/null 2>&1; then
+if run_test_script tests/test-usage-alerts.sh; then
     test_pass
 else
     test_fail "usage alerts failed"
 fi
 
 test_start "windows status regex"
-if bash tests/test-windows-status-regex.sh >/dev/null 2>&1; then
+if run_test_script tests/test-windows-status-regex.sh; then
     test_pass
 else
     test_fail "windows status regex failed"
@@ -241,7 +256,7 @@ fi
 
 # Test 16: project-scoped hooks bypass the global kill switch
 test_start "project kill switch override"
-if bash tests/test-project-kill-switch.sh >/dev/null 2>&1; then
+if run_test_script tests/test-project-kill-switch.sh; then
     test_pass
 else
     test_fail "project kill switch override failed"
@@ -249,7 +264,7 @@ fi
 
 # Test 17: project status/disable stay aligned with settings.json
 test_start "project settings consistency"
-if bash tests/test-project-settings-consistency.sh >/dev/null 2>&1; then
+if run_test_script tests/test-project-settings-consistency.sh; then
     test_pass
 else
     test_fail "project settings consistency failed"
@@ -257,7 +272,7 @@ fi
 
 # Test 18: click-through resolver keeps lookup order and defaults stable
 test_start "click-through resolver"
-if bash tests/test-click-through-resolver.sh >/dev/null 2>&1; then
+if run_test_script tests/test-click-through-resolver.sh; then
     test_pass
 else
     test_fail "click-through resolver failed"
@@ -265,7 +280,7 @@ fi
 
 # Test: clicking a notification jumps back to the originating tmux pane
 test_start "tmux click-to-focus"
-if bash tests/test-tmux-focus.sh >/dev/null 2>&1; then
+if run_test_script tests/test-tmux-focus.sh; then
     test_pass
 else
     test_fail "tmux click-to-focus failed"
@@ -273,7 +288,7 @@ fi
 
 # Test: notifications badge the originating tmux window name with the event icon
 test_start "tmux window badge"
-if bash tests/test-tmux-badge.sh >/dev/null 2>&1; then
+if run_test_script tests/test-tmux-badge.sh; then
     test_pass
 else
     test_fail "tmux window badge failed"
@@ -281,7 +296,7 @@ fi
 
 # Test 19: click-through commands persist mappings and drive notifier activation
 test_start "click-through commands"
-if bash tests/test-click-through.sh >/dev/null 2>&1; then
+if run_test_script tests/test-click-through.sh; then
     test_pass
 else
     test_fail "click-through commands failed"
@@ -289,7 +304,7 @@ fi
 
 # Test 20: rate-limit state files live under notifications/state with legacy fallback
 test_start "notification state dir"
-if bash tests/test-notification-state-dir.sh >/dev/null 2>&1; then
+if run_test_script tests/test-notification-state-dir.sh; then
     test_pass
 else
     test_fail "notification state dir failed"
@@ -297,7 +312,7 @@ fi
 
 # Test 21: Windows notifier keeps rate-limit state under notifications/state
 test_start "windows rate-limit state"
-if bash tests/test-windows-rate-limit-state.sh >/dev/null 2>&1; then
+if run_test_script tests/test-windows-rate-limit-state.sh; then
     test_pass
 else
     test_fail "windows rate-limit state failed"
@@ -305,7 +320,7 @@ fi
 
 # Test 22: Claude hook detection only matches current hooks and preserves unrelated entries on Windows
 test_start "windows Claude hook preservation"
-if bash tests/test-windows-claude-hook-preservation.sh >/dev/null 2>&1; then
+if run_test_script tests/test-windows-claude-hook-preservation.sh; then
     test_pass
 else
     test_fail "windows Claude hook preservation failed"
@@ -313,14 +328,14 @@ fi
 
 # Test 23: Claude event alerts install and remove dedicated hooks
 test_start "Claude event alert hooks"
-if bash tests/test-claude-event-alerts.sh >/dev/null 2>&1; then
+if run_test_script tests/test-claude-event-alerts.sh; then
     test_pass
 else
     test_fail "Claude event alert hooks failed"
 fi
 
 test_start "ask_user notification lifecycle"
-if bash tests/test-ask-user-alert.sh >/dev/null 2>&1; then
+if run_test_script tests/test-ask-user-alert.sh; then
     test_pass
 else
     test_fail "ask_user notification lifecycle failed"
@@ -328,7 +343,7 @@ fi
 
 # Test 24: UserPromptSubmit badge-clear hook installs/removes across jq+python
 test_start "badge-clear hook install"
-if bash tests/test-badge-clear-hook.sh >/dev/null 2>&1; then
+if run_test_script tests/test-badge-clear-hook.sh; then
     test_pass
 else
     test_fail "badge-clear hook install failed"

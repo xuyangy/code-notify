@@ -1,0 +1,31 @@
+name: Linux Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bin/**"
+      - "lib/**"
+      - "scripts/**"
+      - "tests/**"
+      - ".github/workflows/linux-test.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "bin/**"
+      - "lib/**"
+      - "scripts/**"
+      - "tests/**"
+      - ".github/workflows/linux-test.yml"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run test suite
+        run: bash scripts/run_tests.sh

@@ -213,24 +213,24 @@ jobs:
       run: |
         & "$env:USERPROFILE\.code-notify\bin\cn.ps1" on codex
 
-        $codexConfig = "$env:USERPROFILE\.codex\config.toml"
-        if (-not (Test-Path $codexConfig)) {
-          Write-Host "ERROR: Codex config.toml not created" -ForegroundColor Red
+        $codexHooks = "$env:USERPROFILE\.codex\hooks.json"
+        if (-not (Test-Path $codexHooks)) {
+          Write-Host "ERROR: Codex hooks.json not created" -ForegroundColor Red
           exit 1
         }
 
-        $codexContent = Get-Content $codexConfig -Raw
-        if ($codexContent -notmatch 'notify\s*=') {
-          Write-Host "ERROR: Codex notify hook not added" -ForegroundColor Red
+        $codexContent = Get-Content $codexHooks -Raw
+        if ($codexContent -notmatch '"Stop"' -or $codexContent -notmatch 'stop codex') {
+          Write-Host "ERROR: Codex lifecycle hook not added" -ForegroundColor Red
           exit 1
         }
         Write-Host "OK: Codex notifications enabled" -ForegroundColor Green
 
         & "$env:USERPROFILE\.code-notify\bin\cn.ps1" off codex
 
-        $codexContent = Get-Content $codexConfig -Raw
-        if ($codexContent -match 'notify\s*=') {
-          Write-Host "ERROR: Codex notify hook not removed" -ForegroundColor Red
+        $codexContent = Get-Content $codexHooks -Raw
+        if ($codexContent -match '(stop|notification) codex') {
+          Write-Host "ERROR: Codex lifecycle hook not removed" -ForegroundColor Red
           exit 1
         }
         Write-Host "OK: Codex notifications disabled" -ForegroundColor Green

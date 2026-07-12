@@ -71,6 +71,61 @@ assert_settings
 has_current_global_claude_hooks "$GLOBAL_SETTINGS_FILE" ||
     fail "current hook detection should include Claude event hooks"
 
+# Permission alerts must use the lifecycle event that fires before Claude's UI
+# renders the dialog. Notification(permission_prompt) is delayed while the
+# Ctrl+O verbose transcript is open.
+add_notify_type "permission_prompt"
+enable_hooks_in_settings
+
+python3 - "$GLOBAL_SETTINGS_FILE" "$notify_script" <<'PYTHON'
+import json
+import sys
+
+settings_file, notify_script = sys.argv[1:3]
+with open(settings_file, "r") as fh:
+    hooks = json.load(fh).get("hooks", {})
+
+notify_command = f"{notify_script} notification claude"
+
+permission_hooks = [
+    hook
+    for entry in hooks.get("PermissionRequest", [])
+    if entry.get("matcher", "") == ""
+    for hook in entry.get("hooks", [])
+    if hook.get("type") == "command" and hook.get("command") == notify_command
+]
+if len(permission_hooks) != 1:
+    raise SystemExit("permission_prompt should install one PermissionRequest hook")
+
+for entry in hooks.get("Notification", []):
+    if entry.get("matcher", "") == "permission_prompt":
+        raise SystemExit("permission_prompt must not remain on the delayed Notification event")
+    if "permission_prompt" in entry.get("matcher", "").split("|"):
+        raise SystemExit("combined Notification matcher still contains permission_prompt")
+PYTHON
+
+has_current_global_claude_hooks "$GLOBAL_SETTINGS_FILE" ||
+    fail "current hook detection should require Claude PermissionRequest"
+
+remove_notify_type "permission_prompt"
+enable_hooks_in_settings
+python3 - "$GLOBAL_SETTINGS_FILE" "$notify_script" <<'PYTHON'
+import json
+import sys
+
+settings_file, notify_script = sys.argv[1:3]
+with open(settings_file, "r") as fh:
+    hooks = json.load(fh).get("hooks", {})
+
+managed = f"{notify_script} notification claude"
+if any(
+    hook.get("command") == managed
+    for entry in hooks.get("PermissionRequest", [])
+    for hook in entry.get("hooks", [])
+):
+    raise SystemExit("disabled permission_prompt left its PermissionRequest hook installed")
+PYTHON
+
 remove_notify_type "idle_prompt"
 [[ "$(get_notify_matcher)" == "" ]] || fail "notification matcher should be empty after removing the last Notification subtype"
 enable_hooks_in_settings

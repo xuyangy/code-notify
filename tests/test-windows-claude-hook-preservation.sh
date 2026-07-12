@@ -39,6 +39,7 @@ try {
     $script:AlternateSettingsFile = Join-Path (Join-Path $env:USERPROFILE ".config\.claude") "settings.json"
     $script:SettingsFile = $script:DefaultSettingsFile
     $script:NotificationsDir = Join-Path $script:ClaudeHome "notifications"
+    $script:NotifyTypesFile = Join-Path $script:NotificationsDir "notify-types"
     $script:VoiceFile = Join-Path $script:NotificationsDir "voice-enabled"
     $script:SoundEnabledFile = Join-Path $script:NotificationsDir "sound-enabled"
     $script:SoundCustomFile = Join-Path $script:NotificationsDir "sound-custom"
@@ -101,6 +102,19 @@ try {
     if (-not (Test-HookEntriesContainCommand -Entries @($settings.hooks.Stop) -Matcher "" -Command $stopCommand)) {
         throw "current Claude Stop hook was not added"
     }
+    if ($settings.hooks.PSObject.Properties['PermissionRequest']) {
+        throw "PermissionRequest should not be installed when permission_prompt is disabled"
+    }
+
+    "idle_prompt|permission_prompt" | Set-Content $script:NotifyTypesFile -Encoding ASCII
+    Enable-Notifications -Tool "claude"
+    $settings = Get-Content $script:SettingsFile -Raw | ConvertFrom-Json -ErrorAction Stop
+    if (-not (Test-HookEntriesContainCommand -Entries @($settings.hooks.PermissionRequest) -Matcher "" -Command $notifyCommand)) {
+        throw "permission_prompt did not install the immediate Claude PermissionRequest hook"
+    }
+    if (Test-HookEntriesContainCommand -Entries @($settings.hooks.Notification) -Matcher "permission_prompt" -Command $notifyCommand) {
+        throw "permission_prompt should not use Claude's delayed Notification event"
+    }
 
     Disable-Notifications -Tool "claude"
 
@@ -113,6 +127,9 @@ try {
     }
     if ($settings.hooks.PSObject.Properties['Stop']) {
         throw "managed Stop hook should be removed during disable"
+    }
+    if ($settings.hooks.PSObject.Properties['PermissionRequest']) {
+        throw "managed PermissionRequest hook should be removed during disable"
     }
     if (Test-HookEntriesContainCommand -Entries @($settings.hooks.Notification) -Matcher "idle_prompt" -Command $notifyCommand) {
         throw "managed Notification hook should be removed during disable"

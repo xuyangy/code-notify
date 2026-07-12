@@ -234,6 +234,14 @@ For Claude Code, it adds hooks like:
         ]
       }
     ],
+    "PermissionRequest": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "notify.sh notification claude" }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "matcher": "",
@@ -245,6 +253,11 @@ For Claude Code, it adds hooks like:
   }
 }
 ```
+
+The Claude `PermissionRequest` hook is installed only when `permission_prompt`
+is enabled. It fires as the approval dialog is created, so the alert is not
+delayed when the Ctrl+O verbose transcript is open. Claude's `Notification`
+hook continues to handle idle, authentication, and MCP-input alerts.
 
 For Codex, it manages hooks like:
 
@@ -304,7 +317,7 @@ cn alerts reset                    # Back to default (idle_prompt only)
 | `TaskCreated`        | Claude agent-team task was created             |
 | `TaskCompleted`      | Claude agent-team task completed               |
 
-Alert-type matching applies to Claude Code notification hooks, Codex `PermissionRequest` hooks, Gemini CLI notification hooks, and the Antigravity CLI `PreToolUse` hook. For Antigravity, `permission_prompt` controls whether the approval (`PreToolUse`) alert is installed. `ask_user` is a Claude-only `PreToolUse` hook for `AskUserQuestion`; it is applied immediately when Claude notifications are already enabled. Claude Code agent/team events are separate hook events and are opt-in via `cn alerts add SubagentStop`, `cn alerts add TeammateIdle`, or `cn alerts add TaskCompleted`. After changing alert types, run `cn on` or `cn on codex` (or `cn on antigravity`) again to rewrite the managed hooks.
+Alert-type matching applies to Claude Code `Notification` and `PermissionRequest` hooks, Codex `PermissionRequest` hooks, Gemini CLI notification hooks, and the Antigravity CLI `PreToolUse` hook. For Antigravity, `permission_prompt` controls whether the approval (`PreToolUse`) alert is installed. `ask_user` is a Claude-only `PreToolUse` hook for `AskUserQuestion`; it is applied immediately when Claude notifications are already enabled. Claude Code agent/team events are separate hook events and are opt-in via `cn alerts add SubagentStop`, `cn alerts add TeammateIdle`, or `cn alerts add TaskCompleted`. After changing alert types, run `cn on` or `cn on codex` (or `cn on antigravity`) again to rewrite the managed hooks.
 
 Agent-team and subagent workflows can be noisy if `permission_prompt` is enabled. If you only want idle pings for Claude/Gemini and completion alerts for Codex, run `cn alerts remove permission_prompt && cn on`. Codex exposes no native `idle_prompt` hook; inside tmux, the `idle_prompt` alert type instead gates the tmux-derived post-completion idle reminder for Codex and Antigravity (see the feature list above). `permission_prompt` controls Codex approval/edit alerts through `PermissionRequest`.
 

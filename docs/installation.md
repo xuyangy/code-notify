@@ -14,6 +14,11 @@ Code-Notify adds desktop notifications to Claude Code, Codex, and Gemini CLI. Yo
 
 Codex notifications use `~/.codex/hooks.json`: task completion is handled through the `Stop` hook, and approval/edit requests are handled through the `PermissionRequest` hook when `permission_prompt` is enabled. Code-Notify also disables Codex TUI notifications in `~/.codex/config.toml` while enabled so notification delivery is owned by Code-Notify.
 
+For Claude Code, approval alerts also use `PermissionRequest` when
+`permission_prompt` is enabled. This lifecycle event fires before the
+interactive permission UI, so alerts remain immediate while the Ctrl+O verbose
+transcript is open; other input alerts continue to use `Notification`.
+
 Supported upgrade paths also repair stale `claude-notify`-style Claude hooks automatically when they are detected.
 
 ## For AI Coding Agents

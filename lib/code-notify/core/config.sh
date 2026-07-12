@@ -386,6 +386,10 @@ get_managed_claude_notification_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(notification|PreToolUse)(?:\s|$)'
 }
 
+get_managed_claude_permission_request_pattern() {
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*notification\s+claude(?:\s|$)'
+}
+
 get_managed_claude_stop_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*stop(?:\s|$)'
 }
@@ -561,7 +565,8 @@ has_current_global_claude_hooks() {
         " claude" || return 1
     has_empty_matcher_lifecycle_command "$file" "UserPromptSubmit" "$(get_global_claude_user_prompt_command)" || return 1
     has_empty_matcher_lifecycle_command "$file" "PostToolUse" "$(get_global_claude_post_tool_command)" || return 1
-    has_empty_matcher_lifecycle_command "$file" "PreToolUse" "$(get_global_claude_resume_after_input_command)"
+    has_empty_matcher_lifecycle_command "$file" "PreToolUse" "$(get_global_claude_resume_after_input_command)" || return 1
+    has_expected_claude_permission_request_hook "$file" "$(get_global_claude_notify_command)"
 }
 
 has_current_project_claude_hooks() {
@@ -577,7 +582,8 @@ has_current_project_claude_hooks() {
         " claude $(shell_quote "$project_name")" || return 1
     has_empty_matcher_lifecycle_command "$file" "UserPromptSubmit" "$(get_project_claude_user_prompt_command "$project_name")" || return 1
     has_empty_matcher_lifecycle_command "$file" "PostToolUse" "$(get_project_claude_post_tool_command "$project_name")" || return 1
-    has_empty_matcher_lifecycle_command "$file" "PreToolUse" "$(get_project_claude_resume_after_input_command "$project_name")"
+    has_empty_matcher_lifecycle_command "$file" "PreToolUse" "$(get_project_claude_resume_after_input_command "$project_name")" || return 1
+    has_expected_claude_permission_request_hook "$file" "$(get_project_claude_notify_command "$project_name")"
 }
 
 has_legacy_global_claude_hooks() {
@@ -1878,6 +1884,37 @@ unregister_resume_after_input_hooks() {
     unregister_empty_matcher_lifecycle_hook "$file" "PreToolUse" "$resume_cmd" "$(get_managed_claude_resume_after_input_pattern)"
 }
 
+# Claude's Notification event is dispatched by the interactive UI and can be
+# held while the Ctrl+O verbose transcript is open. PermissionRequest runs at
+# the earlier permission lifecycle point, so approval alerts remain immediate
+# regardless of which UI view is active. Keep the same notifier command: its
+# payload classifier recognizes PermissionRequest as a permission_prompt.
+register_claude_permission_request_hook() {
+    local file="$1" command="$2" pattern
+    pattern="$(get_managed_claude_permission_request_pattern)"
+
+    if is_notify_type_enabled "permission_prompt"; then
+        register_empty_matcher_lifecycle_hook "$file" "PermissionRequest" "$command" "$pattern"
+    else
+        unregister_empty_matcher_lifecycle_hook "$file" "PermissionRequest" "$command" "$pattern"
+    fi
+}
+
+unregister_claude_permission_request_hook() {
+    local file="$1" command="$2"
+    unregister_empty_matcher_lifecycle_hook \
+        "$file" "PermissionRequest" "$command" "$(get_managed_claude_permission_request_pattern)"
+}
+
+has_expected_claude_permission_request_hook() {
+    local file="$1" command="$2"
+    if is_notify_type_enabled "permission_prompt"; then
+        has_empty_matcher_lifecycle_command "$file" "PermissionRequest" "$command"
+    else
+        ! has_empty_matcher_lifecycle_command "$file" "PermissionRequest" "$command"
+    fi
+}
+
 enable_hooks_in_settings() {
     local notify_matcher
     notify_matcher=$(get_notify_matcher)
@@ -1903,7 +1940,11 @@ enable_hooks_in_settings() {
     register_resume_after_input_hooks \
         "$GLOBAL_SETTINGS_FILE" \
         "$(get_global_claude_post_tool_command)" \
-        "$(get_global_claude_resume_after_input_command)"
+        "$(get_global_claude_resume_after_input_command)" || return 1
+
+    register_claude_permission_request_hook \
+        "$GLOBAL_SETTINGS_FILE" \
+        "$(get_global_claude_notify_command)"
 }
 
 # Disable hooks in settings.json (new format)
@@ -1930,7 +1971,11 @@ disable_hooks_in_settings() {
     unregister_resume_after_input_hooks \
         "$GLOBAL_SETTINGS_FILE" \
         "$(get_global_claude_post_tool_command)" \
-        "$(get_global_claude_resume_after_input_command)"
+        "$(get_global_claude_resume_after_input_command)" || return 1
+
+    unregister_claude_permission_request_hook \
+        "$GLOBAL_SETTINGS_FILE" \
+        "$(get_global_claude_notify_command)"
 }
 
 # Disable hooks in project settings.json
@@ -1961,7 +2006,11 @@ disable_project_hooks_in_settings() {
     unregister_resume_after_input_hooks \
         "$project_settings" \
         "$(get_project_claude_post_tool_command "$project_name")" \
-        "$(get_project_claude_resume_after_input_command "$project_name")"
+        "$(get_project_claude_resume_after_input_command "$project_name")" || return 1
+
+    unregister_claude_permission_request_hook \
+        "$project_settings" \
+        "$(get_project_claude_notify_command "$project_name")"
 }
 
 # Enable hooks in project settings.json
@@ -1992,7 +2041,11 @@ enable_project_hooks_in_settings() {
     register_resume_after_input_hooks \
         "$project_settings" \
         "$(get_project_claude_post_tool_command "$project_name")" \
-        "$(get_project_claude_resume_after_input_command "$project_name")"
+        "$(get_project_claude_resume_after_input_command "$project_name")" || return 1
+
+    register_claude_permission_request_hook \
+        "$project_settings" \
+        "$(get_project_claude_notify_command "$project_name")"
 }
 
 # Check if project has settings.json with code-notify hooks
@@ -3274,7 +3327,20 @@ reset_notify_types() {
 
 # Get matcher pattern for current notification types
 get_notify_matcher() {
-    get_notification_alert_types
+    # Claude permission alerts use PermissionRequest instead of Notification.
+    # The latter is UI-dispatched and is delayed while Ctrl+O verbose output is
+    # open. Other agents still read the full type list directly where needed.
+    local current result="" item
+    current="$(get_notification_alert_types)"
+    local -a _code_notify_types=()
+
+    IFS='|' read -r -a _code_notify_types <<< "$current"
+    for item in "${_code_notify_types[@]}"; do
+        [[ "$item" != "permission_prompt" ]] || continue
+        result="$(append_unique_notify_type "$result" "$item")"
+    done
+
+    printf '%s\n' "$result"
 }
 
 get_notification_alert_types() {

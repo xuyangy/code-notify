@@ -965,6 +965,7 @@ function Update-ClaudeSettingsHooks {
     $stopPattern = Get-ManagedClaudeStopPattern
 
     $notificationEntries = Remove-ManagedClaudeHookEntries -Entries @($Settings.hooks.Notification) -ExactCommand $notifyCommand -Pattern $notificationPattern
+    $permissionEntries = Remove-ManagedClaudeHookEntries -Entries @($Settings.hooks.PermissionRequest) -ExactCommand $notifyCommand -Pattern $notificationPattern
     $stopEntries = Remove-ManagedClaudeHookEntries -Entries @($Settings.hooks.Stop) -ExactCommand $stopCommand -Pattern $stopPattern
 
     if (-not $Disable) {
@@ -976,6 +977,20 @@ function Update-ClaudeSettingsHooks {
                     command = $notifyCommand
                 }
             )
+        }
+        # PermissionRequest fires as the dialog is created. The UI-level
+        # Notification(permission_prompt) event can be delayed while Claude's
+        # Ctrl+O verbose transcript is open.
+        if (Test-NotifyTypeEnabled -Type "permission_prompt") {
+            $permissionEntries += [PSCustomObject]@{
+                matcher = ""
+                hooks = @(
+                    [PSCustomObject]@{
+                        type = "command"
+                        command = $notifyCommand
+                    }
+                )
+            }
         }
         $stopEntries += [PSCustomObject]@{
             matcher = ""
@@ -992,6 +1007,12 @@ function Update-ClaudeSettingsHooks {
         $Settings.hooks | Add-Member -Force -NotePropertyName Notification -NotePropertyValue $notificationEntries
     } else {
         $Settings.hooks.PSObject.Properties.Remove("Notification")
+    }
+
+    if ($permissionEntries.Count -gt 0) {
+        $Settings.hooks | Add-Member -Force -NotePropertyName PermissionRequest -NotePropertyValue $permissionEntries
+    } else {
+        $Settings.hooks.PSObject.Properties.Remove("PermissionRequest")
     }
 
     if ($stopEntries.Count -gt 0) {
@@ -1024,10 +1045,17 @@ function Test-ClaudeSettingsCurrentHooks {
 
     $notifyCommand = Get-ClaudeNotifyCommand -NotifyScript $NotifyScript
     $stopCommand = Get-ClaudeStopCommand -NotifyScript $NotifyScript
+    $hasPermissionHook = Test-HookEntriesContainCommand -Entries @($settings.hooks.PermissionRequest) -Matcher "" -Command $notifyCommand
+    $permissionHookCurrent = if (Test-NotifyTypeEnabled -Type "permission_prompt") {
+        $hasPermissionHook
+    } else {
+        -not $hasPermissionHook
+    }
 
     return (
         (Test-HookEntriesContainCommand -Entries @($settings.hooks.Notification) -Matcher "idle_prompt" -Command $notifyCommand) -and
-        (Test-HookEntriesContainCommand -Entries @($settings.hooks.Stop) -Matcher "" -Command $stopCommand)
+        (Test-HookEntriesContainCommand -Entries @($settings.hooks.Stop) -Matcher "" -Command $stopCommand) -and
+        $permissionHookCurrent
     )
 }
 

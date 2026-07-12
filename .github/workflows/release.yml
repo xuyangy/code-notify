@@ -1,0 +1,73 @@
+name: Publish source release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag and embedded versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v[0-9]{4}\.(0[1-9]|1[0-2])\.[0-9]+$ ]]; then
+            echo "Release tags must use vYYYY.MM.PATCH (received: $tag)"
+            exit 1
+          fi
+
+          expected="${tag#v}"
+          cli_version="$(awk -F'"' '/^VERSION=/{print $2; exit}' bin/code-notify)"
+          windows_version="$(awk -F'"' '/^\$VERSION = /{print $2; exit}' scripts/install-windows.ps1)"
+          windows_runtime_version="$(awk -F'"' '/^\$script:VERSION = /{print $2; exit}' scripts/install-windows.ps1)"
+          package_version="$(node -p "require('./package.json').version")"
+
+          for entry in \
+            "bin/code-notify:$cli_version" \
+            "scripts/install-windows.ps1:$windows_version" \
+            "scripts/install-windows.ps1 (runtime):$windows_runtime_version" \
+            "package.json:$package_version"
+          do
+            file="${entry%%:*}"
+            version="${entry#*:}"
+            if [[ "$version" != "$expected" ]]; then
+              echo "$file has version $version; expected $expected for tag $tag"
+              exit 1
+            fi
+          done
+
+          notes_file="docs/releases/${tag}.md"
+          if [[ ! -s "$notes_file" ]]; then
+            echo "Missing release notes: $notes_file"
+            exit 1
+          fi
+
+      - name: Run tests
+        run: bash scripts/run_tests.sh
+
+      - name: Create source-only GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --title "Code-Notify $GITHUB_REF_NAME" \
+              --notes-file "docs/releases/${GITHUB_REF_NAME}.md"
+          fi

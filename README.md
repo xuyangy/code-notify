@@ -31,7 +31,7 @@ cn usage status
   <img src="assets/multi-tools-support-02.png" width="48%" alt="All tools enabled"/>
 </p>
 
-[![Version](https://img.shields.io/badge/version-1.10.0-blue.svg)](https://github.com/xuyangy/code-notify/releases)
+[![Version](https://img.shields.io/badge/version-2026.07.0-blue.svg)](https://github.com/xuyangy/code-notify/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![macOS](https://img.shields.io/badge/macOS-supported-green.svg)](https://www.apple.com/macos)
 [![Linux](https://img.shields.io/badge/Linux-supported-green.svg)](https://www.linux.org/)
@@ -39,11 +39,29 @@ cn usage status
 
 ---
 
-## What's New in v1.10.0
+## What's New in v2026.07.0
 
-- **One-command usage setup**: `cn usage setup --watch` configures Codex/Claude usage alerts and starts the background watcher
-- **Background usage watcher**: macOS/Linux users can start, stop, restart, and inspect usage watching with `cn usage watch ...`
-- **Usage alert docs**: README now shows the terminal setup flow and Slack/Discord reset alert routing
+This first CalVer release collects the fork-specific work since upstream
+`v1.10.0`:
+
+- **Antigravity CLI support** — installs an `agy` plugin, maps permission and
+  tool events, debounces inferred completion, and handles errors and paths with
+  spaces
+- **Modern Codex and Claude hooks** — migrates Codex to `hooks.json`, avoids
+  duplicate TUI notifications, and uses immediate Claude permission/question
+  lifecycle hooks
+- **Deep tmux integration** — click-to-focus, event badges, running indicators,
+  an optional animated spinner, approval-resume detection, agent-exit cleanup,
+  Codex settle detection, and idle reminders
+- **More delivery controls** — persistent alerts, timed snooze, ntfy phone push,
+  event-specific messages, and ElevenLabs voice support with fallback and cache
+- **Safer, faster notifications** — lower hook latency, detached bookkeeping,
+  stronger config preservation, and fixes across badge, approval, and completion
+  lifecycles
+- **Hardened script installation** — atomic installs from GitHub source tarballs,
+  branch/tag/SHA pinning with `CODE_NOTIFY_REF`, and automatic legacy-hook repair
+
+[Full comparison with upstream v1.10.0](https://github.com/mylee04/code-notify/compare/v1.10.0...xuyangy:code-notify:v2026.07.0)
 
 ---
 
@@ -70,6 +88,9 @@ cn usage status
 
 ## Installation
 
+This fork supports installation through the hosted shell scripts only. Homebrew
+and npm do not distribute this fork.
+
 ### For Humans
 
 **macOS / Linux / WSL**
@@ -92,7 +113,7 @@ cn update
 code-notify version
 ```
 
-**Install a specific version (advanced)**
+**Install a specific release or ref**
 
 By default the installer pulls the latest `main`. Set `CODE_NOTIFY_REF` to install a
 specific branch, tag, or commit SHA instead — useful for pinning a known-good
@@ -100,7 +121,7 @@ version or testing a branch:
 
 ```bash
 # pin to a release tag
-curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | CODE_NOTIFY_REF=v1.10.0 bash
+curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | CODE_NOTIFY_REF=v2026.07.0 bash
 
 # or a branch / commit SHA
 CODE_NOTIFY_REF=my-branch bash scripts/install.sh
@@ -109,6 +130,21 @@ CODE_NOTIFY_REF=my-branch bash scripts/install.sh
 Note: `CODE_NOTIFY_REF` selects the code that gets installed; the `install.sh` you pipe
 to `bash` is always fetched from `main`. The ref is ignored when installing from a local
 checkout (it copies your working tree).
+
+On Windows, fetch the installer from the release tag itself:
+
+```powershell
+irm https://raw.githubusercontent.com/xuyangy/code-notify/v2026.07.0/scripts/install-windows.ps1 | iex
+```
+
+Published releases contain source code only; the installers copy the appropriate
+scripts into your user-level installation directory.
+
+**Versioning**
+
+This fork uses `vYYYY.MM.PATCH` CalVer tags to avoid collisions with upstream's
+SemVer releases. `v2026.07.0` is the first release in July 2026; another release
+in the same month would be `v2026.07.1`.
 
 If you were using the older `claude-notify` hook layout, supported upgrades now repair those Claude hooks automatically. On Windows, that repair also covers older `notify.ps1` hook layouts and alternate Claude settings locations such as `%USERPROFILE%\.config\.claude\settings.json`. Existing unrelated Claude hooks are preserved during enable/disable operations.
 

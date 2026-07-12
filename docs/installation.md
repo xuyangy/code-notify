@@ -24,6 +24,7 @@ Supported upgrade paths also repair stale `claude-notify`-style Claude hooks aut
 ## For AI Coding Agents
 
 Install code-notify with the install script. Installs are tracked under `~/.code-notify` and can be updated with `cn update`.
+This fork is not distributed through Homebrew or npm.
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | bash
@@ -42,6 +43,24 @@ cn status
 ```
 
 Expected result: `cn test` should show a desktop notification, and `cn status` should show enabled tools.
+
+### Install a specific release
+
+On macOS, Linux, or WSL, set `CODE_NOTIFY_REF` to a release tag. The installer
+itself comes from `main`, then downloads the source for the selected tag:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | CODE_NOTIFY_REF=v2026.07.0 bash
+```
+
+On Windows, fetch the self-contained installer from that tag:
+
+```powershell
+irm https://raw.githubusercontent.com/xuyangy/code-notify/v2026.07.0/scripts/install-windows.ps1 | iex
+```
+
+Release downloads are source-only; no Homebrew formula, npm package, or compiled
+binary is published for this fork.
 
 ### Verify Installation
 

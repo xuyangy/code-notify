@@ -90,12 +90,6 @@ detect_update_method() {
     fi
 
     case "$source_dir" in
-        /opt/homebrew/Cellar/code-notify/*|/usr/local/Cellar/code-notify/*|/opt/homebrew/opt/code-notify/*|/usr/local/opt/code-notify/*)
-            echo "homebrew"
-            ;;
-        */node_modules/code-notify/lib/code-notify/*)
-            echo "npm"
-            ;;
         "$HOME"/.code-notify/lib/code-notify/*)
             echo "script"
             ;;
@@ -215,12 +209,6 @@ get_update_command() {
     local method="${1:-$(detect_update_method)}"
 
     case "$method" in
-        "homebrew")
-            echo "brew update && brew upgrade code-notify"
-            ;;
-        "npm")
-            echo "npm install -g code-notify@latest"
-            ;;
         "script")
             echo "curl -fsSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | bash"
             ;;
@@ -235,12 +223,6 @@ run_update_for_method() {
     local method="$1"
 
     case "$method" in
-        "homebrew")
-            brew update && brew upgrade code-notify
-            ;;
-        "npm")
-            npm install -g code-notify@latest
-            ;;
         "script")
             curl -fsSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | bash
             ;;
@@ -270,16 +252,6 @@ check_for_updates() {
     fi
 
     case "$method" in
-        "homebrew")
-            info "Install method: Homebrew"
-            echo "To update code-notify, run:"
-            echo "  ${CYAN}$(get_update_command "$method")${RESET}"
-            ;;
-        "npm")
-            info "Install method: npm"
-            echo "To update code-notify, run:"
-            echo "  ${CYAN}$(get_update_command "$method")${RESET}"
-            ;;
         "script")
             info "Install method: install script"
             echo "To update code-notify, run:"
@@ -317,12 +289,6 @@ handle_update_command() {
             echo ""
 
             case "$method" in
-                "homebrew")
-                    info "Detected Homebrew installation"
-                    ;;
-                "npm")
-                    info "Detected npm installation"
-                    ;;
                 "script")
                     info "Detected install-script installation"
                     ;;

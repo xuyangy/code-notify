@@ -20,7 +20,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Version
-$VERSION = "1.10.0"
+$VERSION = "2026.07.0"
 
 # Colors and formatting
 function Write-Success { param([string]$Message) Write-Host "[OK] $Message" -ForegroundColor Green }
@@ -107,7 +107,7 @@ function Install-ClaudeNotify {
 # Code-Notify PowerShell Module
 # https://github.com/xuyangy/code-notify
 
-$script:VERSION = "1.10.0"
+$script:VERSION = "2026.07.0"
 $script:ClaudeHome = if ($env:CLAUDE_HOME) { $env:CLAUDE_HOME } else { "$env:USERPROFILE\.claude" }
 $script:DefaultSettingsFile = "$script:ClaudeHome\settings.json"
 $script:AlternateSettingsFile = "$env:USERPROFILE\.config\.claude\settings.json"
@@ -1545,23 +1545,8 @@ function Send-TestNotification {
     }
 }
 
-function Get-InstallMethod {
-    if ($env:CODE_NOTIFY_INSTALL_METHOD) {
-        return $env:CODE_NOTIFY_INSTALL_METHOD.Trim().ToLowerInvariant()
-    }
-
-    return "script"
-}
-
 function Get-UpdateCommand {
-    switch (Get-InstallMethod) {
-        "npm" {
-            return "npm install -g code-notify@latest"
-        }
-        default {
-            return "irm https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install-windows.ps1 | iex"
-        }
-    }
+    return "irm https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install-windows.ps1 | iex"
 }
 
 function Normalize-Version {
@@ -1692,7 +1677,6 @@ function Update-CodeNotify {
         [switch]$Check
     )
 
-    $installMethod = Get-InstallMethod
     $updateCommand = Get-UpdateCommand
     $updateStatus = Get-UpdateStatus
 
@@ -1733,19 +1717,8 @@ function Update-CodeNotify {
             Write-Info "Update available: $($updateStatus.CurrentVersion) -> $($updateStatus.LatestVersion)"
         }
 
-        switch ($installMethod) {
-            "npm" {
-                $null = Get-Command npm -ErrorAction Stop
-                & npm install -g code-notify@latest
-                if ($LASTEXITCODE -ne 0) {
-                    throw "npm install failed with exit code $LASTEXITCODE"
-                }
-            }
-            default {
-                Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install-windows.ps1" -OutFile $tempScript
-                & $tempScript -Silent -Force
-            }
-        }
+        Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install-windows.ps1" -OutFile $tempScript
+        & $tempScript -Silent -Force
         Write-Success "Update complete!"
         Write-Info "Run 'code-notify version' in a new shell to confirm the installed version"
     }

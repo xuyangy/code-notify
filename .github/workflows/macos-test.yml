@@ -279,7 +279,7 @@ jobs:
         echo "  All macOS installation tests passed!"
         echo "========================================"
 
-  test-homebrew-formula:
+  test-direct-execution:
     runs-on: macos-latest
 
     steps:

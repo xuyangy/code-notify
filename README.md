@@ -31,7 +31,7 @@ cn usage status
   <img src="assets/multi-tools-support-02.png" width="48%" alt="All tools enabled"/>
 </p>
 
-[![Version](https://img.shields.io/badge/version-2026.07.0-blue.svg)](https://github.com/xuyangy/code-notify/releases)
+[![Version](https://img.shields.io/badge/version-2026.07.1-blue.svg)](https://github.com/xuyangy/code-notify/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![macOS](https://img.shields.io/badge/macOS-supported-green.svg)](https://www.apple.com/macos)
 [![Linux](https://img.shields.io/badge/Linux-supported-green.svg)](https://www.linux.org/)
@@ -121,7 +121,7 @@ version or testing a branch:
 
 ```bash
 # pin to a release tag
-curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | CODE_NOTIFY_REF=v2026.07.0 bash
+curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | CODE_NOTIFY_REF=v2026.07.1 bash
 
 # or a branch / commit SHA
 CODE_NOTIFY_REF=my-branch bash scripts/install.sh
@@ -134,7 +134,7 @@ checkout (it copies your working tree).
 On Windows, fetch the installer from the release tag itself:
 
 ```powershell
-irm https://raw.githubusercontent.com/xuyangy/code-notify/v2026.07.0/scripts/install-windows.ps1 | iex
+irm https://raw.githubusercontent.com/xuyangy/code-notify/v2026.07.1/scripts/install-windows.ps1 | iex
 ```
 
 Published releases contain source code only; the installers copy the appropriate

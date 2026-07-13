@@ -20,7 +20,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Version
-$VERSION = "2026.07.0"
+$VERSION = "2026.07.1"
 
 # Colors and formatting
 function Write-Success { param([string]$Message) Write-Host "[OK] $Message" -ForegroundColor Green }
@@ -107,7 +107,7 @@ function Install-ClaudeNotify {
 # Code-Notify PowerShell Module
 # https://github.com/xuyangy/code-notify
 
-$script:VERSION = "2026.07.0"
+$script:VERSION = "2026.07.1"
 $script:ClaudeHome = if ($env:CLAUDE_HOME) { $env:CLAUDE_HOME } else { "$env:USERPROFILE\.claude" }
 $script:DefaultSettingsFile = "$script:ClaudeHome\settings.json"
 $script:AlternateSettingsFile = "$env:USERPROFILE\.config\.claude\settings.json"

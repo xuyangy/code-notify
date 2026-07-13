@@ -1489,8 +1489,8 @@ case "$HOOK_TYPE" in
         SOUND="Pop"
         ;;
     "TaskCompleted")
-        TITLE="$TOOL_DISPLAY 🟢"
-        BADGE_ICON="🟢"
+        TITLE="$TOOL_DISPLAY 🏅"
+        BADGE_ICON="🏅"
         SUBTITLE="Task Complete"
         MESSAGE=$(choose_random_message \
             "$TOOL_DISPLAY agent-team task completed" \

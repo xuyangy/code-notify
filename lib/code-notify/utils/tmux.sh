@@ -743,22 +743,74 @@ tmux_settle_watch_notify() {
     TMUX_PANE="$pane_id" bash "$notifier" stop "$agent" "$project" >/dev/null 2>&1
 }
 
+# Ownership token for the repeating one-shot timer chains below. Each
+# registration mints a fresh token, stores it in the chain's pending flag,
+# and embeds it in the timer payload; at fire time the payload exits unless
+# the flag still names it EXACTLY. So when a scheduling race produces two
+# pending timers, only the one whose registration wrote the flag last
+# survives its firing and the stray collapses instead of persisting as a
+# parallel chain. An empty flag is also lost ownership, not a free pass: it
+# means the owner already fired (consuming the flag) and its sweep covers
+# this tick, so a stale twin firing into that window would otherwise sweep
+# the same idle/settle state concurrently and deliver the very duplicate
+# notification the token exists to prevent. A flag lost abnormally just ends
+# the chain; the next hook event sees it empty and schedules a fresh one.
+#
+# Registration order matters: the flag is written BEFORE the timer is armed.
+# Armed-first, a scheduler descheduled (or suspended) past the timer delay
+# would let the payload fire against a still-empty flag and exit; the late
+# flag write would then park an ownerless token that reads as "pending"
+# forever, wedging the chain until the tmux server restarts. Claimed-first,
+# the worst remaining case is a process dying in the instant between claim
+# and arm — and if arming fails outright, the claim is rolled back so the
+# chain degrades instead of jamming. The rollback clears the flag only while
+# it still holds OUR token: a racer that overwrote the claim and armed
+# successfully owns the chain now, and blindly unsetting would strand its
+# timer against an empty flag (the guard would exit it without sweeping).
+# That compare-and-clear runs server-side as one command (if-shell -F with a
+# #{==:} format condition) — the tmux server serializes client commands, so
+# a competing claim cannot land between the comparison and the unset the way
+# it could between a client-side show-options and set-option pair. Tokens
+# are digits and dots only, so embedding one in the format is expansion-safe.
+#
+# Returns the token in TMUX_TIMER_CHAIN_TOKEN (an out-param, not a setting):
+# re-arms run on every poll tick, so minting must not fork — no command
+# substitution, no external date. Uniqueness only has to tell apart nearby
+# competing registrations; the PID plus two RANDOM draws is ample, and a
+# collision merely leaves one duplicate tick uncollapsed.
+tmux_timer_chain_token() {
+    TMUX_TIMER_CHAIN_TOKEN="$$.$RANDOM.$RANDOM"
+}
+
 # One short tmux-server timer checks tracked agent PIDs. Repeating one-shots
 # avoid a resident daemon and stop automatically when the last marker clears.
+#
+# The pending flag holds a chain-ownership token (see tmux_timer_chain_token),
+# and the fired payload runs the sweep only while it still owns the flag.
+# The pending check alone cannot prevent stacked timers: two hook processes
+# can both read an empty flag before either writes it, and with the old
+# unconditional payload each stray timer resurvived its own firing (clear
+# flag, sweep, reschedule at sweep end) — duplicate chains persisted forever,
+# and every expiry they raced on delivered the same idle/settle notification
+# two or three times. With the token, whichever chain wrote the flag last
+# survives and every other timer exits at fire time without sweeping.
 tmux_agent_exit_schedule_sweep() {
     [[ "${TMUX_AGENT_EXIT_POLL_SECONDS:-0}" =~ ^[0-9]+$ ]] || return 0
     (( TMUX_AGENT_EXIT_POLL_SECONDS > 0 )) || return 0
     [[ -n "$TMUX_BADGE_LIB_PATH" ]] && [[ -f "$TMUX_BADGE_LIB_PATH" ]] || return 0
-    local pending tmux_bin socket_path q_lib q_tmux q_socket q_env q_poll inner
+    local pending tmux_bin socket_path token q_lib q_tmux q_socket q_env q_poll q_token inner
     pending=$(tmux show-options -gqv @code_notify_agent_exit_sweep_scheduled 2>/dev/null)
     [[ -z "$pending" ]] || return 0
     tmux_bin=$(command -v tmux) || return 0
     socket_path="${TMUX%%,*}"
     [[ -n "$socket_path" ]] || return 0
+    tmux_timer_chain_token
+    token="$TMUX_TIMER_CHAIN_TOKEN"
     q_lib=$(tmux_focus_shell_quote "$TMUX_BADGE_LIB_PATH")
     q_tmux=$(tmux_focus_shell_quote "$tmux_bin")
     q_socket=$(tmux_focus_shell_quote "$socket_path")
     q_env=$(tmux_focus_shell_quote "$TMUX")
+    q_token=$(tmux_focus_shell_quote "$token")
     # Pass the interval through like the TTL sweep passes the TTL: the timer's
     # fresh process would otherwise fall back to the default, so a custom
     # interval would only survive the first firing. The settle and idle
@@ -773,15 +825,23 @@ tmux_agent_exit_schedule_sweep() {
     q_idle=$(tmux_focus_shell_quote "$TMUX_IDLE_SECONDS")
     q_idle_agents=$(tmux_focus_shell_quote "$TMUX_IDLE_AGENTS")
     q_notifier=$(tmux_focus_shell_quote "${CODE_NOTIFY_NOTIFIER_PATH:-}")
-    inner="$q_tmux -S $q_socket set-option -gu @code_notify_agent_exit_sweep_scheduled; "
+    inner="cur=\$($q_tmux -S $q_socket show-options -gqv @code_notify_agent_exit_sweep_scheduled 2>/dev/null); "
+    inner+="if [ \"\$cur\" != $q_token ]; then exit 0; fi; "
+    inner+="$q_tmux -S $q_socket set-option -gu @code_notify_agent_exit_sweep_scheduled; "
     inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS=$q_poll "
     inner+="CODE_NOTIFY_TMUX_SETTLE_SECONDS=$q_settle "
     inner+="CODE_NOTIFY_TMUX_IDLE_SECONDS=$q_idle CODE_NOTIFY_TMUX_IDLE_AGENTS=$q_idle_agents "
     inner+="CODE_NOTIFY_NOTIFIER_PATH=$q_notifier "
     inner+="bash $q_lib agent-exit-sweep; fi"
     inner="${inner//\#/##}"
-    tmux run-shell -b -d "$TMUX_AGENT_EXIT_POLL_SECONDS" "$inner" 2>/dev/null || return 0
-    tmux set-option -g @code_notify_agent_exit_sweep_scheduled 1 2>/dev/null
+    # Claim before arming (see tmux_timer_chain_token); a failed arm rolls
+    # back only a claim that is still ours, compared-and-cleared server-side
+    # in one command.
+    tmux set-option -g @code_notify_agent_exit_sweep_scheduled "$token" 2>/dev/null || return 0
+    if ! tmux run-shell -b -d "$TMUX_AGENT_EXIT_POLL_SECONDS" "$inner" 2>/dev/null; then
+        tmux if-shell -F "#{==:#{@code_notify_agent_exit_sweep_scheduled},$token}" \
+            "set-option -gu @code_notify_agent_exit_sweep_scheduled" 2>/dev/null
+    fi
 }
 
 tmux_agent_exit_sweep() {
@@ -1371,8 +1431,10 @@ tmux_running_resume_window() {
 # the earliest observable sign that the user answered an approval/input
 # dialog (Claude Code emits no hook at answer time — only when the approved
 # tool completes). Same pattern as tmux_agent_exit_schedule_sweep: repeating
-# one-shots, a global flag prevents stacking, and the chain stops as soon as
-# no watched pause remains (or the outstanding ones outlive the poll TTL).
+# one-shots, a token-carrying global flag prevents stacking (a fired timer
+# the flag no longer names exits without polling), and the chain stops as
+# soon as no watched pause remains (or the outstanding ones outlive the poll
+# TTL).
 # The poll settings and the active running-indicator configuration ride along
 # in the payload's environment: the timer's fresh process would otherwise
 # fall back to defaults, flipping a session that forced e.g.
@@ -1384,13 +1446,16 @@ tmux_resume_poll_schedule() {
     [[ "${TMUX_RESUME_POLL_SECONDS:-0}" =~ ^[0-9]+$ ]] || return 0
     (( TMUX_RESUME_POLL_SECONDS > 0 )) || return 0
     [[ -n "$TMUX_BADGE_LIB_PATH" ]] && [[ -f "$TMUX_BADGE_LIB_PATH" ]] || return 0
-    local pending tmux_bin socket_path q_lib q_tmux q_socket q_env q_poll q_ttl inner
+    local pending tmux_bin socket_path token q_lib q_tmux q_socket q_env q_poll q_ttl q_token inner
     local q_running q_spinner q_badge q_icon q_rttl
     pending=$(tmux show-options -gqv @code_notify_resume_poll_scheduled 2>/dev/null)
     [[ -z "$pending" ]] || return 0
     tmux_bin=$(command -v tmux) || return 0
     socket_path="${TMUX%%,*}"
     [[ -n "$socket_path" ]] || return 0
+    tmux_timer_chain_token
+    token="$TMUX_TIMER_CHAIN_TOKEN"
+    q_token=$(tmux_focus_shell_quote "$token")
     q_lib=$(tmux_focus_shell_quote "$TMUX_BADGE_LIB_PATH")
     q_tmux=$(tmux_focus_shell_quote "$tmux_bin")
     q_socket=$(tmux_focus_shell_quote "$socket_path")
@@ -1409,7 +1474,9 @@ tmux_resume_poll_schedule() {
     local q_markers q_options
     q_markers=$(tmux_focus_shell_quote "$TMUX_DIALOG_MARKERS")
     q_options=$(tmux_focus_shell_quote "$TMUX_DIALOG_OPTIONS")
-    inner="$q_tmux -S $q_socket set-option -gu @code_notify_resume_poll_scheduled; "
+    inner="cur=\$($q_tmux -S $q_socket show-options -gqv @code_notify_resume_poll_scheduled 2>/dev/null); "
+    inner+="if [ \"\$cur\" != $q_token ]; then exit 0; fi; "
+    inner+="$q_tmux -S $q_socket set-option -gu @code_notify_resume_poll_scheduled; "
     inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_RESUME_POLL_SECONDS=$q_poll "
     inner+="CODE_NOTIFY_TMUX_RESUME_POLL_TTL=$q_ttl "
     inner+="CODE_NOTIFY_TMUX_RUNNING=$q_running CODE_NOTIFY_TMUX_SPINNER=$q_spinner "
@@ -1417,8 +1484,14 @@ tmux_resume_poll_schedule() {
     inner+="CODE_NOTIFY_TMUX_RUNNING_TTL=$q_rttl CODE_NOTIFY_TMUX_DIALOG_OPTIONS=$q_options "
     inner+="CODE_NOTIFY_TMUX_DIALOG_MARKERS=$q_markers bash $q_lib resume-poll; fi"
     inner="${inner//\#/##}"
-    tmux run-shell -b -d "$TMUX_RESUME_POLL_SECONDS" "$inner" 2>/dev/null || return 0
-    tmux set-option -g @code_notify_resume_poll_scheduled 1 2>/dev/null
+    # Claim before arming (see tmux_timer_chain_token); a failed arm rolls
+    # back only a claim that is still ours, compared-and-cleared server-side
+    # in one command.
+    tmux set-option -g @code_notify_resume_poll_scheduled "$token" 2>/dev/null || return 0
+    if ! tmux run-shell -b -d "$TMUX_RESUME_POLL_SECONDS" "$inner" 2>/dev/null; then
+        tmux if-shell -F "#{==:#{@code_notify_resume_poll_scheduled},$token}" \
+            "set-option -gu @code_notify_resume_poll_scheduled" 2>/dev/null
+    fi
     return 0
 }
 
@@ -1603,11 +1676,13 @@ tmux_resume_poll_dialog_flag() {
 # So while any fresh marker exists, park a one-shot `run-shell -b -d` timer on
 # the tmux server itself that re-runs the sweep just after the oldest marker
 # expires. The pending timer is tracked in the global option
-# @code_notify_sweep_scheduled so repeat sweeps don't stack timers; the payload
-# clears the flag before sweeping, and that sweep re-schedules when fresher
+# @code_notify_sweep_scheduled so repeat sweeps don't stack timers; the flag
+# carries the chain token (see tmux_timer_chain_token), the payload sweeps
+# only while it still owns the flag, and that sweep re-schedules when fresher
 # markers remain. `run-shell -d` needs tmux >= 3.2 — on older servers the call
-# fails, the flag stays unset, and behavior degrades to piggyback-only
-# convergence. Like the focus hook, the payload guards against the lib having
+# fails, the claimed flag is rolled back, and behavior degrades to
+# piggyback-only convergence. Like the focus hook, the payload guards against
+# the lib having
 # been uninstalled before the timer fires; TMUX is passed explicitly because
 # run-shell's environment does not guarantee it, the TTL is passed so the
 # fired sweep judges staleness by the same clock that computed the delay (the
@@ -1619,21 +1694,32 @@ tmux_running_schedule_sweep() {
     local pending
     pending=$(tmux show-options -gqv @code_notify_sweep_scheduled 2>/dev/null)
     [[ -z "$pending" ]] || return 0
-    local tmux_bin socket_path q_lib q_tmux q_socket q_env q_ttl inner
+    local tmux_bin socket_path token q_lib q_tmux q_socket q_env q_ttl q_token inner
     tmux_bin=$(command -v tmux) || return 0
     socket_path="${TMUX%%,*}"
     [[ -n "$socket_path" ]] || return 0
+    tmux_timer_chain_token
+    token="$TMUX_TIMER_CHAIN_TOKEN"
     q_lib=$(tmux_focus_shell_quote "$TMUX_BADGE_LIB_PATH")
     q_tmux=$(tmux_focus_shell_quote "$tmux_bin")
     q_socket=$(tmux_focus_shell_quote "$socket_path")
     q_env=$(tmux_focus_shell_quote "$TMUX")
     q_ttl=$(tmux_focus_shell_quote "$TMUX_RUNNING_TTL")
-    inner="$q_tmux -S $q_socket set-option -gu @code_notify_sweep_scheduled; "
+    q_token=$(tmux_focus_shell_quote "$token")
+    inner="cur=\$($q_tmux -S $q_socket show-options -gqv @code_notify_sweep_scheduled 2>/dev/null); "
+    inner+="if [ \"\$cur\" != $q_token ]; then exit 0; fi; "
+    inner+="$q_tmux -S $q_socket set-option -gu @code_notify_sweep_scheduled; "
     inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_RUNNING_TTL=$q_ttl "
     inner+="bash $q_lib running-sweep; fi"
     inner="${inner//\#/##}"
-    tmux run-shell -b -d "$delay" "$inner" 2>/dev/null || return 0
-    tmux set-option -g @code_notify_sweep_scheduled 1 2>/dev/null
+    # Claim before arming (see tmux_timer_chain_token); a failed arm rolls
+    # back only a claim that is still ours, compared-and-cleared server-side
+    # in one command.
+    tmux set-option -g @code_notify_sweep_scheduled "$token" 2>/dev/null || return 0
+    if ! tmux run-shell -b -d "$delay" "$inner" 2>/dev/null; then
+        tmux if-shell -F "#{==:#{@code_notify_sweep_scheduled},$token}" \
+            "set-option -gu @code_notify_sweep_scheduled" 2>/dev/null
+    fi
     return 0
 }
 

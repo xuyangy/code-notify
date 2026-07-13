@@ -162,6 +162,29 @@ case "$cmd" in
         # fail-propagation in tmux_resume_poll_fingerprint is exercised.
         cat "$FAKE_TMUX_STATE/${target}.pane_content" 2>/dev/null || exit 1
         ;;
+    run-shell)
+        # run-shell -d needs tmux >= 3.2; the knob simulates that failure so
+        # the claim-rollback in the timer schedulers is exercised.
+        if [[ -n "$FAKE_TMUX_RUN_SHELL_FAIL" ]]; then
+            exit 1
+        fi
+        ;;
+    if-shell)
+        # Only the -F compare-and-clear form the timer schedulers use:
+        # evaluate #{==:#{@option},value} against the state files and feed
+        # the consequent back through this stub on a match. (The generic -*
+        # parser above already captured the format into $fmt.)
+        ifre='^#\{==:#\{(@[A-Za-z0-9_]+)\},(.*)\}$'
+        if [[ "$fmt" =~ $ifre ]]; then
+            opt="${BASH_REMATCH[1]}"
+            want="${BASH_REMATCH[2]}"
+            cur=$(cat "$FAKE_TMUX_STATE/${target}.${opt}" 2>/dev/null)
+            if [[ "$cur" == "$want" ]]; then
+                # shellcheck disable=SC2086
+                "$0" ${rest[0]}
+            fi
+        fi
+        ;;
 esac
 exit 0
 EOF
@@ -857,11 +880,22 @@ pass "watched pause defers the dialog snapshot and schedules the poll"
 # first poll must absorb that change as its baseline, not call it an answer.
 payload=$(sed -n 's/^run-shell -b -d 2 \(.*\)$/\1/p' "$log_file" | head -n 1)
 [[ -n "$payload" ]] || fail "the poll payload should be extractable from the run-shell call"
+# Each registration carries a fresh chain token, so a re-fired stale payload
+# string deliberately loses ownership and exits (asserted in its own test
+# below). Between ticks, adopt the payload the previous tick re-scheduled —
+# exactly the timer real tmux would fire next.
+fire_poll_payload() {
+    env -u TMUX_PANE /bin/sh -c "$payload" || return 1
+    local next
+    next=$(sed -n 's/^run-shell -b -d 2 \(.*\)$/\1/p' "$log_file" | tail -n 1)
+    [[ -n "$next" ]] && payload="$next"
+    return 0
+}
 pending=$(cat "$state_dir/@2.@code_notify_resume_pending")
 printf '%s' "approval dialog after hook status cleared" > "$state_dir/%3.pane_content"
 printf '%s' "$((pending + 5))" > "$state_dir/@2.window_activity"
 : > "$log_file"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the poll payload should run cleanly"
+fire_poll_payload || fail "the poll payload should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "the first poll must not restore the running epoch"
 [[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
@@ -876,10 +910,9 @@ pass "first poll baselines hook UI changes without resuming"
 # Visiting the waiting window delivers a focus event and the TUI repaints the
 # same dialog: #{window_activity} advances but the snapshot still matches, so
 # the poll must keep waiting instead of showing a running agent.
-rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
 printf '%s' "$((pending + 5))" > "$state_dir/@2.window_activity"   # focus repaint
 : > "$log_file"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the glance poll payload should run cleanly"
+fire_poll_payload || fail "the glance poll payload should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "a glance must not restore the running epoch"
 [[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
@@ -924,10 +957,9 @@ pass "moved pane keeps the recorded window waiting"
 # stillness, and must re-baseline instead of clearing the waiting badge for a
 # spinner; only a pane that keeps changing (a working agent's ticking TUI)
 # reads as an answer.
-rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
 printf '%s' "approval dialog rendered on focus" > "$state_dir/%3.pane_content"
 : > "$log_file"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the one-shot poll payload should run cleanly"
+fire_poll_payload || fail "the one-shot poll payload should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "a one-shot repaint must not restore the running epoch"
 [[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
@@ -937,7 +969,7 @@ env -u TMUX_PANE /bin/sh -c "$payload" || fail "the one-shot poll payload should
 grep -q "^run-shell -b -d 2 " "$log_file" \
     || fail "the poll should keep watching after a one-shot repaint"
 : > "$log_file"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the still-tick poll payload should run cleanly"
+fire_poll_payload || fail "the still-tick poll payload should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "a still tick after a one-shot repaint must not resume"
 [[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "*" 0 0" ]] \
@@ -953,19 +985,19 @@ pass "one-shot repaint re-baselines instead of resuming"
 dialog_head=$'Do you want to run this command?\n❯ 1. Yes\n  3. No'
 printf '%s\n%s' "$dialog_head" "· make test (2s)" \
     > "$state_dir/%3.pane_content"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the dialog-marker tick should run cleanly"
+fire_poll_payload || fail "the dialog-marker tick should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "an on-screen dialog must not resume on a content change"
 [[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "*" 0 1" ]] \
     || fail "the marker tick should record the dialog flag"
 printf '%s\n%s' "$dialog_head" "• make test (4s)" \
     > "$state_dir/%3.pane_content"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the animated-dialog tick should run cleanly"
+fire_poll_payload || fail "the animated-dialog tick should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "an animating pane behind an on-screen dialog must not resume"
 printf '%s\n%s' "$dialog_head" "· make test (6s)" \
     > "$state_dir/%3.pane_content"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the third animated-dialog tick should run cleanly"
+fire_poll_payload || fail "the third animated-dialog tick should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "sustained animation under an on-screen dialog must not resume"
 [[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "*" 0 1" ]] \
@@ -977,17 +1009,17 @@ pass "on-screen dialog suppresses resume despite continuous animation"
 # heuristic: a transcript view over a waiting dialog holds still, so nothing
 # resumes; returning to the normal view re-enters marker mode.
 printf '%s' "transcript view, dialog hidden" > "$state_dir/%3.pane_content"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the marker-vanish tick should run cleanly"
+fire_poll_payload || fail "the marker-vanish tick should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "hiding the dialog behind the transcript view must not resume"
 [[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "*" 0 0" ]] \
     || fail "the marker-vanish tick should re-baseline without flags"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the still transcript tick should run cleanly"
+fire_poll_payload || fail "the still transcript tick should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "a still transcript view must not resume"
 printf '%s\n%s' "$dialog_head" "· make test (20s)" \
     > "$state_dir/%3.pane_content"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the view-return tick should run cleanly"
+fire_poll_payload || fail "the view-return tick should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "returning to the dialog view must not resume"
 [[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "*" 0 1" ]] \
@@ -997,20 +1029,19 @@ pass "hiding and revealing the dialog never resumes"
 # --- sustained content change resumes the indicator with the configured icon ---
 # The user answers: the dialog collapses (marker vanishes) and the resumed
 # turn keeps repainting its TUI, which is what finally reads as an answer.
-rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
 printf '%s' "tool output streaming" > "$state_dir/%3.pane_content"   # user answered
 : > "$log_file"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the marker-collapse poll payload should run cleanly"
+fire_poll_payload || fail "the marker-collapse poll payload should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "the dialog collapsing alone must not restore the running epoch"
 printf '%s' "tool output streaming (2s)" > "$state_dir/%3.pane_content"
 : > "$log_file"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the first resuming poll payload should run cleanly"
+fire_poll_payload || fail "the first resuming poll payload should run cleanly"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "the first changed tick alone must not restore the running epoch"
 printf '%s' "tool output streaming (4s)" > "$state_dir/%3.pane_content"
 : > "$log_file"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the second resuming poll payload should run cleanly"
+fire_poll_payload || fail "the second resuming poll payload should run cleanly"
 [[ "$(cat "$state_dir/@2.@code_notify_running")" =~ ^[0-9]+$ ]] \
     || fail "two consecutive changed ticks should restore the running epoch"
 [[ ! -f "$state_dir/@2.@code_notify_resume_pending" ]] \
@@ -1345,6 +1376,116 @@ CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_agent_exit_sweep \
 sleep 0.3
 [[ ! -s "$idle_notify_log" ]] || fail "a vanished pane must not notify"
 pass "vanished pane disarms the idle watch silently"
+
+# --- REGRESSION: raced duplicate sweep chains collapse instead of persisting ---
+# Two hook processes can both read an empty pending flag and both register a
+# sweep timer. Each timer used to clear the flag unconditionally at fire time
+# and reschedule at sweep end, so the stray chain survived forever — and every
+# idle/settle expiry both chains raced on delivered the same notification
+# twice (observed live as an extra "input request" toast alongside each
+# Codex idle nudge). The chain token must make the timer that lost the flag
+# exit at fire time without sweeping, notifying, or re-arming.
+printf '%s' "turn finished, waiting" > "$state_dir/%3.pane_content"
+tmux_idle_watch_arm_current codex projX || fail "idle arm for the race test should succeed"
+idle_fp="$(printf '%s\n' "turn finished, waiting" | cksum)"
+printf '%s' "%3 1000 $idle_fp stable codex projX" > "$state_dir/@2.@code_notify_idle_watch"
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+: > "$log_file"
+: > "$idle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_agent_exit_schedule_sweep \
+    || fail "scheduling chain A should succeed"
+# Simulate the race: chain B's pending check read the flag before A wrote it.
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_agent_exit_schedule_sweep \
+    || fail "scheduling chain B should succeed"
+race_payload_a=$(sed -n 's/^run-shell -b -d 5 \(.*\)$/\1/p' "$log_file" | head -n 1)
+race_payload_b=$(sed -n 's/^run-shell -b -d 5 \(.*\)$/\1/p' "$log_file" | tail -n 1)
+[[ -n "$race_payload_a" ]] && [[ -n "$race_payload_b" ]] \
+    || fail "both raced payloads should be extractable"
+[[ "$race_payload_a" != "$race_payload_b" ]] \
+    || fail "raced registrations should carry distinct chain tokens"
+flag_before="$(cat "$state_dir/.@code_notify_agent_exit_sweep_scheduled" 2>/dev/null)"
+[[ -n "$flag_before" ]] || fail "the pending flag should record the owning token"
+: > "$log_file"
+env -u TMUX_PANE /bin/sh -c "$race_payload_a" \
+    || fail "the losing timer should still exit cleanly"
+[[ "$(cat "$state_dir/.@code_notify_agent_exit_sweep_scheduled" 2>/dev/null)" == "$flag_before" ]] \
+    || fail "the losing timer must not consume the owner's pending flag"
+[[ -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "the losing timer must not sweep the idle watch"
+sleep 0.3
+[[ ! -s "$idle_notify_log" ]] || fail "the losing timer must not notify"
+grep -q "^run-shell -b -d 5 " "$log_file" \
+    && fail "the losing timer must not reschedule itself"
+env -u TMUX_PANE /bin/sh -c "$race_payload_b" \
+    || fail "the owning timer should run cleanly"
+wait_for_idle_log || fail "the owning timer should still deliver the idle nudge"
+[[ "$(wc -l < "$idle_notify_log" | tr -d ' ')" == "1" ]] \
+    || fail "the collapsed race should notify exactly once (got: $(cat "$idle_notify_log"))"
+[[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "the owning timer should consume the idle watch"
+# The tighter interleaving: the owner fires FIRST, consuming the flag, and
+# the stale twin fires into that empty-flag window while state is pending
+# again. Empty must read as lost ownership too — treating it as a free pass
+# would let the straggler sweep the same state concurrently with the owner
+# and re-deliver the duplicate.
+printf '%s' "turn finished, waiting" > "$state_dir/%3.pane_content"
+printf '%s' "%3 1000 $idle_fp stable codex projX" > "$state_dir/@2.@code_notify_idle_watch"
+: > "$log_file"
+env -u TMUX_PANE /bin/sh -c "$race_payload_a" \
+    || fail "the straggling timer should still exit cleanly on an empty flag"
+[[ -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "an empty flag must read as lost ownership, not sweep"
+sleep 0.3
+[[ "$(wc -l < "$idle_notify_log" | tr -d ' ')" == "1" ]] \
+    || fail "the straggling timer must not re-deliver the nudge (got: $(cat "$idle_notify_log"))"
+grep -q "^run-shell -b -d 5 " "$log_file" \
+    && fail "the straggling timer must not restart the chain"
+rm -f "$state_dir/%3.pane_content" "$state_dir/@2.@code_notify_idle_watch" \
+    "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+pass "raced duplicate sweep chains collapse to a single notification"
+
+# --- REGRESSION: ownership is claimed before the timer is armed ---
+# Armed-first, a scheduler descheduled (or suspended) past the timer delay
+# lets the payload fire against a still-empty flag and exit; the late claim
+# then reads as "pending" forever and wedges the chain until the tmux server
+# restarts. The claim must land first — and a failed arm (run-shell -d needs
+# tmux >= 3.2) must roll the claim back rather than leave that same wedge.
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+: > "$log_file"
+tmux_agent_exit_schedule_sweep || fail "ordering-test schedule should succeed"
+claim_line=$(grep -n "^set-option -g @code_notify_agent_exit_sweep_scheduled " "$log_file" | head -n 1 | cut -d: -f1)
+arm_line=$(grep -n "^run-shell -b -d 5 " "$log_file" | head -n 1 | cut -d: -f1)
+[[ -n "$claim_line" ]] && [[ -n "$arm_line" ]] \
+    || fail "the schedule should log both the ownership claim and the timer arm"
+(( claim_line < arm_line )) \
+    || fail "the ownership claim must be recorded before the timer is armed"
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+FAKE_TMUX_RUN_SHELL_FAIL=1 tmux_agent_exit_schedule_sweep \
+    || fail "a schedule whose arm fails should still exit cleanly"
+[[ ! -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled" ]] \
+    || fail "a failed arm must roll the ownership claim back"
+# The rollback must be scoped to this scheduler's own claim. If a racer that
+# also passed the empty pending check overwrites the token and arms its
+# timer successfully while our arm fails, unsetting unconditionally would
+# strand the racer's live timer against an empty flag — its guard would exit
+# without sweeping and the chain would stall. Shim run-shell to interleave
+# exactly that: the racer's overwrite lands, then our arm fails.
+tmux() {
+    if [[ "$1" == "run-shell" ]]; then
+        printf '%s' "racer.token" > "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+        return 1
+    fi
+    command tmux "$@"
+}
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+tmux_agent_exit_schedule_sweep \
+    || fail "a schedule losing the claim race should still exit cleanly"
+unset -f tmux
+[[ "$(cat "$state_dir/.@code_notify_agent_exit_sweep_scheduled" 2>/dev/null)" == "racer.token" ]] \
+    || fail "rollback must not clear a claim a racing scheduler now owns"
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+pass "scheduling claims ownership before arming and rolls back only its own claim"
 
 # --- acknowledgment paths cancel the pending nudge ---
 # Clearing the badge (glance visit, cleanup) and the click-to-clear command
@@ -1944,8 +2085,18 @@ EOF
         || fail "permission request should badge the waiting window (got: $(window_name))"
     focus_payload=$(sed -n 's/^run-shell -b -d 2 \(.*\)$/\1/p' "$log_file" | head -n 1)
     [[ -n "$focus_payload" ]] || fail "the focus-regression poll payload should be extractable"
+    # Each tick re-schedules under a fresh chain token, so fire the payload
+    # the previous tick registered — a stale payload string would lose
+    # ownership and exit instead of polling.
+    fire_focus_payload() {
+        env -u TMUX_PANE /bin/sh -c "$focus_payload" || return 1
+        local next
+        next=$(sed -n 's/^run-shell -b -d 2 \(.*\)$/\1/p' "$log_file" | tail -n 1)
+        [[ -n "$next" ]] && focus_payload="$next"
+        return 0
+    }
     # First tick baselines the pre-dialog pane.
-    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+    fire_focus_payload \
         || fail "the focus-regression baseline tick should run cleanly"
     # The user focuses the window: activity advances and the pane repaints
     # once (the dialog finally renders). This is NOT an answer.
@@ -1953,7 +2104,7 @@ EOF
     printf '%s' "$((focus_pending + 5))" > "$state_dir/@2.window_activity"
     printf '%s' "approval dialog rendered on focus" > "$state_dir/%3.pane_content"
     : > "$log_file"
-    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+    fire_focus_payload \
         || fail "the focus-repaint tick should run cleanly"
     [[ "$(window_name)" == "💬 zsh" ]] \
         || fail "REGRESSION: focusing replaced the waiting badge (got: $(window_name))"
@@ -1966,7 +2117,7 @@ EOF
     grep -q "^run-shell -b -d 2 " "$log_file" \
         || fail "the poll should keep watching the unanswered dialog"
     # The dialog then just sits there: a still tick must keep waiting too.
-    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+    fire_focus_payload \
         || fail "the still tick should run cleanly"
     [[ "$(window_name)" == "💬 zsh" ]] \
         || fail "a still dialog must keep the waiting badge (got: $(window_name))"
@@ -1979,11 +2130,11 @@ EOF
     e2e_dialog=$'Do you want to proceed?\n❯ 1. Yes\n  3. No'
     printf '%s\n%s' "$e2e_dialog" "· Running: make test (12s)" \
         > "$state_dir/%3.pane_content"
-    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+    fire_focus_payload \
         || fail "the animated-dialog tick should run cleanly"
     printf '%s\n%s' "$e2e_dialog" "• Running: make test (14s)" \
         > "$state_dir/%3.pane_content"
-    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+    fire_focus_payload \
         || fail "the second animated-dialog tick should run cleanly"
     [[ "$(window_name)" == "💬 zsh" ]] \
         || fail "REGRESSION: animation under the dialog replaced the waiting badge (got: $(window_name))"
@@ -1995,13 +2146,13 @@ EOF
     # actual answer collapses the dialog and the resumed turn repaints on
     # every tick, which must clear the badge and light the spinner.
     printf '%s' "running tool output (1s)" > "$state_dir/%3.pane_content"
-    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+    fire_focus_payload \
         || fail "the dialog-collapse tick should run cleanly"
     printf '%s' "running tool output (3s)" > "$state_dir/%3.pane_content"
-    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+    fire_focus_payload \
         || fail "the first answered tick should run cleanly"
     printf '%s' "running tool output (5s)" > "$state_dir/%3.pane_content"
-    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+    fire_focus_payload \
         || fail "the second answered tick should run cleanly"
     [[ "$(cat "$state_dir/@2.@code_notify_running" 2>/dev/null)" =~ ^[0-9]+$ ]] \
         || fail "a sustained repaint should resume the running indicator"

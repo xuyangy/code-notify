@@ -761,6 +761,72 @@ tmux_running_resume_after_input || fail "input resume should succeed"
 tmux_running_stop || fail "cleanup after input resume should succeed"
 pass "input pause resumes the running indicator once"
 
+# --- the dialog-marker helper needs the question AND a Yes/No selector ---
+# A real permission dialog renders both the "Do you want to …?" question and a
+# numbered Yes/No selector; requiring both keeps a lone "Do you want …" line in
+# ordinary transcript/model output — even one that opens a rendered line behind
+# a bullet or box border — from being mistaken for the dialog. Explicitly empty
+# overrides must disable each half (the top-level assignment uses `-`, not
+# `:-`, so an empty value sticks).
+default_markers="$TMUX_DIALOG_MARKERS"
+default_options="$TMUX_DIALOG_OPTIONS"
+# The exact real Claude Code permission rendering: a "Do you want …?" question
+# and an indented "❯ 1. Yes" selector cursor (note the leading space before ❯).
+real_dialog=$'Do you want to proceed?\n ❯ 1. Yes\n   2. Yes, and don\'t ask again\n   3. No'
+[[ "$(tmux_resume_poll_dialog_flag "$real_dialog")" == "1" ]] \
+    || fail "the default should match the real permission dialog (question + ❯ selector)"
+[[ "$(tmux_resume_poll_dialog_flag "$(printf '│ Do you want to run this command?\n│ 2. Yes, and\n│ 3. No')")" == "1" ]] \
+    || fail "the default should match past box/indent framing"
+# Plan-mode approval uses a different question ("Would you like to proceed?")
+# with the same selector chrome; the default must cover it too.
+plan_dialog=$'Would you like to proceed?\n ❯ 1. Yes, and auto-accept edits\n   3. No, keep planning'
+[[ "$(tmux_resume_poll_dialog_flag "$plan_dialog")" == "1" ]] \
+    || fail "the default should match plan-mode approval (Would you like + selector)"
+# Line-leading prose the reviewer flagged: a question line with no Yes/No
+# selector, plain or behind a bullet, must NOT read as a dialog.
+[[ "$(tmux_resume_poll_dialog_flag "Do you want to know more about this approach?")" == "0" ]] \
+    || fail "REGRESSION: a line-leading question with no selector must not match"
+[[ "$(tmux_resume_poll_dialog_flag "• Do you want me to continue with the refactor?")" == "0" ]] \
+    || fail "REGRESSION: a bullet-prefixed question with no selector must not match"
+[[ "$(tmux_resume_poll_dialog_flag "Would you like me to continue? Do you want more?")" == "0" ]] \
+    || fail "REGRESSION: mid-sentence prose must not be mistaken for a dialog"
+[[ "$(tmux_resume_poll_dialog_flag "sure, do you want to proceed with that")" == "0" ]] \
+    || fail "REGRESSION: a mid-line lowercase phrase must not match"
+# A stray numbered Yes/No item alone (a prose list) is not a dialog either.
+[[ "$(tmux_resume_poll_dialog_flag "$(printf 'Here are the options:\n1. Yes\n2. No')")" == "0" ]] \
+    || fail "a Yes/No list with no question line must not match"
+TMUX_DIALOG_OPTIONS=""
+[[ "$(tmux_resume_poll_dialog_flag "Do you want to proceed?")" == "1" ]] \
+    || fail "an empty options pattern should fall back to question-only matching"
+TMUX_DIALOG_OPTIONS="$default_options"
+TMUX_DIALOG_MARKERS=""
+[[ "$(tmux_resume_poll_dialog_flag "$real_dialog")" == "0" ]] \
+    || fail "an empty marker pattern should disable dialog detection"
+TMUX_DIALOG_MARKERS="$default_markers"
+# The top-level assignments themselves: an explicit empty env value must not
+# revert to the default (regression against the `:-` expansion), and an unset
+# one must fall back to the default.
+( CODE_NOTIFY_TMUX_DIALOG_MARKERS="" CODE_NOTIFY_TMUX_DIALOG_OPTIONS="" \
+      source "$ROOT_DIR/lib/code-notify/utils/tmux.sh"
+  [[ -z "$TMUX_DIALOG_MARKERS" && -z "$TMUX_DIALOG_OPTIONS" ]] \
+      || fail "REGRESSION: explicit empty overrides must not revert to the default" ) \
+    || exit 1
+( unset CODE_NOTIFY_TMUX_DIALOG_MARKERS CODE_NOTIFY_TMUX_DIALOG_OPTIONS
+  source "$ROOT_DIR/lib/code-notify/utils/tmux.sh"
+  [[ -n "$TMUX_DIALOG_MARKERS" && -n "$TMUX_DIALOG_OPTIONS" ]] \
+      || fail "unset overrides should fall back to the default patterns" ) \
+    || exit 1
+# A custom pattern beginning with "-" must be treated as a pattern, not a grep
+# option (grep -qE -e "$pattern"); otherwise grep errors and detection
+# silently reports 0.
+TMUX_DIALOG_OPTIONS=""
+TMUX_DIALOG_MARKERS="-x approval"
+[[ "$(tmux_resume_poll_dialog_flag "prefix -x approval suffix")" == "1" ]] \
+    || fail "REGRESSION: a marker pattern starting with - must be treated as a pattern"
+TMUX_DIALOG_MARKERS="$default_markers"
+TMUX_DIALOG_OPTIONS="$default_options"
+pass "dialog-marker helper needs question plus selector, prose-safe, disablable"
+
 # --- a watched input pause defers its snapshot and schedules the poll ---
 # No hook fires when the user answers an approval dialog, so a "watch" pause
 # records its pane and parks a short run-shell timer on the server. It must not
@@ -850,13 +916,103 @@ unset FAKE_TMUX_PANE_WINDOW
 printf '%s' "approval dialog" > "$state_dir/%3.pane_content"
 pass "moved pane keeps the recorded window waiting"
 
-# --- a content change resumes the indicator with the configured icon ---
+# --- a one-shot repaint must not resume ---
+# The PermissionRequest hook fires before the dialog UI, so the baseline can
+# predate the dialog entirely (in Ctrl+O verbose mode it only renders once the
+# user leaves the transcript view). The dialog finally painting — or any
+# focus/view-toggle repaint — is a single content change followed by
+# stillness, and must re-baseline instead of clearing the waiting badge for a
+# spinner; only a pane that keeps changing (a working agent's ticking TUI)
+# reads as an answer.
+rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
+printf '%s' "approval dialog rendered on focus" > "$state_dir/%3.pane_content"
+: > "$log_file"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the one-shot poll payload should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a one-shot repaint must not restore the running epoch"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "a one-shot repaint should keep the pause marker"
+[[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "*" 1 0" ]] \
+    || fail "a first content change should re-baseline with the changed flag"
+grep -q "^run-shell -b -d 2 " "$log_file" \
+    || fail "the poll should keep watching after a one-shot repaint"
+: > "$log_file"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the still-tick poll payload should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a still tick after a one-shot repaint must not resume"
+[[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "*" 0 0" ]] \
+    || fail "a still tick should drop the changed flag"
+pass "one-shot repaint re-baselines instead of resuming"
+
+# --- an on-screen dialog suppresses resume even while the pane animates ---
+# A backgrounded shell command keeps a flashing dot / ticking timer on screen
+# while the approval dialog waits, so the fingerprint changes on EVERY tick
+# with no answer given. While the capture shows the dialog (question + Yes/No
+# selector) the poll must keep waiting, however much the rest of the pane
+# moves. The selector row is stable; only the dot line animates.
+dialog_head=$'Do you want to run this command?\n❯ 1. Yes\n  3. No'
+printf '%s\n%s' "$dialog_head" "· make test (2s)" \
+    > "$state_dir/%3.pane_content"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the dialog-marker tick should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "an on-screen dialog must not resume on a content change"
+[[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "*" 0 1" ]] \
+    || fail "the marker tick should record the dialog flag"
+printf '%s\n%s' "$dialog_head" "• make test (4s)" \
+    > "$state_dir/%3.pane_content"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the animated-dialog tick should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "an animating pane behind an on-screen dialog must not resume"
+printf '%s\n%s' "$dialog_head" "· make test (6s)" \
+    > "$state_dir/%3.pane_content"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the third animated-dialog tick should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "sustained animation under an on-screen dialog must not resume"
+[[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "*" 0 1" ]] \
+    || fail "the dialog flag should persist while the marker stays on screen"
+pass "on-screen dialog suppresses resume despite continuous animation"
+
+# --- hiding the dialog (Ctrl+O transcript view) is not an answer ---
+# The marker vanishing re-baselines and hands over to the fingerprint
+# heuristic: a transcript view over a waiting dialog holds still, so nothing
+# resumes; returning to the normal view re-enters marker mode.
+printf '%s' "transcript view, dialog hidden" > "$state_dir/%3.pane_content"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the marker-vanish tick should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "hiding the dialog behind the transcript view must not resume"
+[[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "*" 0 0" ]] \
+    || fail "the marker-vanish tick should re-baseline without flags"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the still transcript tick should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a still transcript view must not resume"
+printf '%s\n%s' "$dialog_head" "· make test (20s)" \
+    > "$state_dir/%3.pane_content"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the view-return tick should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "returning to the dialog view must not resume"
+[[ "$(cat "$state_dir/@2.@code_notify_pause_fp")" == "%3 "*" 0 1" ]] \
+    || fail "returning to the dialog view should re-enter marker mode"
+pass "hiding and revealing the dialog never resumes"
+
+# --- sustained content change resumes the indicator with the configured icon ---
+# The user answers: the dialog collapses (marker vanishes) and the resumed
+# turn keeps repainting its TUI, which is what finally reads as an answer.
 rm -f "$state_dir/.@code_notify_resume_poll_scheduled"
 printf '%s' "tool output streaming" > "$state_dir/%3.pane_content"   # user answered
 : > "$log_file"
-env -u TMUX_PANE /bin/sh -c "$payload" || fail "the resuming poll payload should run cleanly"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the marker-collapse poll payload should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "the dialog collapsing alone must not restore the running epoch"
+printf '%s' "tool output streaming (2s)" > "$state_dir/%3.pane_content"
+: > "$log_file"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the first resuming poll payload should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "the first changed tick alone must not restore the running epoch"
+printf '%s' "tool output streaming (4s)" > "$state_dir/%3.pane_content"
+: > "$log_file"
+env -u TMUX_PANE /bin/sh -c "$payload" || fail "the second resuming poll payload should run cleanly"
 [[ "$(cat "$state_dir/@2.@code_notify_running")" =~ ^[0-9]+$ ]] \
-    || fail "a changed dialog snapshot should restore the running epoch"
+    || fail "two consecutive changed ticks should restore the running epoch"
 [[ ! -f "$state_dir/@2.@code_notify_resume_pending" ]] \
     || fail "the poll resume should consume the pause marker"
 [[ ! -f "$state_dir/@2.@code_notify_pause_fp" ]] \
@@ -868,7 +1024,7 @@ grep -q "^run-shell -b -d 2 " "$log_file" \
 rm -f "$state_dir/@2.window_activity" "$state_dir/%3.pane_content"
 tmux_running_stop || fail "cleanup after the poll resume should succeed"
 TMUX_RUNNING_ICON="🌕"
-pass "content change resumes the indicator via the poll"
+pass "sustained content change resumes the indicator via the poll"
 
 # --- an unanswered request past the poll TTL stops the chain ---
 # A dialog left open must not tick a 2s timer forever, and — even while a
@@ -1764,6 +1920,106 @@ EOF
         "$state_dir/.@code_notify_resume_poll_scheduled" 2>/dev/null || true
     printf '%s' "zsh" > "$state_dir/@2.window_name"
     pass "notifier end-to-end: permission request arms the activity poll"
+
+    # REGRESSION GUARD (recurred repeatedly — keep this test): focusing the
+    # window of an UNANSWERED permission request must not swap the waiting
+    # badge for the spinner. The PermissionRequest hook fires before the
+    # dialog UI paints (under Ctrl+O verbose mode the dialog only renders when
+    # the user leaves the transcript view), and merely selecting the window
+    # makes the agent's TUI repaint — so the poll's baseline snapshot WILL
+    # differ once, with no answer given. A single content change must
+    # re-baseline, never resume: only a sustained repaint (content changing on
+    # consecutive ticks — a genuinely working agent's ticking TUI) counts as
+    # the answer.
+    rm -f "$HOME/.claude/notifications/state"/* 2>/dev/null || true
+    printf '%s' "verbose transcript, dialog not yet rendered" > "$state_dir/%3.pane_content"
+    : > "$log_file"
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 CODE_NOTIFY_TMUX_SPINNER=true \
+        CODE_NOTIFY_NOTIFICATION_RATE_LIMIT_SECONDS=0 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" notification claude testproj > /dev/null 2>&1 \
+        <<< '{"message": "Claude needs your permission to use Bash"}' \
+        || fail "notifier.sh permission request for the focus regression should exit cleanly"
+    [[ "$(window_name)" == "💬 zsh" ]] \
+        || fail "permission request should badge the waiting window (got: $(window_name))"
+    focus_payload=$(sed -n 's/^run-shell -b -d 2 \(.*\)$/\1/p' "$log_file" | head -n 1)
+    [[ -n "$focus_payload" ]] || fail "the focus-regression poll payload should be extractable"
+    # First tick baselines the pre-dialog pane.
+    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+        || fail "the focus-regression baseline tick should run cleanly"
+    # The user focuses the window: activity advances and the pane repaints
+    # once (the dialog finally renders). This is NOT an answer.
+    focus_pending=$(cat "$state_dir/@2.@code_notify_resume_pending")
+    printf '%s' "$((focus_pending + 5))" > "$state_dir/@2.window_activity"
+    printf '%s' "approval dialog rendered on focus" > "$state_dir/%3.pane_content"
+    : > "$log_file"
+    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+        || fail "the focus-repaint tick should run cleanly"
+    [[ "$(window_name)" == "💬 zsh" ]] \
+        || fail "REGRESSION: focusing replaced the waiting badge (got: $(window_name))"
+    [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+        || fail "REGRESSION: focusing marked the paused agent as running before the answer"
+    [[ ! -f "$state_dir/.@code_notify_spinner_snip" ]] \
+        || fail "REGRESSION: focusing armed the spinner before the answer"
+    [[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+        || fail "the unanswered permission should keep its pause marker"
+    grep -q "^run-shell -b -d 2 " "$log_file" \
+        || fail "the poll should keep watching the unanswered dialog"
+    # The dialog then just sits there: a still tick must keep waiting too.
+    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+        || fail "the still tick should run cleanly"
+    [[ "$(window_name)" == "💬 zsh" ]] \
+        || fail "a still dialog must keep the waiting badge (got: $(window_name))"
+    [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+        || fail "a still dialog must not mark the agent running"
+    # The reported field case: the dialog (question + Yes/No selector) shares
+    # the pane with a backgrounded shell command whose flashing dot repaints
+    # the pane on EVERY tick. As long as the dialog is on screen, no amount of
+    # animation may swap the waiting badge for the spinner.
+    e2e_dialog=$'Do you want to proceed?\n❯ 1. Yes\n  3. No'
+    printf '%s\n%s' "$e2e_dialog" "· Running: make test (12s)" \
+        > "$state_dir/%3.pane_content"
+    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+        || fail "the animated-dialog tick should run cleanly"
+    printf '%s\n%s' "$e2e_dialog" "• Running: make test (14s)" \
+        > "$state_dir/%3.pane_content"
+    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+        || fail "the second animated-dialog tick should run cleanly"
+    [[ "$(window_name)" == "💬 zsh" ]] \
+        || fail "REGRESSION: animation under the dialog replaced the waiting badge (got: $(window_name))"
+    [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+        || fail "REGRESSION: animation under the dialog marked the agent running"
+    [[ ! -f "$state_dir/.@code_notify_spinner_snip" ]] \
+        || fail "REGRESSION: animation under the dialog armed the spinner"
+    # Sanity check the positive path so this guard cannot pass vacuously: an
+    # actual answer collapses the dialog and the resumed turn repaints on
+    # every tick, which must clear the badge and light the spinner.
+    printf '%s' "running tool output (1s)" > "$state_dir/%3.pane_content"
+    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+        || fail "the dialog-collapse tick should run cleanly"
+    printf '%s' "running tool output (3s)" > "$state_dir/%3.pane_content"
+    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+        || fail "the first answered tick should run cleanly"
+    printf '%s' "running tool output (5s)" > "$state_dir/%3.pane_content"
+    env -u TMUX_PANE /bin/sh -c "$focus_payload" \
+        || fail "the second answered tick should run cleanly"
+    [[ "$(cat "$state_dir/@2.@code_notify_running" 2>/dev/null)" =~ ^[0-9]+$ ]] \
+        || fail "a sustained repaint should resume the running indicator"
+    [[ -f "$state_dir/.@code_notify_spinner_snip" ]] \
+        || fail "the poll resume should arm the spinner in spinner mode"
+    [[ "$(window_name)" == "zsh" ]] \
+        || fail "the poll resume should clear the waiting badge (got: $(window_name))"
+    rm -f "$state_dir/@2.@code_notify_running" "$state_dir/@2.@code_notify_clear_mode" \
+        "$state_dir/@2.@code_notify_orig_name" "$state_dir/@2.@code_notify_autorename" \
+        "$state_dir/@2.@code_notify_badged_name" "$state_dir/@2.@code_notify_resume_pending" \
+        "$state_dir/@2.@code_notify_pause_fp" "$state_dir/@2.window_activity" \
+        "$state_dir/%3.pane_content" "$state_dir/.@code_notify_resume_poll_scheduled" \
+        "$state_dir/.@code_notify_sweep_scheduled" "$state_dir/.@code_notify_spinner_snip" \
+        "$state_dir/.@code_notify_saved_interval" "$state_dir/.@code_notify_clock" \
+        "$state_dir/.status-interval" "$state_dir/.window-status-format" \
+        "$state_dir/.window-status-current-format" 2>/dev/null || true
+    printf '%s' "zsh" > "$state_dir/@2.window_name"
+    pass "notifier end-to-end: focus repaint keeps the unanswered permission badge"
 
     # Codex reaches the notifier via its hooks.json as `notifier.sh stop codex`,
     # so RAW_ARG1 is "stop" and only TOOL_NAME is "codex". With no

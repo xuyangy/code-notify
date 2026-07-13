@@ -486,6 +486,50 @@ TMUX_RESUME_POLL_SECONDS="${CODE_NOTIFY_TMUX_RESUME_POLL_SECONDS:-2}"
 # overnight should not tick a timer every 2 seconds forever; past this age the
 # chain stops and the lifecycle hooks remain the resume path.
 TMUX_RESUME_POLL_TTL="${CODE_NOTIFY_TMUX_RESUME_POLL_TTL:-900}"
+# Detects an on-screen approval/input dialog in the watched pane's captured
+# content. Content fingerprints alone cannot tell an unanswered dialog from an
+# answered one when something else in the pane animates — a backgrounded shell
+# command's flashing dot or ticking timer repaints the pane on every poll even
+# though the user has not approved anything. While the dialog is detected the
+# poll never resumes; when the detection clears, the fingerprint heuristic
+# takes over (the dialog vanishing is not itself an answer — Ctrl+O hides it
+# behind the transcript view).
+#
+# Detection requires BOTH grep -E patterns to match somewhere in the capture:
+# the question prompt (TMUX_DIALOG_MARKERS) AND a numbered Yes/No selector row
+# (TMUX_DIALOG_OPTIONS). The question line alone is not enough — ordinary model
+# output or transcript can open a line with "Do you want …", including behind a
+# bullet or box border, and the question pattern is line-anchored only past
+# leading non-letters, so it would match that too. Pairing it with the Yes/No
+# option row (which a real permission dialog always renders and prose almost
+# never places alongside the question) is what keeps casual "Do you want …"
+# text from freezing the badge. This trades a small false-negative risk (if a
+# future Claude Code changes the option wording the dialog stops being
+# detected and the fingerprint heuristic resumes early) for far fewer false
+# positives; that direction is deliberate — an early spinner self-corrects on
+# the next hook, whereas a frozen "waiting" badge is the bug this whole path
+# exists to prevent.
+#
+# The default question pattern covers both a tool approval ("Do you want to
+# …?") and plan-mode approval ("Would you like to proceed?"); the selector
+# requirement is what lets the marker set stay this permissive without
+# re-admitting prose false positives. AskUserQuestion needs no coverage here:
+# it pauses via PreToolUse without the watch flag, so it resumes through the
+# tool lifecycle hooks and never reaches this poll.
+#
+# A residual false positive remains: prose that places a "Do you want …?" line
+# and a "N. Yes"/"N. No" list item in the same visible pane. Its cost is
+# bounded and mild — the approved tool's PostToolUse hook still resumes the
+# indicator (the poll TTL does NOT resume anything; it only stops polling), so
+# the worst case is the indicator staying in the waiting state until the
+# pending tool completes, not "stuck forever".
+#
+# Either pattern set empty disables its half (an empty TMUX_DIALOG_MARKERS
+# turns detection off entirely; an empty TMUX_DIALOG_OPTIONS falls back to
+# question-only matching). The `-` (not `:-`) expansion makes an explicit
+# empty value stick instead of reverting to the default.
+TMUX_DIALOG_MARKERS="${CODE_NOTIFY_TMUX_DIALOG_MARKERS-^[^A-Za-z]*(Do you want|Would you like)}"
+TMUX_DIALOG_OPTIONS="${CODE_NOTIFY_TMUX_DIALOG_OPTIONS-^[^0-9A-Za-z]*[0-9]+\.[[:space:]]+(Yes|No)([[:space:],.]|$)}"
 # Agents whose running marker additionally gets a settle watch
 # (pipe-separated names as passed by the hooks). Codex finishes /review
 # without emitting any turn-end hook, so its marker would otherwise stand
@@ -1255,11 +1299,13 @@ tmux_running_pause_for_input() {
     tmux_resume_flag_set "$window_id"
     # The answer itself emits no hook (see TMUX_RESUME_POLL_SECONDS), so watch
     # the pane while the dialog is outstanding. The deferred snapshot is the
-    # settled dialog as rendered: the poll resumes only when pane CONTENT changes,
-    # because #{window_activity} alone also advances on a mere glance —
-    # selecting the window delivers a focus event and the TUI repaints,
-    # identically. The snapshot option doubles as the watch flag: pauses
-    # without it (idle reminders) are never resumed by the poll.
+    # settled dialog as rendered: the poll resumes only when pane CONTENT
+    # changes on consecutive ticks (see tmux_resume_poll_sweep), because
+    # #{window_activity} alone also advances on a mere glance — selecting the
+    # window delivers a focus event and the TUI repaints, identically — and a
+    # single content change can just be the dialog rendering late (this hook
+    # fires before the dialog UI). The snapshot option doubles as the watch
+    # flag: pauses without it (idle reminders) are never resumed by the poll.
     local pane_re='^%[0-9]+$'
     if [[ "$watch" == "watch" ]] && [[ "$pane_id" =~ $pane_re ]] && tmux_running_enabled; then
         # Do not snapshot synchronously inside the notification hook. While
@@ -1352,19 +1398,24 @@ tmux_resume_poll_schedule() {
     q_poll=$(tmux_focus_shell_quote "$TMUX_RESUME_POLL_SECONDS")
     q_ttl=$(tmux_focus_shell_quote "$TMUX_RESUME_POLL_TTL")
     # Enablement flags forward the raw env overrides (persistent flag files
-    # are re-read fresh by the fired process); icon and running-TTL forward
-    # the resolved values, matching the running-sweep timer.
+    # are re-read fresh by the fired process); icon, running-TTL and the
+    # dialog-marker pattern forward the resolved values, matching the
+    # running-sweep timer.
     q_running=$(tmux_focus_shell_quote "${CODE_NOTIFY_TMUX_RUNNING:-}")
     q_spinner=$(tmux_focus_shell_quote "${CODE_NOTIFY_TMUX_SPINNER:-}")
     q_badge=$(tmux_focus_shell_quote "${CODE_NOTIFY_TMUX_BADGE:-}")
     q_icon=$(tmux_focus_shell_quote "$TMUX_RUNNING_ICON")
     q_rttl=$(tmux_focus_shell_quote "$TMUX_RUNNING_TTL")
+    local q_markers q_options
+    q_markers=$(tmux_focus_shell_quote "$TMUX_DIALOG_MARKERS")
+    q_options=$(tmux_focus_shell_quote "$TMUX_DIALOG_OPTIONS")
     inner="$q_tmux -S $q_socket set-option -gu @code_notify_resume_poll_scheduled; "
     inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_RESUME_POLL_SECONDS=$q_poll "
     inner+="CODE_NOTIFY_TMUX_RESUME_POLL_TTL=$q_ttl "
     inner+="CODE_NOTIFY_TMUX_RUNNING=$q_running CODE_NOTIFY_TMUX_SPINNER=$q_spinner "
     inner+="CODE_NOTIFY_TMUX_BADGE=$q_badge CODE_NOTIFY_TMUX_RUNNING_ICON=$q_icon "
-    inner+="CODE_NOTIFY_TMUX_RUNNING_TTL=$q_rttl bash $q_lib resume-poll; fi"
+    inner+="CODE_NOTIFY_TMUX_RUNNING_TTL=$q_rttl CODE_NOTIFY_TMUX_DIALOG_OPTIONS=$q_options "
+    inner+="CODE_NOTIFY_TMUX_DIALOG_MARKERS=$q_markers bash $q_lib resume-poll; fi"
     inner="${inner//\#/##}"
     tmux run-shell -b -d "$TMUX_RESUME_POLL_SECONDS" "$inner" 2>/dev/null || return 0
     tmux set-option -g @code_notify_resume_poll_scheduled 1 2>/dev/null
@@ -1394,35 +1445,62 @@ tmux_resume_poll_fingerprint() {
 # own render straggling past the epoch) means no answer, without spawning a
 # capture. Activity alone is NOT sufficient to resume — visiting the window
 # delivers a focus event and the TUI repaints identically, so only a changed
-# fingerprint counts. False positives that remain (the user scrolling,
-# typing into a question) merely show the spinner early; the next hook event
+# fingerprint counts.
+#
+# One changed fingerprint is not sufficient either: the approval dialog can
+# render long after the pause snapshot (the PermissionRequest hook fires
+# before the dialog UI, and in Ctrl+O verbose mode the dialog only paints
+# once the user leaves the transcript view), and a focus repaint or view
+# toggle can shift content without any answer. Each of those is a ONE-SHOT
+# change: the pane repaints once and holds still again. An answered dialog
+# instead puts the agent back to work, whose TUI repaints continuously (the
+# elapsed-seconds counter — the same property the settle watch relies on).
+# So resume only when the content changes on two consecutive ticks; a
+# single change re-baselines (flagged in the snapshot option) and a still
+# tick clears the flag.
+#
+# The fingerprint heuristic still fails when the pane animates WHILE the
+# dialog waits — a backgrounded shell command's flashing dot or ticking
+# timer changes the content on every tick with no answer given. So the
+# strongest signal comes first: while the capture matches
+# TMUX_DIALOG_MARKERS, the dialog is provably on screen and the poll never
+# resumes, however much the rest of the pane moves. The marker vanishing is
+# NOT itself an answer (Ctrl+O hides the dialog behind the transcript view);
+# it re-baselines and hands over to the fingerprint heuristic. False
+# positives that remain (the user scrolling or typing steadily in a
+# marker-less view) merely show the spinner early; the next hook event
 # re-derives the true state.
 tmux_resume_poll_sweep() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
-    local now window_id pending activity fp pane fp_saved fp_now waiting=0
+    local now window_id pending activity fp pane fp_sum fp_size changed dialog
+    local fp_saved fp_now content marker_now waiting=0
     now=$(date +%s)
     while IFS='|' read -r window_id pending activity fp; do
         [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
         [[ "$pending" =~ ^[0-9]+$ ]] || continue
         # Only watch-mode pauses carry a pane id, followed (after the first
-        # poll) by a dialog snapshot. Idle-style pauses carry neither and
-        # resume through their hooks, never through the poll.
-        pane="${fp%% *}"
-        fp_saved="${fp#* }"
+        # poll) by a dialog snapshot — the two cksum fields, a changed flag
+        # (1 when the previous tick saw the content change) and a dialog flag
+        # (1 when it saw the dialog marker on screen). Idle-style pauses
+        # carry none of this and resume through their hooks, never the poll.
+        read -r pane fp_sum fp_size changed dialog <<< "$fp"
+        fp_saved="$fp_sum $fp_size"
         [[ "$pane" =~ ^%[0-9]+$ ]] || continue
         (( now - pending < TMUX_RESUME_POLL_TTL )) || continue
         # The pause hook itself temporarily changes the rendered TUI. Defer
         # the baseline until this first timer tick, after that status has gone
         # away, so hook completion cannot be mistaken for user input.
-        if [[ "$fp_saved" == "$fp" ]] || [[ -z "$fp_saved" ]]; then
+        if [[ -z "$fp_sum" ]]; then
             if [[ "$(tmux display-message -p -t "$pane" '#{window_id}' 2>/dev/null)" != "$window_id" ]]; then
                 waiting=1
                 continue
             fi
-            fp_now=$(tmux_resume_poll_fingerprint "$pane")
-            if [[ -n "$fp_now" ]]; then
-                tmux set-option -w -t "$window_id" @code_notify_pause_fp \
-                    "$pane $fp_now" 2>/dev/null
+            if content=$(tmux capture-pane -p -t "$pane" 2>/dev/null); then
+                fp_now=$(printf '%s\n' "$content" | cksum 2>/dev/null)
+                if [[ -n "$fp_now" ]]; then
+                    tmux set-option -w -t "$window_id" @code_notify_pause_fp \
+                        "$pane $fp_now 0 $(tmux_resume_poll_dialog_flag "$content")" 2>/dev/null
+                fi
             fi
             waiting=1
             continue
@@ -1440,10 +1518,51 @@ tmux_resume_poll_sweep() {
             waiting=1
             continue
         fi
-        fp_now=$(tmux_resume_poll_fingerprint "$pane")
-        if [[ -n "$fp_now" ]] && [[ "$fp_now" != "$fp_saved" ]]; then
-            tmux_running_resume_window "$window_id"
+        if ! content=$(tmux capture-pane -p -t "$pane" 2>/dev/null); then
+            waiting=1
+            continue
+        fi
+        fp_now=$(printf '%s\n' "$content" | cksum 2>/dev/null)
+        if [[ -z "$fp_now" ]]; then
+            waiting=1
+            continue
+        fi
+        marker_now=$(tmux_resume_poll_dialog_flag "$content")
+        if [[ "$marker_now" == "1" ]]; then
+            # The dialog text is on screen: unanswered, no matter what else
+            # in the pane animates. Track the moving content so its eventual
+            # disappearance is judged against the freshest baseline.
+            tmux set-option -w -t "$window_id" @code_notify_pause_fp \
+                "$pane $fp_now 0 1" 2>/dev/null
+            waiting=1
+        elif [[ "$dialog" == "1" ]]; then
+            # The marker just vanished — an answer OR a view toggle hiding
+            # the dialog. Re-baseline and let the fingerprint heuristic
+            # decide from here: an answered turn keeps repainting, a
+            # transcript view over a waiting dialog holds still.
+            tmux set-option -w -t "$window_id" @code_notify_pause_fp \
+                "$pane $fp_now 0 0" 2>/dev/null
+            waiting=1
+        elif [[ "$fp_now" != "$fp_saved" ]]; then
+            if [[ "$changed" == "1" ]]; then
+                # Second consecutive changed tick: the pane is repainting
+                # continuously, so the agent is working again.
+                tmux_running_resume_window "$window_id"
+            else
+                # First change: could be the dialog finally rendering or a
+                # focus/view repaint. Re-baseline, remember that this tick
+                # changed, and let the next tick decide.
+                tmux set-option -w -t "$window_id" @code_notify_pause_fp \
+                    "$pane $fp_now 1 0" 2>/dev/null
+                waiting=1
+            fi
         else
+            # Still tick: a preceding one-shot change was not an answer, so
+            # drop the changed flag.
+            if [[ "$changed" == "1" ]]; then
+                tmux set-option -w -t "$window_id" @code_notify_pause_fp \
+                    "$pane $fp_now 0 0" 2>/dev/null
+            fi
             waiting=1
         fi
     done < <(tmux list-windows -a -F \
@@ -1452,6 +1571,28 @@ tmux_resume_poll_sweep() {
         tmux_resume_poll_schedule
     fi
     return 0
+}
+
+# Whether captured pane content shows an approval/input dialog (see
+# TMUX_DIALOG_MARKERS / TMUX_DIALOG_OPTIONS). Prints 1 or 0 so callers can
+# embed the answer in the packed snapshot option. Requires the question
+# prompt AND — unless TMUX_DIALOG_OPTIONS is empty — a Yes/No selector row, so
+# a lone "Do you want …" line in prose is not mistaken for the dialog.
+tmux_resume_poll_dialog_flag() {
+    local content="$1"
+    # -e guards patterns that begin with "-" (a user-supplied override) from
+    # being parsed as grep options.
+    if [[ -z "$TMUX_DIALOG_MARKERS" ]] ||
+        ! printf '%s\n' "$content" | grep -qE -e "$TMUX_DIALOG_MARKERS" 2>/dev/null; then
+        printf '0'
+        return
+    fi
+    if [[ -n "$TMUX_DIALOG_OPTIONS" ]] &&
+        ! printf '%s\n' "$content" | grep -qE -e "$TMUX_DIALOG_OPTIONS" 2>/dev/null; then
+        printf '0'
+        return
+    fi
+    printf '1'
 }
 
 # The piggyback call sites above all require *something* to happen on this

@@ -2762,7 +2762,7 @@ switch ($HookType.ToLower()) {
                     "$ToolDisplay is idle in $ProjectName" `
                     "$ToolDisplay is waiting in $ProjectName" `
                     "$ToolDisplay is ready for you in $ProjectName" `
-                    "$ToolDisplay paused for input in $ProjectName"
+                    "$ToolDisplay can take more work now in $ProjectName"
             }
             "permission_prompt" {
                 $Message = Select-RandomMessage `
@@ -2829,7 +2829,7 @@ switch ($HookType.ToLower()) {
             "$ToolDisplay teammate is waiting for input in $ProjectName" `
             "$ToolDisplay teammate is idle in $ProjectName" `
             "$ToolDisplay teammate needs your response in $ProjectName" `
-            "$ToolDisplay teammate paused for input in $ProjectName"
+            "$ToolDisplay teammate can take more work now in $ProjectName"
         $VoiceMessage = $Message
     }
     "taskcreated" {

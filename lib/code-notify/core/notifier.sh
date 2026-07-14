@@ -1406,7 +1406,7 @@ case "$HOOK_TYPE" in
                     "$TOOL_DISPLAY is idle" \
                     "$TOOL_DISPLAY is waiting" \
                     "$TOOL_DISPLAY is ready for you" \
-                    "$TOOL_DISPLAY paused for input")
+                    "$TOOL_DISPLAY can take more work now")
                 ;;
             "permission_prompt")
                 MESSAGE=$(choose_random_message \
@@ -1472,7 +1472,7 @@ case "$HOOK_TYPE" in
             "$TOOL_DISPLAY teammate is waiting for input" \
             "$TOOL_DISPLAY teammate is idle" \
             "$TOOL_DISPLAY teammate needs your response" \
-            "$TOOL_DISPLAY teammate paused for input")
+            "$TOOL_DISPLAY teammate can take more work now")
         VOICE_MESSAGE="$MESSAGE"
         SOUND="Ping"
         ;;

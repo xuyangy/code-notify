@@ -357,7 +357,7 @@ Alert-type matching applies to Claude Code `Notification` and `PermissionRequest
 
 Agent-team and subagent workflows can be noisy if `permission_prompt` is enabled. If you only want idle pings for Claude/Gemini and completion alerts for Codex, run `cn alerts remove permission_prompt && cn on`. Codex exposes no native `idle_prompt` hook; inside tmux, the `idle_prompt` alert type instead gates the tmux-derived post-completion idle reminder for Codex and Antigravity (see the feature list above). `permission_prompt` controls Codex approval/edit alerts through `PermissionRequest`.
 
-For each delivered event, Code-Notify randomly chooses from a small set of short messages for that event. For example, an `idle_prompt` may say `Claude is idle`, `Claude is waiting`, `Claude is ready for you`, or `Claude paused for input`.
+For each delivered event, Code-Notify randomly chooses from a small set of short messages for that event. For example, an `idle_prompt` may say `Claude is idle`, `Claude is waiting`, `Claude is ready for you`, or `Claude can take more work now`.
 
 ### Badge Icons & Event Mapping
 

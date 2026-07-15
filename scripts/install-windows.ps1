@@ -3129,8 +3129,18 @@ if ($ProjectName) {
     if ($Message -and -not (Get-ProjectWordingEnabled -Target "banner")) {
         $Message = $Message.Replace(" in $ProjectName", "")
     }
-    if ($VoiceMessage -and -not (Get-ProjectWordingEnabled -Target "voice")) {
-        $VoiceMessage = $VoiceMessage.Replace(" in $ProjectName", "")
+    if ($VoiceMessage) {
+        if (-not (Get-ProjectWordingEnabled -Target "voice")) {
+            $VoiceMessage = $VoiceMessage.Replace(" in $ProjectName", "")
+        } else {
+            # Mirror the bash notifier's spoken phrasing: "in project X",
+            # hyphenated so the name reads as one compound (spaces let the
+            # TTS parser split it into clauses); underscores become hyphens
+            # so no voice verbalizes "underscore". The banner keeps the
+            # exact name.
+            $spokenProject = $ProjectName -replace '_', '-'
+            $VoiceMessage = $VoiceMessage.Replace(" in $ProjectName", " in project $spokenProject")
+        }
     }
 }
 

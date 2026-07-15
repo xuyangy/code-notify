@@ -1737,11 +1737,12 @@ esac
 # distinguishable without looking at the banner.
 if [[ -n "$PROJECT_NAME" ]] && [[ "$HOOK_TYPE" != "test" ]] &&
     project_wording_enabled voice; then
-    # Separators read poorly (or as literal "underscore") in some TTS voices;
-    # speak "graphviz preview", keep the exact name in banner and cache key.
     # "in project X" flows as one sentence — a ". Project X" suffix reads as
-    # a run-on ("completed your task project X") with most voices.
-    VOICE_MESSAGE="${VOICE_MESSAGE} in project ${PROJECT_NAME//[_-]/ }"
+    # a run-on ("completed your task project X") with most voices. Speak the
+    # name hyphenated: spaces let the TTS parser split the name into clauses
+    # ("in project code <pause> notify"), while hyphens read as one compound;
+    # underscores become hyphens so no voice verbalizes "underscore".
+    VOICE_MESSAGE="${VOICE_MESSAGE} in project ${PROJECT_NAME//_/-}"
 fi
 
 # Add project name to subtitle if available

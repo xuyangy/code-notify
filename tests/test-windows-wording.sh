@@ -109,6 +109,16 @@ try {
     if ($notify -notmatch [regex]::Escape('$VoiceMessage.Replace(" in $ProjectName", "")')) {
         throw "notify script should strip the project from the voice message when toggled off"
     }
+
+    # When the voice toggle is on, the spoken message must phrase the project
+    # as "in project <name>" with the name hyphenated, matching the bash
+    # notifier.
+    if ($notify -notmatch [regex]::Escape('$ProjectName -replace ''_'', ''-''')) {
+        throw "notify script should speak underscores as hyphens"
+    }
+    if ($notify -notmatch [regex]::Escape('" in project $spokenProject"')) {
+        throw "notify script should speak the project as 'in project <name>'"
+    }
     if (-not (Get-ProjectWordingEnabled -Target "banner")) { throw "banner project should default to on" }
     if (-not (Get-ProjectWordingEnabled -Target "voice")) { throw "voice project should default to on" }
 

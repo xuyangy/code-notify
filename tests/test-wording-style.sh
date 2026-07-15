@@ -90,7 +90,7 @@ run_stop
 banner_matches "$short_re" || fail "default banner should use the short pool"
 banner_matches "$long_re" && fail "default banner must not use the long pool"
 say_matches "$long_re" || fail "default voice should use the long pool"
-say_matches 'in project wording test' || fail "voice should speak the project name with separators as spaces"
+say_matches 'in project wording-test' || fail "voice should speak the hyphenated project name"
 
 # --- cn wording writes state files the notifier honours ---
 PATH="$fake_path" "$CN" wording banner long >/dev/null
@@ -126,7 +126,7 @@ PATH="$fake_path" "$CN" wording project voice off >/dev/null
 [[ "$(cat "$HOME/.claude/notifications/wording-project-voice")" == "off" ]] ||
     fail "cn wording project voice off should write the state file"
 run_stop
-say_matches 'in project wording test' && fail "voice project off must not speak the project"
+say_matches 'in project wording-test' && fail "voice project off must not speak the project"
 banner_matches "$banner_project_re" || fail "banner keeps the project while only voice is off"
 
 PATH="$fake_path" "$CN" wording project voice reset >/dev/null
@@ -135,7 +135,7 @@ PATH="$fake_path" "$CN" wording project voice reset >/dev/null
 PATH="$fake_path" "$CN" wording project banner off >/dev/null
 run_stop
 banner_matches "$banner_project_re" && fail "banner project off must not show the project"
-say_matches 'in project wording test' || fail "voice keeps the project while only banner is off"
+say_matches 'in project wording-test' || fail "voice keeps the project while only banner is off"
 
 # env var overrides the state file (banner still off in the state file)
 : > "$banner_log"

@@ -64,6 +64,9 @@ handle_global_command() {
         "spinner")
             handle_spinner_command "$@"
             ;;
+        "wording")
+            handle_wording_command "$@"
+            ;;
         "badge-visible")
             handle_badge_visible_command "$@"
             ;;
@@ -1217,6 +1220,53 @@ handle_spinner_command() {
         *)
             error "Unknown spinner command: $action"
             echo "Usage: cn spinner [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+# Choose between terse and friendly notification wording, independently for
+# the desktop banner and the spoken message. State lives in files so every
+# hook process sees a change without a config reload; the notifier falls back
+# to the defaults (banner short, voice long) when no file exists or its
+# content is unrecognized.
+handle_wording_command() {
+    local target="${1:-status}"
+    local style="${2:-}"
+    local state_dir="$HOME/.claude/notifications"
+    local banner="short (default)"
+    local voice="long (default)"
+
+    case "$target" in
+        "banner"|"voice")
+            case "$style" in
+                "short"|"long")
+                    mkdir -p "$state_dir"
+                    printf '%s\n' "$style" > "$state_dir/wording-$target"
+                    success "$target wording set to $style"
+                    ;;
+                "reset"|"default")
+                    rm -f "$state_dir/wording-$target"
+                    success "$target wording reset to default"
+                    ;;
+                *)
+                    error "Usage: cn wording $target [short|long|reset]"
+                    return 1
+                    ;;
+            esac
+            ;;
+        "status")
+            [[ -r "$state_dir/wording-banner" ]] && read -r banner < "$state_dir/wording-banner"
+            [[ -r "$state_dir/wording-voice" ]] && read -r voice < "$state_dir/wording-voice"
+            echo "banner wording: ${GREEN}${banner}${RESET}"
+            echo "voice wording:  ${GREEN}${voice}${RESET}"
+            echo ""
+            echo "  short: \"Claude needs your approval\""
+            echo "  long:  \"Attention please! Claude needs your permission to continue\""
+            ;;
+        *)
+            error "Unknown wording command: $target"
+            echo "Usage: cn wording [banner|voice] [short|long|reset]"
             return 1
             ;;
     esac

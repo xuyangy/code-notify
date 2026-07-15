@@ -2129,6 +2129,12 @@ SOUND COMMANDS:
     sound list      Show available system sounds
     sound status    Show sound configuration
 
+WORDING COMMANDS:
+    wording status               Show banner/voice wording styles
+    wording banner short|long    Terse or friendly banner text (default short)
+    wording voice short|long     Terse or friendly spoken text (default long)
+    wording banner|voice reset   Return to the default
+
 CHANNEL COMMANDS:
     channels status
     channels add slack <url> [--name <name>]
@@ -2173,6 +2179,57 @@ MORE INFO:
     https://github.com/xuyangy/code-notify
 
 "@ -ForegroundColor Gray
+}
+
+# Choose between terse and friendly notification wording, independently for
+# the desktop banner and the spoken message. Mirrors the bash `cn wording`
+# command: the notifier reads the same state files and falls back to the
+# defaults (banner short, voice long) when none exist.
+function Invoke-WordingCommand {
+    param(
+        [string]$Target = "status",
+        [string]$Style
+    )
+
+    $targetName = $Target.ToLower()
+
+    switch ($targetName) {
+        { $_ -eq "banner" -or $_ -eq "voice" } {
+            $styleFile = Join-Path $script:NotificationsDir "wording-$targetName"
+            switch ($Style) {
+                { $_ -eq "short" -or $_ -eq "long" } {
+                    if (-not (Test-Path $script:NotificationsDir)) {
+                        New-Item -ItemType Directory -Path $script:NotificationsDir -Force | Out-Null
+                    }
+                    Set-Content -Path $styleFile -Value $Style
+                    Write-Success "$targetName wording set to $Style"
+                }
+                { $_ -eq "reset" -or $_ -eq "default" } {
+                    if (Test-Path $styleFile) { Remove-Item $styleFile -Force }
+                    Write-Success "$targetName wording reset to default"
+                }
+                default {
+                    Write-Host "Usage: cn wording $targetName [short|long|reset]" -ForegroundColor Gray
+                }
+            }
+        }
+        "status" {
+            $banner = "short (default)"
+            $voice = "long (default)"
+            $bannerFile = Join-Path $script:NotificationsDir "wording-banner"
+            $voiceFile = Join-Path $script:NotificationsDir "wording-voice"
+            if (Test-Path $bannerFile) { $banner = (Get-Content $bannerFile -TotalCount 1).Trim() }
+            if (Test-Path $voiceFile) { $voice = (Get-Content $voiceFile -TotalCount 1).Trim() }
+            Write-Host "banner wording: $banner"
+            Write-Host "voice wording:  $voice"
+            Write-Host ""
+            Write-Host '  short: "Claude needs your approval"' -ForegroundColor Gray
+            Write-Host '  long:  "Attention please! Claude needs your permission to continue"' -ForegroundColor Gray
+        }
+        default {
+            Write-Host "Usage: cn wording [banner|voice] [short|long|reset]" -ForegroundColor Gray
+        }
+    }
 }
 
 # Main command handler
@@ -2258,6 +2315,9 @@ function Invoke-CodeNotify {
         }
         "usage" {
             Invoke-UsageCommand -SubCommand ($(if ($SubCommand) { $SubCommand } else { "status" })) -Args $Args
+        }
+        "wording" {
+            Invoke-WordingCommand -Target ($(if ($SubCommand) { $SubCommand } else { "status" })) -Style ($Args | Select-Object -First 1)
         }
         "project" {
             switch ($SubCommand) {
@@ -2347,7 +2407,9 @@ if ($env:OPENCODE -or $env:OPENCODE_PID) {
     exit 0
 }
 
-$ClaudeHome = "$env:USERPROFILE\.claude"
+# Resolve like the CLI module does: `cn` writes all its state under
+# CLAUDE_HOME when set, so the notifier must read from the same root.
+$ClaudeHome = if ($env:CLAUDE_HOME) { $env:CLAUDE_HOME } else { "$env:USERPROFILE\.claude" }
 $VoiceFile = "$ClaudeHome\notifications\voice-enabled"
 $LogFile = "$ClaudeHome\logs\notifications.log"
 $CodeNotifyConfigDir = "$env:USERPROFILE\.config\code-notify"
@@ -2751,40 +2813,113 @@ function Select-RandomMessage {
     return ($Messages | Get-Random)
 }
 
+# Wording style for the banner and the spoken message, each "short" (terse
+# one-liners) or "long" (friendlier sentences). Mirrors the bash notifier:
+# banner defaults to short, voice to long; `cn wording` writes the state
+# files and the env vars override per invocation.
+function Get-WordingStyle {
+    param(
+        [string]$Target,
+        [string]$Default
+    )
+
+    $value = if ($Target -eq "banner") { $env:CODE_NOTIFY_BANNER_WORDING } else { $env:CODE_NOTIFY_VOICE_WORDING }
+    if (-not $value) {
+        $styleFile = Join-Path "$ClaudeHome\notifications" "wording-$Target"
+        if (Test-Path $styleFile) {
+            $value = (Get-Content $styleFile -TotalCount 1 -ErrorAction SilentlyContinue)
+            if ($value) { $value = $value.Trim() }
+        }
+    }
+    if ($value -eq "short" -or $value -eq "long") {
+        return $value
+    }
+    return $Default
+}
+
+$BannerWording = Get-WordingStyle -Target "banner" -Default "short"
+$VoiceWording = Get-WordingStyle -Target "voice" -Default "long"
+
+function Select-WordedMessage {
+    param(
+        [string[]]$Short,
+        [string[]]$Long,
+        [string]$Style
+    )
+
+    if ($Style -eq "long" -and $Long -and $Long.Count -gt 0) {
+        return ($Long | Get-Random)
+    }
+    return ($Short | Get-Random)
+}
+
 # Set notification content based on hook type
 switch ($HookType.ToLower()) {
     "stop" {
         $Title = "$ToolDisplay - Task Complete"
-        $Message = Select-RandomMessage `
-            "$ToolDisplay completed the task in $ProjectName" `
-            "$ToolDisplay finished the task in $ProjectName" `
-            "$ToolDisplay is done in $ProjectName" `
+        $shortPool = @(
+            "$ToolDisplay completed the task in $ProjectName",
+            "$ToolDisplay finished the task in $ProjectName",
+            "$ToolDisplay is done in $ProjectName",
             "$ToolDisplay wrapped up in $ProjectName"
-        $VoiceMessage = $Message
+        )
+        $longPool = @(
+            "All done! $ToolDisplay completed your task in $ProjectName",
+            "$ToolDisplay finished working on your request in $ProjectName",
+            "Task complete! $ToolDisplay is ready for your review in $ProjectName",
+            "Good news! $ToolDisplay is done in $ProjectName",
+            "Finished! $ToolDisplay wrapped up your request in $ProjectName"
+        )
+        $Message = Select-WordedMessage -Short $shortPool -Long $longPool -Style $BannerWording
+        $VoiceMessage = Select-WordedMessage -Short $shortPool -Long $longPool -Style $VoiceWording
     }
     "notification" {
         $Title = "$ToolDisplay - Input Required"
+        $Message = $null
         switch (Get-NotificationSubtype) {
             "idle_prompt" {
-                $Message = Select-RandomMessage `
-                    "$ToolDisplay is idle in $ProjectName" `
-                    "$ToolDisplay is waiting in $ProjectName" `
-                    "$ToolDisplay is ready for you in $ProjectName" `
+                $shortPool = @(
+                    "$ToolDisplay is idle in $ProjectName",
+                    "$ToolDisplay is waiting in $ProjectName",
+                    "$ToolDisplay is ready for you in $ProjectName",
                     "$ToolDisplay can take more work now in $ProjectName"
+                )
+                $longPool = @(
+                    "Hey, are you still there? $ToolDisplay is waiting in $ProjectName",
+                    "Just a gentle reminder - $ToolDisplay finished a while ago in $ProjectName",
+                    "Hello? $ToolDisplay is idle and ready for more work in $ProjectName",
+                    "Still waiting for you! $ToolDisplay can take more work now in $ProjectName",
+                    "Knock knock! $ToolDisplay is patiently waiting in $ProjectName"
+                )
             }
             "permission_prompt" {
-                $Message = Select-RandomMessage `
-                    "$ToolDisplay needs your approval in $ProjectName" `
-                    "$ToolDisplay is waiting for approval in $ProjectName" `
-                    "$ToolDisplay needs permission to continue in $ProjectName" `
+                $shortPool = @(
+                    "$ToolDisplay needs your approval in $ProjectName",
+                    "$ToolDisplay is waiting for approval in $ProjectName",
+                    "$ToolDisplay needs permission to continue in $ProjectName",
                     "$ToolDisplay has an approval request in $ProjectName"
+                )
+                $longPool = @(
+                    "Attention please! $ToolDisplay needs your permission in $ProjectName",
+                    "Hey! $ToolDisplay needs a quick approval in $ProjectName",
+                    "Heads up! $ToolDisplay has a permission request in $ProjectName",
+                    "Excuse me! $ToolDisplay needs your authorization in $ProjectName",
+                    "Permission required! $ToolDisplay is waiting for your approval in $ProjectName"
+                )
             }
             "elicitation_dialog" {
-                $Message = Select-RandomMessage `
-                    "$ToolDisplay needs MCP tool input in $ProjectName" `
-                    "$ToolDisplay is waiting for MCP input in $ProjectName" `
-                    "$ToolDisplay needs a tool response in $ProjectName" `
+                $shortPool = @(
+                    "$ToolDisplay needs MCP tool input in $ProjectName",
+                    "$ToolDisplay is waiting for MCP input in $ProjectName",
+                    "$ToolDisplay needs a tool response in $ProjectName",
                     "$ToolDisplay has an MCP prompt in $ProjectName"
+                )
+                $longPool = @(
+                    "Attention! $ToolDisplay needs MCP tool input in $ProjectName",
+                    "Hey! An MCP tool in $ToolDisplay is waiting for your input in $ProjectName",
+                    "Quick response needed! $ToolDisplay has an MCP prompt in $ProjectName",
+                    "$ToolDisplay needs a tool response to proceed in $ProjectName"
+                )
             }
             "auth_success" {
                 $Title = "$ToolDisplay - Authentication"
@@ -2793,25 +2928,44 @@ switch ($HookType.ToLower()) {
                     "$ToolDisplay signed in successfully in $ProjectName" `
                     "$ToolDisplay authentication is complete in $ProjectName" `
                     "$ToolDisplay is authenticated in $ProjectName"
+                $VoiceMessage = $Message
             }
             default {
-                $Message = Select-RandomMessage `
-                    "$ToolDisplay needs your input in $ProjectName" `
-                    "$ToolDisplay is waiting for you in $ProjectName" `
-                    "$ToolDisplay needs a response in $ProjectName" `
+                $shortPool = @(
+                    "$ToolDisplay needs your input in $ProjectName",
+                    "$ToolDisplay is waiting for you in $ProjectName",
+                    "$ToolDisplay needs a response in $ProjectName",
                     "$ToolDisplay has something for you in $ProjectName"
+                )
+                $longPool = @(
+                    "Hey! $ToolDisplay needs your input in $ProjectName",
+                    "Attention! $ToolDisplay is waiting for you in $ProjectName",
+                    "Quick check! $ToolDisplay has something for you in $ProjectName",
+                    "$ToolDisplay needs a response to proceed in $ProjectName"
+                )
             }
         }
-        $VoiceMessage = $Message
+        if (-not $Message) {
+            $Message = Select-WordedMessage -Short $shortPool -Long $longPool -Style $BannerWording
+            $VoiceMessage = Select-WordedMessage -Short $shortPool -Long $longPool -Style $VoiceWording
+        }
     }
     "pretooluse" {
         $Title = "$ToolDisplay - Command Approval"
-        $Message = Select-RandomMessage `
-            "$ToolDisplay wants to run a command in $ProjectName" `
-            "$ToolDisplay is asking to run a command in $ProjectName" `
-            "$ToolDisplay needs command approval in $ProjectName" `
+        $shortPool = @(
+            "$ToolDisplay wants to run a command in $ProjectName",
+            "$ToolDisplay is asking to run a command in $ProjectName",
+            "$ToolDisplay needs command approval in $ProjectName",
             "$ToolDisplay has a command approval request in $ProjectName"
-        $VoiceMessage = $Message
+        )
+        $longPool = @(
+            "Attention please! $ToolDisplay wants to run a command in $ProjectName",
+            "Hey! $ToolDisplay is asking to run a command in $ProjectName",
+            "Heads up! $ToolDisplay needs command approval in $ProjectName",
+            "Permission required! $ToolDisplay has a command approval request in $ProjectName"
+        )
+        $Message = Select-WordedMessage -Short $shortPool -Long $longPool -Style $BannerWording
+        $VoiceMessage = Select-WordedMessage -Short $shortPool -Long $longPool -Style $VoiceWording
     }
     "subagentstart" {
         $Title = "$ToolDisplay - Subagent Started"

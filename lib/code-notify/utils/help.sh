@@ -37,6 +37,7 @@ ${BOLD}COMMANDS:${RESET}
     ${GREEN}spinner${RESET} <cmd>   Animated tmux running indicator (on, off, status)
     ${GREEN}badge-visible${RESET} <cmd>  Badge the focused tmux window too (on, off, status)
     ${GREEN}voice${RESET} <cmd>     Voice notification commands
+    ${GREEN}wording${RESET} <cmd>   Banner/voice message wording (banner|voice short|long)
 EOF
 
     if is_macos_help_context; then

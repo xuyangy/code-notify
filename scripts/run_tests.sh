@@ -240,6 +240,13 @@ else
     test_fail "persistent alerts failed"
 fi
 
+test_start "wording styles"
+if run_test_script tests/test-wording-style.sh; then
+    test_pass
+else
+    test_fail "wording styles failed"
+fi
+
 test_start "usage alerts"
 if run_test_script tests/test-usage-alerts.sh; then
     test_pass
@@ -324,6 +331,14 @@ if run_test_script tests/test-windows-claude-hook-preservation.sh; then
     test_pass
 else
     test_fail "windows Claude hook preservation failed"
+fi
+
+# Windows wording command writes the state files the Windows notifier reads
+test_start "windows wording styles"
+if run_test_script tests/test-windows-wording.sh; then
+    test_pass
+else
+    test_fail "windows wording styles failed"
 fi
 
 # Test 23: Claude event alerts install and remove dedicated hooks

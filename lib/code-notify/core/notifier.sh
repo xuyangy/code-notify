@@ -1385,6 +1385,64 @@ choose_random_message() {
     printf '%s\n' "${messages[$((RANDOM % count))]}"
 }
 
+# Wording style for the banner and the spoken message, each "short" (terse
+# one-liners) or "long" (friendlier sentences in the style of
+# opencode-smart-voice-notify). Banners truncate after a line or two, so they
+# default to short; speech reads well at length, so it defaults to long.
+# `cn wording` writes the state files; the env vars override per invocation.
+wording_style() {
+    local target="$1"
+    local default="$2"
+    local value=""
+    local style_file="$HOME/.claude/notifications/wording-$target"
+
+    case "$target" in
+        "banner") value="${CODE_NOTIFY_BANNER_WORDING:-}" ;;
+        "voice") value="${CODE_NOTIFY_VOICE_WORDING:-}" ;;
+    esac
+    if [[ -z "$value" ]] && [[ -r "$style_file" ]]; then
+        read -r value < "$style_file" 2>/dev/null || true
+    fi
+    case "$value" in
+        "short"|"long") printf '%s\n' "$value" ;;
+        *) printf '%s\n' "$default" ;;
+    esac
+}
+BANNER_WORDING=$(wording_style banner short)
+VOICE_WORDING=$(wording_style voice long)
+
+# Set MESSAGE and VOICE_MESSAGE for an event from a short pool and a long
+# pool (arguments separated by --), honouring the configured wording styles.
+set_event_messages() {
+    local -a short_pool=()
+    local -a long_pool=()
+    local in_long=0
+    local arg
+
+    for arg in "$@"; do
+        if [[ "$arg" == "--" ]]; then
+            in_long=1
+            continue
+        fi
+        if [[ "$in_long" == "1" ]]; then
+            long_pool+=("$arg")
+        else
+            short_pool+=("$arg")
+        fi
+    done
+
+    if [[ "$BANNER_WORDING" == "long" ]]; then
+        MESSAGE=$(choose_random_message "${long_pool[@]}")
+    else
+        MESSAGE=$(choose_random_message "${short_pool[@]}")
+    fi
+    if [[ "$VOICE_WORDING" == "long" ]]; then
+        VOICE_MESSAGE=$(choose_random_message "${long_pool[@]}")
+    else
+        VOICE_MESSAGE=$(choose_random_message "${short_pool[@]}")
+    fi
+}
+
 # Set notification parameters based on hook type and tool.
 # BADGE_ICON marks the originating tmux window's name (see tmux_badge_set);
 # events without one (usage alerts fire from the background watcher, not the
@@ -1395,12 +1453,17 @@ case "$HOOK_TYPE" in
         TITLE="$TOOL_DISPLAY 🟢"
         BADGE_ICON="🟢"
         SUBTITLE="Task Complete"
-        MESSAGE=$(choose_random_message \
+        set_event_messages \
             "$TOOL_DISPLAY completed the task" \
             "$TOOL_DISPLAY finished the task" \
             "$TOOL_DISPLAY is done" \
-            "$TOOL_DISPLAY wrapped up")
-        VOICE_MESSAGE="$MESSAGE"
+            "$TOOL_DISPLAY wrapped up" \
+            -- \
+            "All done! $TOOL_DISPLAY completed your task" \
+            "$TOOL_DISPLAY finished working on your request" \
+            "Task complete! $TOOL_DISPLAY is ready for your review" \
+            "Good news! $TOOL_DISPLAY is done and ready for you" \
+            "Finished! $TOOL_DISPLAY wrapped up your request"
         SOUND="Glass"
         ;;
     "notification")
@@ -1414,25 +1477,42 @@ case "$HOOK_TYPE" in
                 # tells "waiting on you" apart from an actual input request.
                 TITLE="$TOOL_DISPLAY 🥱"
                 BADGE_ICON="🥱"
-                MESSAGE=$(choose_random_message \
+                set_event_messages \
                     "$TOOL_DISPLAY is idle" \
                     "$TOOL_DISPLAY is waiting" \
                     "$TOOL_DISPLAY is ready for you" \
-                    "$TOOL_DISPLAY can take more work now")
+                    "$TOOL_DISPLAY can take more work now" \
+                    -- \
+                    "Hey, are you still there? $TOOL_DISPLAY is waiting for you" \
+                    "Just a gentle reminder - $TOOL_DISPLAY finished a while ago" \
+                    "Hello? $TOOL_DISPLAY is idle and ready for more work" \
+                    "Still waiting for you! $TOOL_DISPLAY can take more work now" \
+                    "Knock knock! $TOOL_DISPLAY is patiently waiting for you"
                 ;;
             "permission_prompt")
-                MESSAGE=$(choose_random_message \
+                set_event_messages \
                     "$TOOL_DISPLAY needs your approval" \
                     "$TOOL_DISPLAY is waiting for approval" \
                     "$TOOL_DISPLAY needs permission to continue" \
-                    "$TOOL_DISPLAY has an approval request")
+                    "$TOOL_DISPLAY has an approval request" \
+                    -- \
+                    "Attention please! $TOOL_DISPLAY needs your permission to continue" \
+                    "Hey! $TOOL_DISPLAY needs a quick approval to proceed" \
+                    "Heads up! $TOOL_DISPLAY has a permission request waiting for you" \
+                    "Excuse me! $TOOL_DISPLAY needs your authorization to continue" \
+                    "Permission required! $TOOL_DISPLAY is waiting for your approval"
                 ;;
             "elicitation_dialog")
-                MESSAGE=$(choose_random_message \
+                set_event_messages \
                     "$TOOL_DISPLAY needs MCP tool input" \
                     "$TOOL_DISPLAY is waiting for MCP input" \
                     "$TOOL_DISPLAY needs a tool response" \
-                    "$TOOL_DISPLAY has an MCP prompt")
+                    "$TOOL_DISPLAY has an MCP prompt" \
+                    -- \
+                    "Attention! $TOOL_DISPLAY needs MCP tool input to continue" \
+                    "Hey! An MCP tool in $TOOL_DISPLAY is waiting for your input" \
+                    "Quick response needed! $TOOL_DISPLAY has an MCP prompt for you" \
+                    "$TOOL_DISPLAY needs a tool response to proceed"
                 ;;
             "auth_success")
                 SUBTITLE="Authentication"
@@ -1443,14 +1523,20 @@ case "$HOOK_TYPE" in
                     "$TOOL_DISPLAY is authenticated")
                 ;;
             *)
-                MESSAGE=$(choose_random_message \
+                set_event_messages \
                     "$TOOL_DISPLAY needs your input" \
                     "$TOOL_DISPLAY is waiting for you" \
                     "$TOOL_DISPLAY needs a response" \
-                    "$TOOL_DISPLAY has something for you")
+                    "$TOOL_DISPLAY has something for you" \
+                    -- \
+                    "Hey! $TOOL_DISPLAY needs your input to continue" \
+                    "Attention! $TOOL_DISPLAY is waiting for you" \
+                    "Quick check! $TOOL_DISPLAY has something for you" \
+                    "$TOOL_DISPLAY needs a response to proceed"
                 ;;
         esac
-        VOICE_MESSAGE="$MESSAGE"
+        # Subtypes without their own spoken form fall back to the banner text.
+        VOICE_MESSAGE="${VOICE_MESSAGE:-$MESSAGE}"
         ;;
     "SubagentStart")
         TITLE="$TOOL_DISPLAY 🍃"
@@ -1584,14 +1670,23 @@ except Exception:
             if [[ ${#ASK_QUESTION_TEXT} -gt 150 ]]; then
                 MESSAGE="${MESSAGE}..."
             fi
-            VOICE_MESSAGE="$TOOL_DISPLAY is asking a question"
+            if [[ "$VOICE_WORDING" == "long" ]]; then
+                VOICE_MESSAGE="Hey! $TOOL_DISPLAY has a question for you"
+            else
+                VOICE_MESSAGE="$TOOL_DISPLAY is asking a question"
+            fi
         else
-            MESSAGE=$(choose_random_message \
+            set_event_messages \
                 "$TOOL_DISPLAY is asking a question" \
                 "$TOOL_DISPLAY has a question" \
                 "$TOOL_DISPLAY needs an answer" \
-                "$TOOL_DISPLAY is waiting on a question")
-            VOICE_MESSAGE="$MESSAGE"
+                "$TOOL_DISPLAY is waiting on a question" \
+                -- \
+                "Hey! $TOOL_DISPLAY has a question for you" \
+                "Attention! $TOOL_DISPLAY needs your answer to continue" \
+                "Quick question! $TOOL_DISPLAY needs your input" \
+                "$TOOL_DISPLAY needs some clarification from you" \
+                "Question time! $TOOL_DISPLAY is waiting for your answer"
         fi
         SOUND="Ping"
         ;;

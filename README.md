@@ -192,6 +192,8 @@ See [docs/installation.md](docs/installation.md) for more details.
 | `cn alerts persist`  | Keep selected alerts visible until closed    |
 | `cn channels`        | Configure Slack/Discord/ntfy delivery        |
 | `cn snooze <time>`   | Pause all notifications (30m, 2h, off)       |
+| `cn wording banner short\|long` | Terse or friendly banner text (default short) |
+| `cn wording voice short\|long`  | Terse or friendly spoken text (default long)  |
 | `cn usage`           | Configure Codex/Claude usage alerts          |
 | `cn spinner on`      | Use the animated tmux running indicator      |
 | `cn spinner off`     | Use the static tmux running indicator        |
@@ -586,6 +588,10 @@ code-notify/
 - [Hook Configuration](docs/HOOKS_GUIDE.md)
 - [Contributing](docs/CONTRIBUTING.md)
 - [GitHub Issues](https://github.com/xuyangy/code-notify/issues)
+
+## Acknowledgements
+
+This project is inspired by [opencode-smart-voice-notify](https://github.com/MasuRii/opencode-smart-voice-notify).
 
 ## License
 

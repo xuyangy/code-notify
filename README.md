@@ -366,7 +366,7 @@ When notifications are triggered, Code-Notify prepends an emoji icon to the term
 | Event/Hook Type | Subtype/Condition | Badge Icon | Description / Scenario |
 | --- | --- | :---: | --- |
 | `stop` | - | `🟢` | Task completed |
-| `TaskCompleted` | - | `🏅` | Agent-team task completed |
+| `TaskCompleted` | - | `📗` | Agent-team task completed |
 | `notification` | `idle_prompt` | `🥱` | AI is idle, waiting for input |
 | `notification` | `permission_prompt` | `💬` | AI needs tool permission (Y/n) |
 | `notification` | `elicitation_dialog` | `💬` | MCP tool input needed |

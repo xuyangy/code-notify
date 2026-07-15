@@ -60,17 +60,26 @@ printf 'TestVoice\n' > "$HOME/.claude/notifications/voice-claude"
 short_re='Claude (completed the task|finished the task|is done|wrapped up)'
 long_re='(All done!|finished working on your request|Task complete!|Good news!|Finished!)'
 
+# Speech runs in a detached background process, so every notifier invocation
+# must wait for its say output to land before the next run truncates the log;
+# a late writer from run N would otherwise pollute run N+1's assertions
+# (deadly for the ones asserting absence). Every run here speaks, so an empty
+# log after the timeout is a failure, not a tolerable slow start.
+wait_for_say() {
+    for _ in $(seq 1 200); do
+        [[ -s "$say_log" ]] && return 0
+        sleep 0.05
+    done
+    fail "timed out waiting for spoken output"
+}
+
 run_stop() {
     : > "$banner_log"
     : > "$say_log"
     # Each run must notify: drop the rate-limit state from the previous one.
     rm -rf "$HOME/.claude/notifications/state"
     printf '{}' | PATH="$fake_path" bash "$NOTIFIER" stop claude wording-test
-    # The voice branch runs disowned in the background; give it a moment.
-    for _ in $(seq 1 40); do
-        [[ -s "$say_log" ]] && break
-        sleep 0.05
-    done
+    wait_for_say
 }
 
 banner_matches() { grep -Eq "$1" "$banner_log"; }
@@ -97,11 +106,47 @@ say_matches "$long_re" && fail "voice set to short must not use the long pool"
 
 # --- env vars override the state files ---
 : > "$banner_log"
+: > "$say_log"
 rm -rf "$HOME/.claude/notifications/state"
 printf '{}' | PATH="$fake_path" CODE_NOTIFY_BANNER_WORDING=short \
     bash "$NOTIFIER" stop claude wording-test
+wait_for_say
 banner_matches "$short_re" || fail "CODE_NOTIFY_BANNER_WORDING should override the state file"
 banner_matches "$long_re" && fail "env-overridden banner must not use the long pool"
+
+# --- project name toggles, independent per target ---
+# Match the subtitle specifically: the macOS stub also logs the -group
+# argument, which always carries the project name.
+banner_project_re='Task Complete - wording-test'
+
+run_stop
+banner_matches "$banner_project_re" || fail "default banner should include the project name"
+
+PATH="$fake_path" "$CN" wording project voice off >/dev/null
+[[ "$(cat "$HOME/.claude/notifications/wording-project-voice")" == "off" ]] ||
+    fail "cn wording project voice off should write the state file"
+run_stop
+say_matches 'Project wording test' && fail "voice project off must not speak the project"
+banner_matches "$banner_project_re" || fail "banner keeps the project while only voice is off"
+
+PATH="$fake_path" "$CN" wording project voice reset >/dev/null
+[[ ! -f "$HOME/.claude/notifications/wording-project-voice" ]] ||
+    fail "reset should remove the project-voice state file"
+PATH="$fake_path" "$CN" wording project banner off >/dev/null
+run_stop
+banner_matches "$banner_project_re" && fail "banner project off must not show the project"
+say_matches 'Project wording test' || fail "voice keeps the project while only banner is off"
+
+# env var overrides the state file (banner still off in the state file)
+: > "$banner_log"
+: > "$say_log"
+rm -rf "$HOME/.claude/notifications/state"
+printf '{}' | PATH="$fake_path" CODE_NOTIFY_BANNER_PROJECT=on \
+    bash "$NOTIFIER" stop claude wording-test
+wait_for_say
+banner_matches "$banner_project_re" || fail "CODE_NOTIFY_BANNER_PROJECT should override the state file"
+
+PATH="$fake_path" "$CN" wording project banner reset >/dev/null
 
 # --- reset removes the state files (defaults return) ---
 PATH="$fake_path" "$CN" wording banner reset >/dev/null
@@ -121,5 +166,7 @@ banner_matches "$short_re" || fail "unrecognized style should fall back to the d
 status_out="$(PATH="$fake_path" "$CN" wording status)"
 printf '%s' "$status_out" | grep -q "banner wording" || fail "status should report banner wording"
 printf '%s' "$status_out" | grep -q "voice wording" || fail "status should report voice wording"
+printf '%s' "$status_out" | grep -q "banner project name" || fail "status should report banner project toggle"
+printf '%s' "$status_out" | grep -q "voice project name" || fail "status should report voice project toggle"
 
 pass "wording styles"

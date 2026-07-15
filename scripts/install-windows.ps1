@@ -2134,6 +2134,8 @@ WORDING COMMANDS:
     wording banner short|long    Terse or friendly banner text (default short)
     wording voice short|long     Terse or friendly spoken text (default long)
     wording banner|voice reset   Return to the default
+    wording project banner|voice on|off|reset
+                                 Include the project name per target (default on)
 
 CHANNEL COMMANDS:
     channels status
@@ -2182,13 +2184,15 @@ MORE INFO:
 }
 
 # Choose between terse and friendly notification wording, independently for
-# the desktop banner and the spoken message. Mirrors the bash `cn wording`
-# command: the notifier reads the same state files and falls back to the
-# defaults (banner short, voice long) when none exist.
+# the desktop banner and the spoken message, and whether each includes the
+# project name. Mirrors the bash `cn wording` command: the notifier reads the
+# same state files and falls back to the defaults (banner short, voice long,
+# project name on) when none exist.
 function Invoke-WordingCommand {
     param(
         [string]$Target = "status",
-        [string]$Style
+        [string]$Style,
+        [string]$Toggle
     )
 
     $targetName = $Target.ToLower()
@@ -2213,21 +2217,54 @@ function Invoke-WordingCommand {
                 }
             }
         }
+        "project" {
+            $scope = if ($Style) { $Style.ToLower() } else { "" }
+            if ($scope -ne "banner" -and $scope -ne "voice") {
+                Write-Host "Usage: cn wording project [banner|voice] [on|off|reset]" -ForegroundColor Gray
+                return
+            }
+            $stateFile = Join-Path $script:NotificationsDir "wording-project-$scope"
+            switch ($Toggle) {
+                { $_ -eq "on" -or $_ -eq "off" } {
+                    if (-not (Test-Path $script:NotificationsDir)) {
+                        New-Item -ItemType Directory -Path $script:NotificationsDir -Force | Out-Null
+                    }
+                    Set-Content -Path $stateFile -Value $Toggle
+                    Write-Success "$scope project name turned $Toggle"
+                }
+                { $_ -eq "reset" -or $_ -eq "default" } {
+                    if (Test-Path $stateFile) { Remove-Item $stateFile -Force }
+                    Write-Success "$scope project name reset to default (on)"
+                }
+                default {
+                    Write-Host "Usage: cn wording project $scope [on|off|reset]" -ForegroundColor Gray
+                }
+            }
+        }
         "status" {
             $banner = "short (default)"
             $voice = "long (default)"
+            $bannerProject = "on (default)"
+            $voiceProject = "on (default)"
             $bannerFile = Join-Path $script:NotificationsDir "wording-banner"
             $voiceFile = Join-Path $script:NotificationsDir "wording-voice"
+            $bannerProjectFile = Join-Path $script:NotificationsDir "wording-project-banner"
+            $voiceProjectFile = Join-Path $script:NotificationsDir "wording-project-voice"
             if (Test-Path $bannerFile) { $banner = (Get-Content $bannerFile -TotalCount 1).Trim() }
             if (Test-Path $voiceFile) { $voice = (Get-Content $voiceFile -TotalCount 1).Trim() }
+            if (Test-Path $bannerProjectFile) { $bannerProject = (Get-Content $bannerProjectFile -TotalCount 1).Trim() }
+            if (Test-Path $voiceProjectFile) { $voiceProject = (Get-Content $voiceProjectFile -TotalCount 1).Trim() }
             Write-Host "banner wording: $banner"
             Write-Host "voice wording:  $voice"
+            Write-Host "banner project name: $bannerProject"
+            Write-Host "voice project name:  $voiceProject"
             Write-Host ""
             Write-Host '  short: "Claude needs your approval"' -ForegroundColor Gray
             Write-Host '  long:  "Attention please! Claude needs your permission to continue"' -ForegroundColor Gray
         }
         default {
             Write-Host "Usage: cn wording [banner|voice] [short|long|reset]" -ForegroundColor Gray
+            Write-Host "       cn wording project [banner|voice] [on|off|reset]" -ForegroundColor Gray
         }
     }
 }
@@ -2317,7 +2354,7 @@ function Invoke-CodeNotify {
             Invoke-UsageCommand -SubCommand ($(if ($SubCommand) { $SubCommand } else { "status" })) -Args $Args
         }
         "wording" {
-            Invoke-WordingCommand -Target ($(if ($SubCommand) { $SubCommand } else { "status" })) -Style ($Args | Select-Object -First 1)
+            Invoke-WordingCommand -Target ($(if ($SubCommand) { $SubCommand } else { "status" })) -Style ($Args | Select-Object -First 1) -Toggle ($Args | Select-Object -Skip 1 -First 1)
         }
         "project" {
             switch ($SubCommand) {
@@ -2840,6 +2877,23 @@ function Get-WordingStyle {
 $BannerWording = Get-WordingStyle -Target "banner" -Default "short"
 $VoiceWording = Get-WordingStyle -Target "voice" -Default "long"
 
+# Whether the project name is included in a target ("banner" or "voice"),
+# each on by default. Mirrors the bash notifier: `cn wording project` writes
+# the state files and the env vars override per invocation.
+function Get-ProjectWordingEnabled {
+    param([string]$Target)
+
+    $value = if ($Target -eq "banner") { $env:CODE_NOTIFY_BANNER_PROJECT } else { $env:CODE_NOTIFY_VOICE_PROJECT }
+    if (-not $value) {
+        $stateFile = Join-Path "$ClaudeHome\notifications" "wording-project-$Target"
+        if (Test-Path $stateFile) {
+            $value = (Get-Content $stateFile -TotalCount 1 -ErrorAction SilentlyContinue)
+            if ($value) { $value = $value.Trim() }
+        }
+    }
+    return ($value -ne "off")
+}
+
 function Select-WordedMessage {
     param(
         [string[]]$Short,
@@ -3064,6 +3118,19 @@ switch ($HookType.ToLower()) {
             "$ToolDisplay reported $HookType in $ProjectName" `
             "$ToolDisplay has an update in $ProjectName"
         $VoiceMessage = $Message
+    }
+}
+
+# Honor `cn wording project banner|voice off`: the pools above embed the
+# project as a literal " in <name>" suffix, so stripping that phrase per
+# target keeps the pools single-sourced while letting each target drop the
+# project context independently.
+if ($ProjectName) {
+    if ($Message -and -not (Get-ProjectWordingEnabled -Target "banner")) {
+        $Message = $Message.Replace(" in $ProjectName", "")
+    }
+    if ($VoiceMessage -and -not (Get-ProjectWordingEnabled -Target "voice")) {
+        $VoiceMessage = $VoiceMessage.Replace(" in $ProjectName", "")
     }
 }
 

@@ -194,6 +194,7 @@ See [docs/installation.md](docs/installation.md) for more details.
 | `cn snooze <time>`   | Pause all notifications (30m, 2h, off)       |
 | `cn wording banner short\|long` | Terse or friendly banner text (default short) |
 | `cn wording voice short\|long`  | Terse or friendly spoken text (default long)  |
+| `cn wording project banner\|voice on\|off` | Include the project name in the banner / spoken message (default on) |
 | `cn usage`           | Configure Codex/Claude usage alerts          |
 | `cn spinner on`      | Use the animated tmux running indicator      |
 | `cn spinner off`     | Use the static tmux running indicator        |

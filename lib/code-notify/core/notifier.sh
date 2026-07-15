@@ -1419,6 +1419,26 @@ wording_style() {
 BANNER_WORDING=$(wording_style banner short)
 VOICE_WORDING=$(wording_style voice long)
 
+# Whether the project name is appended to a target ("banner" or "voice"),
+# each on by default and toggled independently. `cn wording project` writes
+# the state files; the env vars override per invocation. Only the visible/
+# audible suffix is affected — the project stays in cache, dedupe, and
+# rate-limit keys, which are functional rather than cosmetic.
+project_wording_enabled() {
+    local target="$1"
+    local value=""
+    local state_file="$HOME/.claude/notifications/wording-project-$target"
+
+    case "$target" in
+        "banner") value="${CODE_NOTIFY_BANNER_PROJECT:-}" ;;
+        "voice") value="${CODE_NOTIFY_VOICE_PROJECT:-}" ;;
+    esac
+    if [[ -z "$value" ]] && [[ -r "$state_file" ]]; then
+        read -r value < "$state_file" 2>/dev/null || true
+    fi
+    [[ "$value" != "off" ]]
+}
+
 # Set MESSAGE and VOICE_MESSAGE for an event from a short pool and a long
 # pool (arguments separated by --), honouring the configured wording styles.
 set_event_messages() {
@@ -1715,14 +1735,16 @@ esac
 # Project context is already carried in the notification subtitle and channel
 # metadata. Speak it as well, so identical events from different worktrees are
 # distinguishable without looking at the banner.
-if [[ -n "$PROJECT_NAME" ]] && [[ "$HOOK_TYPE" != "test" ]]; then
+if [[ -n "$PROJECT_NAME" ]] && [[ "$HOOK_TYPE" != "test" ]] &&
+    project_wording_enabled voice; then
     # Separators read poorly (or as literal "underscore") in some TTS voices;
     # speak "graphviz preview", keep the exact name in banner and cache key.
     VOICE_MESSAGE="${VOICE_MESSAGE}. Project ${PROJECT_NAME//[_-]/ }"
 fi
 
 # Add project name to subtitle if available
-if [[ -n "$PROJECT_NAME" ]] && [[ "$HOOK_TYPE" != "test" ]]; then
+if [[ -n "$PROJECT_NAME" ]] && [[ "$HOOK_TYPE" != "test" ]] &&
+    project_wording_enabled banner; then
     SUBTITLE="$SUBTITLE - $PROJECT_NAME"
 fi
 
@@ -2048,14 +2070,23 @@ case "$OS" in
             # wsl-notify-send.exe only accepts ONE positional arg; two args prints usage and exits
             WSL_TITLE=$(sanitize_wsl_text "$TITLE")
             WSL_MESSAGE=$(sanitize_wsl_text "$MESSAGE")
-            # Add project name and branch to body
-            WSL_BRANCH=$(sanitize_wsl_text "$(git -C "$PWD" branch --show-current 2>/dev/null || true)")
-            WSL_PROJECT=$(sanitize_wsl_text "$PROJECT_NAME")
-            if [[ -n "$WSL_BRANCH" ]]; then
-                WSL_PROJECT="$WSL_PROJECT ($WSL_BRANCH)"
+            # Add project name and branch to body, honouring the banner
+            # project toggle (`cn test` always identifies the project, like
+            # the macOS test subtitle does).
+            WSL_PROJECT=""
+            if [[ "$HOOK_TYPE" == "test" ]] || project_wording_enabled banner; then
+                WSL_BRANCH=$(sanitize_wsl_text "$(git -C "$PWD" branch --show-current 2>/dev/null || true)")
+                WSL_PROJECT=$(sanitize_wsl_text "$PROJECT_NAME")
+                if [[ -n "$WSL_BRANCH" ]]; then
+                    WSL_PROJECT="$WSL_PROJECT ($WSL_BRANCH)"
+                fi
             fi
             WSL_NOTIFY_ARGS=(--appId "${WSL_APP_ID:-wsl-notify-send}" -c "$WSL_TITLE")
-            WSL_BODY=$(printf '%s\n%s' "$WSL_PROJECT" "$WSL_MESSAGE")
+            if [[ -n "$WSL_PROJECT" ]]; then
+                WSL_BODY=$(printf '%s\n%s' "$WSL_PROJECT" "$WSL_MESSAGE")
+            else
+                WSL_BODY="$WSL_MESSAGE"
+            fi
             wsl-notify-send.exe "${WSL_NOTIFY_ARGS[@]}" "$WSL_BODY" 2>/dev/null
         else
             # Fallback to notify-send (only works if WSLg is active)

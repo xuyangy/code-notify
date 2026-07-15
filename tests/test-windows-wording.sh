@@ -53,9 +53,19 @@ try {
     $status = Invoke-WordingCommand -Target "status" 6>&1 | Out-String
     if ($status -notmatch "banner wording") { throw "status should report banner wording" }
     if ($status -notmatch "voice wording") { throw "status should report voice wording" }
+    if ($status -notmatch "banner project name") { throw "status should report the banner project toggle" }
+    if ($status -notmatch "voice project name") { throw "status should report the voice project toggle" }
 
     Invoke-WordingCommand -Target "banner" -Style "reset" | Out-Null
     if (Test-Path $bannerFile) { throw "reset should remove the state file" }
+
+    # --- CLI: project name toggles write their own state files ---
+    $projectVoiceFile = Join-Path $script:NotificationsDir "wording-project-voice"
+    Invoke-WordingCommand -Target "project" -Style "voice" -Toggle "off" | Out-Null
+    if (-not (Test-Path $projectVoiceFile)) { throw "cn wording project voice off should write the state file" }
+    if ((Get-Content $projectVoiceFile -TotalCount 1).Trim() -ne "off") { throw "project-voice state file should contain 'off'" }
+    Invoke-WordingCommand -Target "project" -Style "voice" -Toggle "reset" | Out-Null
+    if (Test-Path $projectVoiceFile) { throw "project reset should remove the state file" }
 
     # --- Notifier: style resolution helpers from the notify script ---
     if ($content -notmatch "(?ms)\$notifyScript = @'\r?\n(?<notify>.*?)\r?\n'@") {
@@ -83,7 +93,7 @@ try {
     Invoke-Expression $claudeHomeAssignment
     if ($ClaudeHome -ne $customClaudeHome) { throw "notifier should read wording state from CLAUDE_HOME" }
 
-    foreach ($fn in @("Get-WordingStyle", "Select-WordedMessage")) {
+    foreach ($fn in @("Get-WordingStyle", "Select-WordedMessage", "Get-ProjectWordingEnabled")) {
         if ($notify -notmatch "(?ms)^(?<body>function $fn.*?^\})") {
             throw "could not extract $fn from notify script"
         }
@@ -91,6 +101,16 @@ try {
     }
     if ((Get-WordingStyle -Target "banner" -Default "short") -ne "short") { throw "banner should default to short" }
     if ((Get-WordingStyle -Target "voice" -Default "long") -ne "long") { throw "voice should default to long" }
+
+    # The notifier must strip the embedded project per target when toggled off.
+    if ($notify -notmatch [regex]::Escape('$Message.Replace(" in $ProjectName", "")')) {
+        throw "notify script should strip the project from the banner message when toggled off"
+    }
+    if ($notify -notmatch [regex]::Escape('$VoiceMessage.Replace(" in $ProjectName", "")')) {
+        throw "notify script should strip the project from the voice message when toggled off"
+    }
+    if (-not (Get-ProjectWordingEnabled -Target "banner")) { throw "banner project should default to on" }
+    if (-not (Get-ProjectWordingEnabled -Target "voice")) { throw "voice project should default to on" }
 
     New-Item -ItemType Directory -Path $script:NotificationsDir -Force | Out-Null
     $bannerFile = Join-Path $script:NotificationsDir "wording-banner"
@@ -103,6 +123,15 @@ try {
 
     Set-Content -Path $bannerFile -Value "sonnet-form"
     if ((Get-WordingStyle -Target "banner" -Default "short") -ne "short") { throw "garbage in the state file should fall back to the default" }
+
+    $projectBannerFile = Join-Path $script:NotificationsDir "wording-project-banner"
+    Set-Content -Path $projectBannerFile -Value "off"
+    if (Get-ProjectWordingEnabled -Target "banner") { throw "banner project should follow the state file" }
+    if (-not (Get-ProjectWordingEnabled -Target "voice")) { throw "voice project should stay on while only banner is off" }
+    $env:CODE_NOTIFY_BANNER_PROJECT = "on"
+    if (-not (Get-ProjectWordingEnabled -Target "banner")) { throw "env var should override the project state file" }
+    $env:CODE_NOTIFY_BANNER_PROJECT = $null
+    Remove-Item $projectBannerFile -Force
 
     $short = @("terse one", "terse two")
     $long = @("friendly one", "friendly two")

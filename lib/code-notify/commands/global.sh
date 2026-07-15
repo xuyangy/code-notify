@@ -1226,16 +1226,20 @@ handle_spinner_command() {
 }
 
 # Choose between terse and friendly notification wording, independently for
-# the desktop banner and the spoken message. State lives in files so every
-# hook process sees a change without a config reload; the notifier falls back
-# to the defaults (banner short, voice long) when no file exists or its
-# content is unrecognized.
+# the desktop banner and the spoken message, and whether each includes the
+# project name. State lives in files so every hook process sees a change
+# without a config reload; the notifier falls back to the defaults (banner
+# short, voice long, project name on) when no file exists or its content is
+# unrecognized.
 handle_wording_command() {
     local target="${1:-status}"
     local style="${2:-}"
+    local toggle="${3:-}"
     local state_dir="$HOME/.claude/notifications"
     local banner="short (default)"
     local voice="long (default)"
+    local banner_project="on (default)"
+    local voice_project="on (default)"
 
     case "$target" in
         "banner"|"voice")
@@ -1255,11 +1259,40 @@ handle_wording_command() {
                     ;;
             esac
             ;;
+        "project")
+            case "$style" in
+                "banner"|"voice")
+                    case "$toggle" in
+                        "on"|"off")
+                            mkdir -p "$state_dir"
+                            printf '%s\n' "$toggle" > "$state_dir/wording-project-$style"
+                            success "$style project name turned $toggle"
+                            ;;
+                        "reset"|"default")
+                            rm -f "$state_dir/wording-project-$style"
+                            success "$style project name reset to default (on)"
+                            ;;
+                        *)
+                            error "Usage: cn wording project $style [on|off|reset]"
+                            return 1
+                            ;;
+                    esac
+                    ;;
+                *)
+                    error "Usage: cn wording project [banner|voice] [on|off|reset]"
+                    return 1
+                    ;;
+            esac
+            ;;
         "status")
             [[ -r "$state_dir/wording-banner" ]] && read -r banner < "$state_dir/wording-banner"
             [[ -r "$state_dir/wording-voice" ]] && read -r voice < "$state_dir/wording-voice"
+            [[ -r "$state_dir/wording-project-banner" ]] && read -r banner_project < "$state_dir/wording-project-banner"
+            [[ -r "$state_dir/wording-project-voice" ]] && read -r voice_project < "$state_dir/wording-project-voice"
             echo "banner wording: ${GREEN}${banner}${RESET}"
             echo "voice wording:  ${GREEN}${voice}${RESET}"
+            echo "banner project name: ${GREEN}${banner_project}${RESET}"
+            echo "voice project name:  ${GREEN}${voice_project}${RESET}"
             echo ""
             echo "  short: \"Claude needs your approval\""
             echo "  long:  \"Attention please! Claude needs your permission to continue\""
@@ -1267,6 +1300,7 @@ handle_wording_command() {
         *)
             error "Unknown wording command: $target"
             echo "Usage: cn wording [banner|voice] [short|long|reset]"
+            echo "       cn wording project [banner|voice] [on|off|reset]"
             return 1
             ;;
     esac

@@ -73,13 +73,22 @@ is_git_repo() {
     git rev-parse --git-dir &> /dev/null
 }
 
-# Get project name
+# Get a project name for a directory. Prefer the containing Git worktree so
+# hooks fired from a subdirectory still identify the project consistently.
+get_project_name_at() {
+    local directory="${1:-$PWD}"
+    local root
+
+    root=$(git -C "$directory" rev-parse --show-toplevel 2>/dev/null) && {
+        basename "$root"
+        return
+    }
+    basename "${directory%/}"
+}
+
+# Get project name for the current working directory.
 get_project_name() {
-    if is_git_repo; then
-        basename "$(git rev-parse --show-toplevel)"
-    else
-        basename "$PWD"
-    fi
+    get_project_name_at "$PWD"
 }
 
 # Get project root

@@ -81,6 +81,7 @@ run_stop
 banner_matches "$short_re" || fail "default banner should use the short pool"
 banner_matches "$long_re" && fail "default banner must not use the long pool"
 say_matches "$long_re" || fail "default voice should use the long pool"
+say_matches 'Project wording test' || fail "voice should speak the project name with separators as spaces"
 
 # --- cn wording writes state files the notifier honours ---
 PATH="$fake_path" "$CN" wording banner long >/dev/null

@@ -180,7 +180,8 @@ tts_cache_key() {
     local text="$1"
     local voice="$2"
     local model="$3"
-    local raw="${voice}|${model}|${text}"
+    local project="${4:-}"
+    local raw="${project}|${voice}|${model}|${text}"
 
     if command -v shasum &> /dev/null; then
         printf '%s' "$raw" | shasum -a 256 | awk '{print $1}'
@@ -191,9 +192,31 @@ tts_cache_key() {
     fi
 }
 
+tts_cache_project_slug() {
+    local project="${1:-project}"
+    local slug=""
+    local char
+    local index
+
+    # Keep paths portable without starting another process for each cache hit.
+    # Consecutive punctuation/whitespace becomes one separator.
+    for ((index = 0; index < ${#project}; index++)); do
+        char="${project:index:1}"
+        case "$char" in
+            [[:alnum:]]) slug+="$char" ;;
+            *) [[ "$slug" == *- ]] || slug+="-" ;;
+        esac
+    done
+    slug="${slug#-}"
+    slug="${slug%-}"
+    printf '%s\n' "${slug:-project}"
+}
+
 tts_cache_path() {
     local key="$1"
-    printf '%s/tts-%s.mp3\n' "$TTS_CACHE_DIR" "$key"
+    local project_slug
+    project_slug="$(tts_cache_project_slug "${2:-}")"
+    printf '%s/tts-%s-%s.mp3\n' "$TTS_CACHE_DIR" "$project_slug" "$key"
 }
 
 # Build the request body via python to safely escape quotes/newlines in text.
@@ -303,6 +326,7 @@ PY
 
 tts_elevenlabs_speak() {
     local text="$1"
+    local project="${2:-}"
     local voice_id model_id key cache_file
 
     [[ -n "$text" ]] || return 1
@@ -312,8 +336,8 @@ tts_elevenlabs_speak() {
     model_id="$(tts_elevenlabs_model_id)"
 
     ensure_tts_cache_dir
-    key="$(tts_cache_key "$text" "$voice_id" "$model_id")"
-    cache_file="$(tts_cache_path "$key")"
+    key="$(tts_cache_key "$text" "$voice_id" "$model_id" "$project")"
+    cache_file="$(tts_cache_path "$key" "$project")"
 
     if [[ -s "$cache_file" ]]; then
         # Mark last-use time so stale cache entries can be found and pruned.
@@ -331,15 +355,17 @@ tts_elevenlabs_speak() {
 }
 
 # Public entry point for notifier.sh. $1 = message, $2 = system voice for the
-# `say` fallback used when ElevenLabs is unselected or fails.
+# `say` fallback used when ElevenLabs is unselected or fails, $3 = project
+# name used to separate cache entries and make their filenames identifiable.
 speak_notification() {
     local message="$1"
     local system_voice="${2:-}"
+    local project="${3:-}"
 
     [[ -n "$message" ]] || return 0
 
     if tts_elevenlabs_ready; then
-        if tts_elevenlabs_speak "$message"; then
+        if tts_elevenlabs_speak "$message" "$project"; then
             return 0
         fi
     fi

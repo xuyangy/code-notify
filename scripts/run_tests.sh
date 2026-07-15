@@ -247,6 +247,13 @@ else
     test_fail "wording styles failed"
 fi
 
+test_start "tts cache project separation"
+if run_test_script tests/test-tts-cache.sh; then
+    test_pass
+else
+    test_fail "tts cache project separation failed"
+fi
+
 test_start "usage alerts"
 if run_test_script tests/test-usage-alerts.sh; then
     test_pass

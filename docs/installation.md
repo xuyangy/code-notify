@@ -110,7 +110,7 @@ cn voice elevenlabs key <your-api-key>
 cn voice elevenlabs test
 ```
 
-If ElevenLabs is unavailable (no key, network error, or quota), Code-Notify falls back to the built-in `say` voice. Synthesized audio is cached in `~/.cache/code-notify/tts/`; the API key is stored in `~/.config/code-notify/tts.json` (permissions `600`).
+If ElevenLabs is unavailable (no key, network error, or quota), Code-Notify falls back to the built-in `say` voice. Synthesized audio is cached in `~/.cache/code-notify/tts/`; cache filenames include the project name and their timestamp is refreshed on use, so stale entries can be pruned by age. The API key is stored in `~/.config/code-notify/tts.json` (permissions `600`).
 
 ### Project-Specific Setup
 

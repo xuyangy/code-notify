@@ -222,9 +222,9 @@ get_codex_project_name() {
     payload_cwd=$(json_extract_string "$HOOK_DATA" "cwd")
 
     if [[ -n "$payload_cwd" ]]; then
-        basename "$payload_cwd"
+        get_project_name_at "$payload_cwd"
     else
-        basename "$PWD"
+        get_project_name
     fi
 }
 
@@ -252,9 +252,9 @@ except Exception:
 ' 2>/dev/null)
     fi
     if [[ -n "$ws" ]]; then
-        basename "$ws"
+        get_project_name_at "$ws"
     else
-        basename "$PWD"
+        get_project_name
     fi
 }
 
@@ -726,7 +726,9 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
     if [[ ! -t 0 ]]; then
         HOOK_DATA=$(cat 2>/dev/null || true)
     fi
-    PROJECT_NAME="$(get_agy_project_name)"
+    # PROJECT_NAME is resolved after the per-tool-call fast paths below exit:
+    # the lookup costs a jq/python spawn plus a git worktree probe, and the
+    # silent PreToolUse/PostToolUse events fire before/after every tool call.
     case "$AGY_EVENT" in
         PreToolUse)
             # agy 1.0.11 fires PreToolUse before EVERY tool call (registered
@@ -799,7 +801,7 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
 else
     HOOK_TYPE=${CLAUDE_HOOK_TYPE:-$RAW_ARG1}
     TOOL_NAME="${RAW_ARG2:-""}"
-    PROJECT_NAME="${RAW_ARG3:-$(basename "$PWD")}"
+    PROJECT_NAME="${RAW_ARG3:-$(get_project_name)}"
 
     # Read hook data from stdin (Claude Code passes JSON with hook context)
     if [[ ! -t 0 ]]; then
@@ -818,6 +820,12 @@ CODE_NOTIFY_TMUX_AGENT_NAME="$TOOL_NAME"
 if [[ "$HOOK_TYPE" == "agy_debounce_stop" ]]; then
     schedule_agy_debounced_stop
     exit 0
+fi
+
+# Any agy event still running here will notify, so the project lookup deferred
+# above is paid only now — never on the silent per-tool-call paths.
+if [[ "$RAW_ARG1" == agy:* ]]; then
+    PROJECT_NAME="$(get_agy_project_name)"
 fi
 
 # How this agent's badges clear (stored per badge — see tmux_badge_set):
@@ -1704,6 +1712,15 @@ except Exception:
         ;;
 esac
 
+# Project context is already carried in the notification subtitle and channel
+# metadata. Speak it as well, so identical events from different worktrees are
+# distinguishable without looking at the banner.
+if [[ -n "$PROJECT_NAME" ]] && [[ "$HOOK_TYPE" != "test" ]]; then
+    # Separators read poorly (or as literal "underscore") in some TTS voices;
+    # speak "graphviz preview", keep the exact name in banner and cache key.
+    VOICE_MESSAGE="${VOICE_MESSAGE}. Project ${PROJECT_NAME//[_-]/ }"
+fi
+
 # Add project name to subtitle if available
 if [[ -n "$PROJECT_NAME" ]] && [[ "$HOOK_TYPE" != "test" ]]; then
     SUBTITLE="$SUBTITLE - $PROJECT_NAME"
@@ -2002,7 +2019,7 @@ case "$OS" in
             if should_speak; then
                 VOICE=$(get_voice_setting)
                 if [[ -n "$VOICE" ]]; then
-                    speak_notification "$VOICE_MESSAGE" "$VOICE"
+                    speak_notification "$VOICE_MESSAGE" "$VOICE" "$PROJECT_NAME"
                 fi
             fi
         ) > /dev/null 2>&1 &

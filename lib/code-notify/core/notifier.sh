@@ -1739,7 +1739,9 @@ if [[ -n "$PROJECT_NAME" ]] && [[ "$HOOK_TYPE" != "test" ]] &&
     project_wording_enabled voice; then
     # Separators read poorly (or as literal "underscore") in some TTS voices;
     # speak "graphviz preview", keep the exact name in banner and cache key.
-    VOICE_MESSAGE="${VOICE_MESSAGE}. Project ${PROJECT_NAME//[_-]/ }"
+    # "in project X" flows as one sentence — a ". Project X" suffix reads as
+    # a run-on ("completed your task project X") with most voices.
+    VOICE_MESSAGE="${VOICE_MESSAGE} in project ${PROJECT_NAME//[_-]/ }"
 fi
 
 # Add project name to subtitle if available

@@ -316,6 +316,8 @@ tts_elevenlabs_speak() {
     cache_file="$(tts_cache_path "$key")"
 
     if [[ -s "$cache_file" ]]; then
+        # Mark last-use time so stale cache entries can be found and pruned.
+        touch "$cache_file" 2>/dev/null || true
         play_sound "$cache_file"
         return 0
     fi

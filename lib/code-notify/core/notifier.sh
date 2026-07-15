@@ -13,6 +13,18 @@ RAW_ARG1="${1:-}"
 RAW_ARG2="${2:-}"
 RAW_ARG3="${3:-}"
 
+# opencode compatibility plugins (e.g. oh-my-openagent) replay the Claude Code
+# hooks from settings.json inside opencode's own process, so this notifier can
+# fire for an agent it does not support: UserPromptSubmit starts the tmux
+# spinner, but opencode never delivers a compatible turn-end, so the spinner
+# never clears — and notifications fire for turns code-notify cannot track.
+# opencode exports OPENCODE=1 and OPENCODE_PID into every process it spawns
+# (and into nothing else — an agent in a sibling window is unaffected); bail
+# out before touching any badge, spinner, or notification state.
+if [[ -n "${OPENCODE:-}" ]] || [[ -n "${OPENCODE_PID:-}" ]]; then
+    exit 0
+fi
+
 NOTIFIER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # UserPromptSubmit (any agent whose installer registered the hook — Claude,

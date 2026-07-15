@@ -2339,6 +2339,14 @@ param(
     [string]$ProjectName = ""
 )
 
+# opencode compatibility plugins (e.g. oh-my-openagent) replay the Claude Code
+# hooks from settings.json inside opencode's own process; opencode is not a
+# supported agent, so its replayed hooks must not notify. opencode exports
+# OPENCODE=1 and OPENCODE_PID into every process it spawns (and nothing else).
+if ($env:OPENCODE -or $env:OPENCODE_PID) {
+    exit 0
+}
+
 $ClaudeHome = "$env:USERPROFILE\.claude"
 $VoiceFile = "$ClaudeHome\notifications\voice-enabled"
 $LogFile = "$ClaudeHome\logs\notifications.log"

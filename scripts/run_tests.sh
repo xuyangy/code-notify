@@ -349,6 +349,14 @@ else
     test_fail "badge-clear hook install failed"
 fi
 
+# Test 25: hooks replayed by opencode (OPENCODE env set) are suppressed
+test_start "opencode hook suppression"
+if run_test_script tests/test-opencode-suppression.sh; then
+    test_pass
+else
+    test_fail "opencode hook suppression failed"
+fi
+
 # Summary
 echo ""
 echo "Test Summary:"

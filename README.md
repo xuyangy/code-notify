@@ -192,9 +192,11 @@ See [docs/installation.md](docs/installation.md) for more details.
 | `cn alerts persist`  | Keep selected alerts visible until closed    |
 | `cn channels`        | Configure Slack/Discord/ntfy delivery        |
 | `cn snooze <time>`   | Pause all notifications (30m, 2h, off)       |
-| `cn wording banner short\|long` | Terse or friendly banner text (default short) |
-| `cn wording voice short\|long`  | Terse or friendly spoken text (default long)  |
-| `cn wording project banner\|voice on\|off` | Include the project name in the banner / spoken message (default on) |
+| `cn wording status` | Show wording and project-name settings |
+| `cn wording banner short\|long\|reset` | Set or reset banner wording (default short) |
+| `cn wording voice short\|long\|reset` | Set or reset spoken wording (default long) |
+| `cn wording project banner on\|off\|reset` | Show or hide the project name in banners (default on) |
+| `cn wording project voice on\|off\|reset` | Show or hide the project name in voice messages (default on) |
 | `cn usage`           | Configure Codex/Claude usage alerts          |
 | `cn spinner on`      | Use the animated tmux running indicator      |
 | `cn spinner off`     | Use the static tmux running indicator        |
@@ -233,6 +235,54 @@ refresh interval that you changed while the spinner was active untouched.
 
 Set `CODE_NOTIFY_TMUX_SPINNER=true` or `CODE_NOTIFY_TMUX_SPINNER=false` to
 override the saved preference for a single process or session.
+
+### Notification Wording and Project Names
+
+You can choose between short and friendly notification text independently for
+desktop banners and voice announcements. By default, banners use the short
+style and voice announcements use the long style:
+
+```bash
+cn wording banner short       # e.g. "Claude needs your approval"
+cn wording banner long        # e.g. "Attention please! Claude needs your permission to continue"
+cn wording voice short        # Use terse spoken wording
+cn wording voice long         # Use friendlier spoken wording
+```
+
+Project names are included in both banners and voice announcements by default.
+You can turn them off independently, or turn them back on later. `cn test`
+banners always identify the project so you can confirm delivery, even while
+the banner toggle is off:
+
+```bash
+cn wording project banner off
+cn wording project voice off
+
+cn wording project banner on
+cn wording project voice on
+```
+
+Show the current wording and project-name settings with `cn wording status`
+(plain `cn wording` does the same):
+
+```bash
+cn wording status
+```
+
+To restore the defaults, use `reset` in place of `short`, `long`, `on`, or
+`off` for the relevant setting. For example:
+
+```bash
+cn wording banner reset
+cn wording voice reset
+cn wording project banner reset
+cn wording project voice reset
+```
+
+Set `CODE_NOTIFY_BANNER_WORDING` or `CODE_NOTIFY_VOICE_WORDING` to `short` or
+`long`, and `CODE_NOTIFY_BANNER_PROJECT` or `CODE_NOTIFY_VOICE_PROJECT` to
+`on` or `off`, to override the saved preferences for a single process or
+session.
 
 ## How It Works
 

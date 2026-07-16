@@ -83,6 +83,17 @@ ${BOLD}VOICE COMMANDS:${RESET}
     ${GREEN}voice off${RESET} <tool>    Disable voice for specific tool
     ${GREEN}voice status${RESET}        Show voice settings
 
+${BOLD}WORDING COMMANDS:${RESET}
+    ${GREEN}wording status${RESET}                     Show wording and project-name settings
+    ${GREEN}wording banner${RESET} short|long          Set banner wording style
+    ${GREEN}wording banner${RESET} reset               Reset banner wording to short
+    ${GREEN}wording voice${RESET} short|long           Set spoken wording style
+    ${GREEN}wording voice${RESET} reset                Reset spoken wording to long
+    ${GREEN}wording project banner${RESET} on|off      Show or hide project name in banners
+    ${GREEN}wording project banner${RESET} reset       Reset banner project name to on
+    ${GREEN}wording project voice${RESET} on|off       Show or hide project name in voice
+    ${GREEN}wording project voice${RESET} reset        Reset voice project name to on
+
 ${BOLD}SOUND COMMANDS:${RESET}
     ${GREEN}sound on${RESET}            Enable with default system sound
     ${GREEN}sound off${RESET}           Disable sound notifications

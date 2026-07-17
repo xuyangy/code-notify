@@ -472,18 +472,24 @@ agy_permission_prompt_enabled() {
     [[ "$current" == *permission_prompt* ]]
 }
 
-# Debounce PostToolUse into a single "task complete": agy 1.0.11 fires no usable
+# Debounce PostToolUse into a single "task complete": agy 1.0.x fired no usable
 # Stop event, and PostToolUse fires after every step (including model-only
 # steps), so we treat the agent as done once step activity has been quiet for a
 # few seconds. Each call stamps a token and arms a detached watcher; only the
 # most recent watcher (whose token is still current after the quiet period)
 # sends the notification.
 #
+# Since agy 1.1.3 the native Stop hook executes, making this whole mechanism a
+# FALLBACK: the first native Stop of a conversation writes a marker (see
+# agy_native_stop_markerfile) and later PostToolUse steps skip arming watchers.
+# Everything below still carries the first turn of each conversation and any
+# agy build whose lifecycle hooks are (again) broken.
+#
 # Tool runs no longer trip this early: PreToolUse (empty matcher, every tool)
 # cancels the pending watcher when the next tool starts, so a tool that outlives
 # the quiet window can't fire a premature completion.
 #
-# Heuristic caveat (no real turn-end event exists yet): a single long *model*
+# Heuristic caveat (while no real turn-end event is proven): a single long *model*
 # generation that exceeds the quiet window with no following tool can still fire
 # early. The quiet window (CODE_NOTIFY_AGY_DEBOUNCE_SECONDS, default 8s) plus the
 # global stop rate limit keep this in check; repeated completions are not cooled
@@ -516,11 +522,12 @@ agy_debounce_tokenfile() {
 }
 
 # Per-conversation marker that prevents tmux_running_start from firing on every
-# PreToolUse in a turn.  The first PreToolUse of a turn creates this file and
-# lights the indicator; subsequent PreToolUse calls see the file and skip the
-# tmux IPC entirely.  Turn-end events (StopFinal/Stop/error) remove it so the
-# next turn re-arms, and a permission prompt removes it so the first tool call
-# after approval restarts the paused indicator.
+# PreInvocation/PreToolUse in a turn.  The first such event of a turn (normally
+# the PreInvocation before the first model call) creates this file and lights
+# the indicator; subsequent calls see the file and skip the tmux IPC entirely.
+# Turn-end events (StopFinal/Stop/error) remove it so the next turn re-arms,
+# and a permission prompt removes it so the first working signal after approval
+# restarts the paused indicator.
 agy_running_markerfile() {
     local state_dir cid_safe
     state_dir="$HOME/.claude/notifications/agy"
@@ -551,6 +558,21 @@ agy_maybe_start_running() {
 # Clear the per-conversation running marker so the next turn re-arms.
 agy_clear_running_marker() {
     rm -f "$(agy_running_markerfile)" 2>/dev/null || true
+}
+
+# Per-conversation marker recording that a NATIVE Stop hook has fired (agy
+# executes lifecycle hooks since 1.1.3). Once real turn-end events are proven
+# for a conversation, PostToolUse stops arming debounce watchers — the guess
+# is strictly worse than the event. Keyed per conversation rather than
+# globally so the fallback self-heals: a later agy build with lifecycle hooks
+# broken again simply never writes the marker, and the debounce keeps
+# delivering completions.
+agy_native_stop_markerfile() {
+    local state_dir cid_safe
+    state_dir="$HOME/.claude/notifications/agy"
+    mkdir -p "$state_dir"
+    cid_safe="$(get_agy_conversation_id | tr -c 'A-Za-z0-9._-' '_')"
+    printf '%s/%s.native-stop' "$state_dir" "$cid_safe"
 }
 
 # Serialize the running-indicator transition with a debounce completion.  The
@@ -617,7 +639,8 @@ prune_agy_debounce_tokens() {
     retention_days="${CODE_NOTIFY_AGY_TOKEN_RETENTION_DAYS:-3}"
     [[ "$retention_days" =~ ^[0-9]+$ ]] || retention_days=3
     find "$state_dir" -maxdepth 1 -type f \
-        \( -name '*.token' -o -name '*.completed' -o -name '*.running' \) \
+        \( -name '*.token' -o -name '*.completed' -o -name '*.running' \
+           -o -name '*.native-stop' \) \
         -mtime "+${retention_days}" -delete 2>/dev/null || true
     # A .running.lock directory this old is a hook killed mid-transition:
     # legitimate holds last milliseconds, and both mkdir and the pid write
@@ -730,6 +753,20 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
     # the lookup costs a jq/python spawn plus a git worktree probe, and the
     # silent PreToolUse/PostToolUse events fire before/after every tool call.
     case "$AGY_EVENT" in
+        PreInvocation)
+            # Fires before every model call (executes since agy 1.1.3) — agy's
+            # de-facto prompt-submit signal, since it has no UserPromptSubmit
+            # event. The first one of a turn lights the running indicator at
+            # prompt submission: turns that open with a long model-only
+            # generation, or never call a tool at all, would otherwise stay
+            # dark until the first PreToolUse (or forever). It also re-lights
+            # the indicator after an approval pause and, like PreToolUse,
+            # cancels any pending debounced completion ("still working").
+            # Later invocations of the same turn dedup via the running marker.
+            # Always silent.
+            agy_with_running_lock agy_start_running_locked || true
+            exit 0
+            ;;
         PreToolUse)
             # agy 1.0.11 fires PreToolUse before EVERY tool call (registered
             # with an empty matcher), so it is code-notify's "agent is still
@@ -770,6 +807,13 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
                 cancel_agy_debounced_stop
                 agy_clear_running_marker
             else
+                # Once a native Stop has been seen for this conversation, the
+                # real turn-end event supersedes the debounced guess: skip
+                # arming a watcher process (and its capture-pane fingerprint
+                # polling) entirely. The first turn of every conversation
+                # still debounces, so an agy build whose lifecycle hooks are
+                # broken never writes the marker and keeps its completions.
+                [[ -f "$(agy_native_stop_markerfile)" ]] && exit 0
                 HOOK_TYPE="agy_debounce_stop"
             fi
             ;;
@@ -791,6 +835,19 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
             # any pending debounced completion for this conversation to avoid a
             # duplicate "task complete" from the watcher.
             HOOK_TYPE="stop"
+            # The Stop payload carries the turn's terminal error (empty string
+            # on a clean end, e.g. terminationReason NO_TOOL_CALL): a turn
+            # that died is a failure alert, not "task complete".
+            if [[ -n "$(get_agy_error)" ]]; then
+                HOOK_TYPE="error"
+            fi
+            # Record that this conversation delivers native turn-end events so
+            # later PostToolUse steps skip arming debounce watchers. With
+            # watchers gone, this branch also takes over the throttled state
+            # pruning that used to ride on arming them.
+            agy_stop_now="$(date +%s)"
+            printf '%s' "$agy_stop_now" > "$(agy_native_stop_markerfile)" 2>/dev/null || true
+            maybe_prune_agy_debounce_tokens "$agy_stop_now"
             cancel_agy_debounced_stop
             agy_clear_running_marker
             ;;
@@ -831,14 +888,15 @@ fi
 # How this agent's badges clear (stored per badge — see tmux_badge_set):
 #   - "engage": the next reliable work signal clears the badge when the user
 #     actually hands the window work (UserPromptSubmit for Claude/Codex, first
-#     PreToolUse for Antigravity), so
+#     PreInvocation/PreToolUse for Antigravity), so
 #     glance-clearing (sweep + focus hook + macOS click-to-clear) is suppressed
 #     and the badge survives mere peeks at the output.
 #   - "glance": no prompt-submit signal is wired, so visiting the window must
 #     clear the badge or nothing will.
 # Claude's installer always registers the UserPromptSubmit hook alongside its
-# others. Antigravity's all-tools PreToolUse hook is its equivalent engagement
-# signal. Codex supports UserPromptSubmit too (hooks.json), but only installs
+# others. Antigravity's per-model-call PreInvocation hook (with the all-tools
+# PreToolUse as backstop) is its equivalent engagement signal. Codex supports
+# UserPromptSubmit too (hooks.json), but only installs
 # that have re-run `cn on codex` since it was added carry it — so engage-clear
 # is gated on the hook actually being present in hooks.json, never leaving a
 # badge without a clear path (legacy `notify =` users and stale hooks.json

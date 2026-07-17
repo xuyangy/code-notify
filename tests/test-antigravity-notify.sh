@@ -6,9 +6,12 @@
 # wraps each lifecycle event as "agy:<Event>" + "antigravity". This exercises the
 # notifier's antigravity branch directly (no agy binary required):
 #   * PreToolUse           -> "Input Required" (permission prompt)
+#   * PreInvocation        -> silent: running indicator + debounce cancel
 #   * PostToolUse + error  -> "Error" (string OR structured HookErrorMessage)
-#   * PostToolUse, no error -> debounced "Task Complete" (via the watcher)
-#   * Stop                 -> "Task Complete"
+#   * PostToolUse, no error -> debounced "Task Complete" (via the watcher),
+#                              skipped once a native Stop was seen (agy 1.1.3+)
+#   * Stop                 -> "Task Complete", or "Error" when the payload
+#                              carries the turn's terminal error
 # Project name comes from workspacePaths[0].
 
 set -e
@@ -320,6 +323,43 @@ sleep 2
 stop_once_count="$(grep -c "Task Complete - projStopOnce" "$notification_log")"
 [[ "$stop_once_count" == "1" ]] \
     || fail "native Stop produced $stop_once_count completion alerts (expected 1)"
+
+# 8b) PreInvocation (fires before every model call since agy 1.1.3) must light
+#     the running indicator, cancel a pending debounced completion, and stay
+#     silent — it is agy's prompt-submit signal, not a notification.
+rm -f "$FAKE_TMUX_STATE/@2.@code_notify_running"
+run_agy_notifier "$fake_path" "PostToolUse" \
+    "{\"conversationId\":\"c-preinv\",\"error\":\"\",$(ws projPreInv)}"
+run_agy_notifier "$fake_path" "PreInvocation" \
+    "{\"conversationId\":\"c-preinv\",\"invocationNum\":1,$(ws projPreInv)}"
+[[ -f "$FAKE_TMUX_STATE/@2.@code_notify_running" ]] \
+    || fail "PreInvocation did not light the tmux running indicator"
+sleep 2
+grep -q "projPreInv" "$notification_log" \
+    && fail "PreInvocation produced a notification (should be silent, incl. cancelling the debounce)"
+
+# 8c) A Stop whose payload carries the turn's terminal error must raise a
+#     failure alert, not "task complete".
+run_agy_notifier "$fake_path" "Stop" \
+    "{\"conversationId\":\"c-stoperr\",\"error\":\"agent died\",\"terminationReason\":\"ERROR\",$(ws projStopErr)}"
+grep -q "Error - projStopErr" "$notification_log" \
+    || fail "Stop with an error payload was not classified as a failure"
+grep -q "Task Complete - projStopErr" "$notification_log" \
+    && fail "Stop with an error payload was also reported as task complete"
+
+# 8d) Once a native Stop has been observed for a conversation, later
+#     PostToolUse steps must not arm the debounced fallback: exactly one
+#     completion (from the Stop), none from a watcher.
+run_agy_notifier "$fake_path" "Stop" \
+    "{\"conversationId\":\"c-native\",\"error\":\"\",$(ws projNative)}"
+[[ -f "$HOME/.claude/notifications/agy/c-native.native-stop" ]] \
+    || fail "native Stop did not record the per-conversation marker"
+run_agy_notifier "$fake_path" "PostToolUse" \
+    "{\"conversationId\":\"c-native\",\"error\":\"\",$(ws projNative)}"
+sleep 2
+native_count="$(grep -c "Task Complete - projNative" "$notification_log")"
+[[ "$native_count" == "1" ]] \
+    || fail "expected exactly 1 completion for projNative, got $native_count (fallback watcher armed despite native Stop)"
 
 # 9) Settle gate: inside tmux, a pane still painting after the last step means
 #    the model is generating — the watcher must postpone the completion until

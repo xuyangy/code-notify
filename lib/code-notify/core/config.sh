@@ -2893,19 +2893,21 @@ PYTHON
 # Antigravity CLI (agy) Configuration
 # ============================================
 #
-# Notes from live testing against agy 1.0.11:
+# Notes from live testing against agy 1.0.11 and 1.1.3:
 #   * Hooks load from imported plugins (`agy plugin install <dir>`), NOT from a
 #     settings.json hooks key.
-#   * Only the tool hooks PreToolUse/PostToolUse actually execute commands; the
-#     lifecycle hooks PreInvocation/PostInvocation/Stop are dispatched but inert
-#     in this build (kept ready for when agy wires them up).
+#   * In 1.0.x only the tool hooks PreToolUse/PostToolUse actually executed;
+#     since 1.1.3 the lifecycle hooks (PreInvocation/PostInvocation/Stop) run
+#     too, and the hooks.json schema requires them as FLAT handler lists.
 #   * agy passes NO argv to a hook command and reads the hook's stdout as
 #     protojson, so each hook is a fixed wrapper script that pipes agy's stdin
 #     payload into the notifier and prints nothing.
-# Mapping: PreToolUse (every tool) -> cancel the pending debounce (still working)
-# plus a run_command-scoped "input needed" approval banner; PostToolUse ->
-# debounced "task complete" plus immediate error alerts; Stop -> dormant "task
-# complete".
+# Mapping: PreInvocation (every model call) -> running indicator from prompt
+# submission + cancel the pending debounce (still working); PreToolUse (every
+# tool) -> the same cancel plus a run_command-scoped "input needed" approval
+# banner; PostToolUse -> fallback debounced "task complete" plus immediate
+# error alerts; Stop -> native "task complete" (or failure alert when the turn
+# ended with an error).
 
 # Check if Antigravity notifications are enabled (plugin imported AND active).
 is_antigravity_enabled() {
@@ -2990,6 +2992,7 @@ enable_antigravity_hooks() {
 EOF
 
     # One wrapper per event (event baked in; agy passes no argv)
+    write_agy_hook_wrapper "$staging/hooks/preinvocation.sh" "PreInvocation" "$notify_script"
     write_agy_hook_wrapper "$staging/hooks/pretooluse.sh"  "PreToolUse"  "$notify_script"
     write_agy_hook_wrapper "$staging/hooks/posttooluse.sh" "PostToolUse" "$notify_script"
     write_agy_hook_wrapper "$staging/hooks/stop.sh"        "Stop"        "$notify_script"
@@ -3009,18 +3012,24 @@ EOF
 EOF
 )
 
-    # hooks.json. PostToolUse powers the debounced "task complete" plus error
-    # alerts. Since agy 1.1.3 lifecycle events (Stop) take a FLAT list of
-    # handler objects — wrapping them in {"hooks": [...]} like the tool events
-    # fails validation ("command hook must specify 'command'") and the whole
-    # file is rejected, silently disabling every hook. Only PreToolUse and
-    # PostToolUse keep the grouped {"matcher", "hooks"} shape.
+    # hooks.json. PreInvocation (before every model call — agy's de-facto
+    # prompt-submit event) lights the running indicator from the start of a
+    # turn; PostToolUse powers the fallback debounced "task complete" plus
+    # error alerts; Stop delivers the native turn-end (completion or failure).
+    # Since agy 1.1.3 lifecycle events (PreInvocation/Stop) take a FLAT list
+    # of handler objects — wrapping them in {"hooks": [...]} like the tool
+    # events fails validation ("command hook must specify 'command'") and the
+    # whole file is rejected, silently disabling every hook. Only PreToolUse
+    # and PostToolUse keep the grouped {"matcher", "hooks"} shape.
     cat > "$ANTIGRAVITY_HOOKS_FILE" <<EOF
 {
   "$ANTIGRAVITY_PLUGIN_NAME": {
 $pre_tool_use_block
     "PostToolUse": [
       { "matcher": "", "hooks": [ { "type": "command", "command": "$(agy_shell_quote "$staging/hooks/posttooluse.sh")" } ] }
+    ],
+    "PreInvocation": [
+      { "type": "command", "command": "$(agy_shell_quote "$staging/hooks/preinvocation.sh")" }
     ],
     "Stop": [
       { "type": "command", "command": "$(agy_shell_quote "$staging/hooks/stop.sh")" }

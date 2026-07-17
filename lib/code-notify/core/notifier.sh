@@ -786,8 +786,8 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
             AGY_STOP_FINAL_CLEANUP=1
             ;;
         Stop)
-            # Native lifecycle Stop (inert in agy 1.0.11, ready for when it
-            # lands). A real turn-end supersedes our PostToolUse guess, so cancel
+            # Native lifecycle Stop (executes since agy 1.1.3; was inert in
+            # 1.0.x). A real turn-end supersedes our PostToolUse guess, so cancel
             # any pending debounced completion for this conversation to avoid a
             # duplicate "task complete" from the watcher.
             HOOK_TYPE="stop"

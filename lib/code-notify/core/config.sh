@@ -3010,7 +3010,11 @@ EOF
 )
 
     # hooks.json. PostToolUse powers the debounced "task complete" plus error
-    # alerts. Stop is included but currently inert in agy 1.0.11.
+    # alerts. Since agy 1.1.3 lifecycle events (Stop) take a FLAT list of
+    # handler objects — wrapping them in {"hooks": [...]} like the tool events
+    # fails validation ("command hook must specify 'command'") and the whole
+    # file is rejected, silently disabling every hook. Only PreToolUse and
+    # PostToolUse keep the grouped {"matcher", "hooks"} shape.
     cat > "$ANTIGRAVITY_HOOKS_FILE" <<EOF
 {
   "$ANTIGRAVITY_PLUGIN_NAME": {
@@ -3019,7 +3023,7 @@ $pre_tool_use_block
       { "matcher": "", "hooks": [ { "type": "command", "command": "$(agy_shell_quote "$staging/hooks/posttooluse.sh")" } ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "$(agy_shell_quote "$staging/hooks/stop.sh")" } ] }
+      { "type": "command", "command": "$(agy_shell_quote "$staging/hooks/stop.sh")" }
     ]
   }
 }

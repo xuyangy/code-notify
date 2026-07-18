@@ -404,6 +404,26 @@ native_count="$(grep -c "Task Complete - projNative" "$notification_log")"
 [[ "$native_count" == "1" ]] \
     || fail "expected exactly 1 completion for projNative, got $native_count (fallback watcher armed despite native Stop)"
 
+# 8e) Regression: a PreToolUse that banners (unlisted MCP tool -> ask) must
+#     never light the running indicator on its way to the pause. Starting it
+#     just to stop it milliseconds later strobed the window between spinner
+#     and waiting badge when agy queued several permission asks back to back.
+#     The fake tmux logs every call: after the banner, no set (as opposed to
+#     unset, -wu) of @code_notify_running may have been issued.
+rm -f "$FAKE_TMUX_STATE/@2.@code_notify_running"
+tmux_lines_before="$(wc -l < "$FAKE_TMUX_LOG")"
+run_agy_notifier "$fake_path" "PreToolUse" \
+    "{\"conversationId\":\"c-noflash\",\"toolCall\":{\"name\":\"call_mcp_tool\",\"args\":{\"ServerName\":\"codebase-memory-mcp\",\"ToolName\":\"get_code_snippet\",\"Arguments\":{}}},$(ws projNoFlash)}"
+grep -q "Input Required - projNoFlash" "$notification_log" \
+    || fail "queued-approval PreToolUse did not banner"
+tail -n "+$((tmux_lines_before + 1))" "$FAKE_TMUX_LOG" \
+    | grep -qE 'set-option -w -t @2 @code_notify_running [0-9]' \
+    && fail "banner PreToolUse lit the running indicator (spinner flash before the pause)"
+[[ ! -f "$FAKE_TMUX_STATE/@2.@code_notify_running" ]] \
+    || fail "banner PreToolUse left the running marker set"
+[[ -f "$FAKE_TMUX_STATE/@2.@code_notify_resume_pending" ]] \
+    || fail "banner PreToolUse did not install the resume-pending pause"
+
 # 9) Settle gate: inside tmux, a pane still painting after the last step means
 #    the model is generating — the watcher must postpone the completion until
 #    the pane holds still for a full quiet window, then fire it. The fake tmux

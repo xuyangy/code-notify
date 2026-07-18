@@ -748,6 +748,18 @@ agy_start_running_locked() {
     agy_maybe_start_running
 }
 
+# PreToolUse for a call that is about to pause for approval: the turn is not
+# done (cancel the debounce) and the first post-approval PreToolUse must
+# re-light the indicator (drop the marker), but the running indicator itself
+# stays untouched — starting it here would clear the waiting badge and flash
+# the spinner for the instant before the banner pauses it again. With several
+# permission asks queued (agy dispatches parallel tool calls back to back)
+# that start/pause cycle strobed the window between spinner and badge.
+agy_banner_locked() {
+    cancel_agy_debounced_stop
+    agy_clear_running_marker
+}
+
 agy_stop_final_locked() {
     local expected_token="$1" current_token
     current_token="$(cat "$(agy_debounce_tokenfile)" 2>/dev/null || true)"
@@ -904,9 +916,6 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
             # Without this, a tool that outlives the debounce window (e.g. a slow
             # file read between two quick steps) lets the previous step's watcher
             # fire a bogus "task complete" mid-turn.
-            # Cancel the debounce and possibly start tmux as one transaction
-            # with StopFinal, so a completion cannot stop a newly started turn.
-            agy_with_running_lock agy_start_running_locked || true
             # The approval banner is only meaningful for calls that pause for
             # the user — run_command and MCP tools (call_mcp_tool dispatch, or
             # eager mcp_<server>_<tool> registrations) — only when
@@ -915,6 +924,9 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
             # "git status", an mcp(server/*) allow rule) fire PreToolUse too
             # but never prompt, so bannering them is just noise. Every other
             # tool start is silent — it just cancelled the debounce.
+            # The banner decision comes BEFORE the running-indicator start: a
+            # call that is about to pause must not light the spinner only for
+            # the banner to pause it milliseconds later (see agy_banner_locked).
             agy_tool_name="$(get_agy_tool_name)"
             agy_needs_banner=""
             if agy_permission_prompt_enabled; then
@@ -931,13 +943,19 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
                 HOOK_TYPE="notification"
                 AGY_FORCED_SUBTYPE="permission_prompt"
                 # This notification pauses the running indicator further down.
-                # Drop the marker so the next PreToolUse — the first tool call
+                # Under the same lock StopFinal uses (so a stale completion
+                # cannot race the transition), cancel the debounce and drop
+                # the marker so the next PreToolUse — the first tool call
                 # after the user approves — re-lights it via tmux_running_start
                 # (which also retires the window's resume-pending flag). agy
                 # has no PostToolUse resume shim, so without this the indicator
                 # would stay paused for the rest of the turn.
-                agy_clear_running_marker
+                agy_with_running_lock agy_banner_locked || true
             else
+                # Cancel the debounce and possibly start tmux as one transaction
+                # with StopFinal, so a completion cannot stop a newly started
+                # turn.
+                agy_with_running_lock agy_start_running_locked || true
                 exit 0
             fi
             ;;

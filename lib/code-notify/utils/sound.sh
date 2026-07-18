@@ -124,6 +124,50 @@ play_sound() {
     esac
 }
 
+# Play sound and wait for playback to finish. The speech path uses this so a
+# queued speaker keeps the speech lock for the full utterance (`say` already
+# blocks; ElevenLabs audio must too). The notification chime keeps using the
+# backgrounded play_sound above.
+play_sound_sync() {
+    local sound_file="${1:-$(get_sound)}"
+
+    if [[ -z "$sound_file" ]] || [[ ! -f "$sound_file" ]]; then
+        return 0
+    fi
+
+    local os
+    os=$(detect_os 2>/dev/null || uname -s | tr '[:upper:]' '[:lower:]')
+
+    case "$os" in
+        "macos"|"Darwin"|"darwin")
+            if command -v afplay &> /dev/null; then
+                afplay "$sound_file" &>/dev/null
+            fi
+            ;;
+        "linux"|"Linux")
+            if command -v paplay &> /dev/null; then
+                paplay "$sound_file" &>/dev/null
+            elif command -v aplay &> /dev/null; then
+                aplay "$sound_file" &>/dev/null
+            elif command -v ffplay &> /dev/null; then
+                ffplay -nodisp -autoexit "$sound_file" &>/dev/null
+            elif command -v mpv &> /dev/null; then
+                mpv --no-video --really-quiet "$sound_file" &>/dev/null
+            fi
+            ;;
+        "wsl")
+            local win_path
+            win_path=$(wslpath -w "$sound_file" 2>/dev/null || echo "$sound_file")
+            if command -v powershell.exe &> /dev/null; then
+                powershell.exe -Command "(New-Object Media.SoundPlayer '$win_path').PlaySync()" &>/dev/null
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 # Play sound on macOS
 play_sound_macos() {
     local sound_file="$1"

@@ -2357,6 +2357,11 @@ function Invoke-CodeNotify {
             switch ($SubCommand) {
                 "on" { Enable-Voice }
                 "off" { Disable-Voice }
+                "queue" {
+                    # The speech queue (serialized voice playback) is macOS-only;
+                    # the Windows notifier speaks via SpeakAsync without queueing.
+                    Write-Host "[-] 'cn voice queue' is not supported on Windows (macOS only)." -ForegroundColor Yellow
+                }
                 default {
                     if (Test-Path $script:VoiceFile) {
                         $voice = Get-Content $script:VoiceFile

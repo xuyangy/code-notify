@@ -209,6 +209,7 @@ See [docs/installation.md](docs/installation.md) for more details.
 | `cn voice on claude` | Enable voice for Claude only                 |
 | `cn voice engine elevenlabs` | Use ElevenLabs cloud voice (macOS)   |
 | `cn voice elevenlabs key <key>` | Store your ElevenLabs API key     |
+| `cn voice queue on`  | Speak overlapping voices one at a time (macOS) |
 | `cnp on`             | Enable for current project only              |
 
 When enabling project notifications with `cnp on`, Code-Notify warns if Claude project trust does not appear to be accepted yet.
@@ -496,6 +497,30 @@ cn snooze status
 cn snooze off
 ```
 
+### Voice Queue
+
+When several agents finish at the same time (parallel sessions, sub-agents), each
+completion speaks its own announcement and the voices can overlap. `cn voice queue on`
+opts into serialized speech: concurrent utterances wait their turn and play one at a
+time, an identical phrase arriving within `CODE_NOTIFY_SPEECH_DEDUP_SECONDS` (default
+10) of the previous one is spoken once, and a phrase still waiting after
+`CODE_NOTIFY_SPEECH_MAX_WAIT_SECONDS` (default 15) is dropped instead of spoken
+stale — the banner already delivered it. Dropped phrases are logged to
+`~/.claude/logs/notifications.log` with a `[speech]` tag. A crashed speaker's
+lock is reclaimed automatically, and a hung one can only ever stall the queue
+for `CODE_NOTIFY_SPEECH_LOCK_TTL_SECONDS` (default 60, 0 disables the bound).
+
+```bash
+cn voice queue on       # Speak overlapping voices one at a time
+cn voice queue off      # Default: play every voice immediately (may overlap)
+cn voice queue status
+```
+
+The queue is off by default so nothing changes unless you opt in. For a single
+session, `CODE_NOTIFY_SPEECH_SERIALIZE=true` (or `false`) overrides the stored
+setting in either direction. The queue is macOS-only: the Windows notifier
+speaks asynchronously and does not implement it.
+
 ### ElevenLabs Voices
 
 By default, voice announcements use the built-in macOS voice (`say`). You can switch to [ElevenLabs](https://elevenlabs.io) for higher-quality cloud voices.
@@ -516,6 +541,7 @@ Notes:
 - ElevenLabs voice applies on macOS. If a call fails (no key, network error, or quota exhausted), Code-Notify automatically falls back to the built-in `say` voice so you still hear the announcement. `cn voice elevenlabs test` reports the specific API error when it fails.
 - `cn voice elevenlabs list` shows each voice's category and plan. Voices marked `paid only` (ElevenLabs `professional`/`library` voices) require a paid ElevenLabs plan; voices marked `free ok` (e.g. `premade`) work on the free tier.
 - Synthesized audio is cached in `~/.cache/code-notify/tts/`, so repeated selected phrases do not make repeat API calls. Cache filenames include the project name and their timestamp is refreshed on use, making stale entries easy to prune by age.
+- A failed synthesis (outage, invalid key, quota) is not retried for the same phrase within `CODE_NOTIFY_TTS_FAIL_BACKOFF_SECONDS` (default 30, 0 disables) — a burst of identical events during an outage makes one request, and the rest fall back to `say` immediately instead of each repeating the doomed call.
 - Your API key is stored locally in `~/.config/code-notify/tts.json` (permissions `600`) and is redacted in `cn voice status`.
 - `eleven_flash_v2_5` is the default model — it is the fastest and cheapest, which suits short notification phrases. Use `eleven_multilingual_v2` for higher quality.
 

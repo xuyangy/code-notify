@@ -920,6 +920,10 @@ handle_voice_command() {
             handle_voice_elevenlabs_command "$@"
             return $?
             ;;
+        "queue")
+            handle_voice_queue_command "${2:-}"
+            return $?
+            ;;
         "on")
             header "${SPEAKER} Enabling Voice Notifications"
             echo ""
@@ -963,6 +967,33 @@ handle_voice_command() {
 
         "status"|*)
             show_voice_status
+            ;;
+    esac
+}
+
+# Opt-in serialization of concurrent voice notifications: with the queue on,
+# simultaneous completions speak one at a time instead of overlapping.
+handle_voice_queue_command() {
+    local action="${1:-status}"
+
+    case "$action" in
+        "on")
+            enable_speech_queue
+            success "Voice queue ENABLED - overlapping voices now speak one at a time"
+            echo "  Waiting phrases are dropped after ${CODE_NOTIFY_SPEECH_MAX_WAIT_SECONDS:-15}s; identical phrases within ${CODE_NOTIFY_SPEECH_DEDUP_SECONDS:-10}s speak once"
+            ;;
+        "off")
+            disable_speech_queue
+            success "Voice queue DISABLED - voices play immediately (may overlap)"
+            ;;
+        "status"|*)
+            if speech_queue_enabled; then
+                info "Voice queue: ${GREEN}ENABLED${RESET} (concurrent voices speak one at a time)"
+            else
+                info "Voice queue: ${YELLOW}DISABLED${RESET} (voices play immediately, may overlap)"
+            fi
+            echo "  ${CYAN}cn voice queue on${RESET}   Serialize overlapping voices"
+            echo "  ${CYAN}cn voice queue off${RESET}  Play every voice immediately"
             ;;
     esac
 }
@@ -1112,6 +1143,12 @@ show_voice_status() {
         echo "  ${DIM}- Engine: system voice (say)${RESET}"
     fi
 
+    if speech_queue_enabled; then
+        echo "  ${CHECK_MARK} Queue: ${GREEN}ENABLED${RESET} (concurrent voices speak one at a time)"
+    else
+        echo "  ${DIM}- Queue: off (voices play immediately, may overlap)${RESET}"
+    fi
+
     echo ""
     info "Commands:"
     echo "  ${CYAN}cn voice on${RESET}              Enable for all tools"
@@ -1120,6 +1157,7 @@ show_voice_status() {
     echo "  ${CYAN}cn voice off codex${RESET}       Disable for Codex only"
     echo "  ${CYAN}cn voice engine elevenlabs${RESET}  Switch to ElevenLabs cloud voice"
     echo "  ${CYAN}cn voice elevenlabs${RESET}      Configure ElevenLabs (key, voice, model)"
+    echo "  ${CYAN}cn voice queue on${RESET}        Speak overlapping voices one at a time"
 }
 
 # ============================================

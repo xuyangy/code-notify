@@ -82,6 +82,7 @@ ${BOLD}VOICE COMMANDS:${RESET}
     ${GREEN}voice off${RESET}           Disable all voice
     ${GREEN}voice off${RESET} <tool>    Disable voice for specific tool
     ${GREEN}voice status${RESET}        Show voice settings
+    ${GREEN}voice queue${RESET} on|off  Speak overlapping voices one at a time (macOS; off: play immediately)
 
 ${BOLD}WORDING COMMANDS:${RESET}
     ${GREEN}wording status${RESET}                     Show wording and project-name settings

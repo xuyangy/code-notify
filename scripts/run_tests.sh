@@ -254,6 +254,13 @@ else
     test_fail "tts cache project separation failed"
 fi
 
+test_start "speech queue"
+if run_test_script tests/test-speech-queue.sh; then
+    test_pass
+else
+    test_fail "speech queue failed"
+fi
+
 test_start "usage alerts"
 if run_test_script tests/test-usage-alerts.sh; then
     test_pass

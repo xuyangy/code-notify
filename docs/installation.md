@@ -50,13 +50,13 @@ On macOS, Linux, or WSL, set `CODE_NOTIFY_REF` to a release tag. The installer
 itself comes from `main`, then downloads the source for the selected tag:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | CODE_NOTIFY_REF=v2026.07.1 bash
+curl -sSL https://raw.githubusercontent.com/xuyangy/code-notify/main/scripts/install.sh | CODE_NOTIFY_REF=v2026.07.2 bash
 ```
 
 On Windows, fetch the self-contained installer from that tag:
 
 ```powershell
-irm https://raw.githubusercontent.com/xuyangy/code-notify/v2026.07.1/scripts/install-windows.ps1 | iex
+irm https://raw.githubusercontent.com/xuyangy/code-notify/v2026.07.2/scripts/install-windows.ps1 | iex
 ```
 
 Release downloads are source-only; no Homebrew formula, npm package, or compiled

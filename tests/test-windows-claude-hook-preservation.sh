@@ -89,6 +89,7 @@ try {
     $settings = Get-Content $script:SettingsFile -Raw | ConvertFrom-Json -ErrorAction Stop
     $notifyCommand = Get-ClaudeNotifyCommand -NotifyScript (Get-NotifyScript)
     $stopCommand = Get-ClaudeStopCommand -NotifyScript (Get-NotifyScript)
+    $stopFailureCommand = Get-ClaudeStopFailureCommand -NotifyScript (Get-NotifyScript)
 
     if (-not $settings.hooks.PSObject.Properties['PreToolUse']) {
         throw "PreToolUse hook was removed during enable"
@@ -101,6 +102,9 @@ try {
     }
     if (-not (Test-HookEntriesContainCommand -Entries @($settings.hooks.Stop) -Matcher "" -Command $stopCommand)) {
         throw "current Claude Stop hook was not added"
+    }
+    if (-not (Test-HookEntriesContainCommand -Entries @($settings.hooks.StopFailure) -Matcher "" -Command $stopFailureCommand)) {
+        throw "current Claude StopFailure hook was not added"
     }
     if ($settings.hooks.PSObject.Properties['PermissionRequest']) {
         throw "PermissionRequest should not be installed when permission_prompt is disabled"
@@ -127,6 +131,9 @@ try {
     }
     if ($settings.hooks.PSObject.Properties['Stop']) {
         throw "managed Stop hook should be removed during disable"
+    }
+    if ($settings.hooks.PSObject.Properties['StopFailure']) {
+        throw "managed StopFailure hook should be removed during disable"
     }
     if ($settings.hooks.PSObject.Properties['PermissionRequest']) {
         throw "managed PermissionRequest hook should be removed during disable"

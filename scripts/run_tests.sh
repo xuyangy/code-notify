@@ -379,6 +379,14 @@ else
     test_fail "opencode hook suppression failed"
 fi
 
+# Test 26: StopFailure hook installs/removes and classifies limit vs error
+test_start "StopFailure limit-reached hook"
+if run_test_script tests/test-stop-failure-hook.sh; then
+    test_pass
+else
+    test_fail "StopFailure limit-reached hook failed"
+fi
+
 # Summary
 echo ""
 echo "Test Summary:"

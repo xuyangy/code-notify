@@ -88,6 +88,17 @@ EOF
           }
         ]
       }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$(get_project_claude_stop_failure_command "project")"
+          }
+        ]
+      }
     ]
   }
 }

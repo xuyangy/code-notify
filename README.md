@@ -332,6 +332,14 @@ For Claude Code, it adds hooks like:
         ]
       }
     ],
+    "StopFailure": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "notify.sh StopFailure claude" }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "matcher": "",
@@ -348,6 +356,14 @@ The Claude `PermissionRequest` hook is installed only when `permission_prompt`
 is enabled. It fires as the approval dialog is created, so the alert is not
 delayed when the Ctrl+O verbose transcript is open. Claude's `Notification`
 hook continues to handle idle, authentication, and MCP-input alerts.
+
+`StopFailure` fires when a turn ends on an API error instead of a normal
+`Stop` — most notably when the usage limit is reached mid-task and you choose
+to stop and wait. A `rate_limit` failure pauses the tmux running indicator
+(the spinner stops instead of spinning forever) and badges the window ⏳ with
+a "Limit Reached" alert; the indicator comes back when the turn resumes or
+you submit the next prompt. Any other error class (server error, billing,
+etc.) is delivered as a regular 🧨 failure alert.
 
 For Codex, it manages hooks like:
 

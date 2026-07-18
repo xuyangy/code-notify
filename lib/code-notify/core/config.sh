@@ -297,6 +297,19 @@ get_project_claude_stop_command() {
     printf '%s stop claude %s\n' "$(shell_quote "$(get_notify_script)")" "$(shell_quote "$project_name")"
 }
 
+# StopFailure fires when a turn ends on an API error (usage limit reached,
+# server error, ...) — Claude Code sends no Stop event then, so without this
+# hook the tmux running indicator keeps spinning after "stop and wait for the
+# limit to reset".
+get_global_claude_stop_failure_command() {
+    printf '%s StopFailure claude\n' "$(get_notify_script)"
+}
+
+get_project_claude_stop_failure_command() {
+    local project_name="$1"
+    printf '%s StopFailure claude %s\n' "$(shell_quote "$(get_notify_script)")" "$(shell_quote "$project_name")"
+}
+
 get_global_claude_pre_tool_use_command() {
     printf '%s PreToolUse claude\n' "$(get_notify_script)"
 }
@@ -392,6 +405,10 @@ get_managed_claude_permission_request_pattern() {
 
 get_managed_claude_stop_pattern() {
     printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*stop(?:\s|$)'
+}
+
+get_managed_claude_stop_failure_pattern() {
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*StopFailure(?:\s|$)'
 }
 
 get_managed_codex_hook_pattern() {
@@ -566,6 +583,7 @@ has_current_global_claude_hooks() {
     has_empty_matcher_lifecycle_command "$file" "UserPromptSubmit" "$(get_global_claude_user_prompt_command)" || return 1
     has_empty_matcher_lifecycle_command "$file" "PostToolUse" "$(get_global_claude_post_tool_command)" || return 1
     has_empty_matcher_lifecycle_command "$file" "PreToolUse" "$(get_global_claude_resume_after_input_command)" || return 1
+    has_empty_matcher_lifecycle_command "$file" "StopFailure" "$(get_global_claude_stop_failure_command)" || return 1
     has_expected_claude_permission_request_hook "$file" "$(get_global_claude_notify_command)"
 }
 
@@ -583,6 +601,7 @@ has_current_project_claude_hooks() {
     has_empty_matcher_lifecycle_command "$file" "UserPromptSubmit" "$(get_project_claude_user_prompt_command "$project_name")" || return 1
     has_empty_matcher_lifecycle_command "$file" "PostToolUse" "$(get_project_claude_post_tool_command "$project_name")" || return 1
     has_empty_matcher_lifecycle_command "$file" "PreToolUse" "$(get_project_claude_resume_after_input_command "$project_name")" || return 1
+    has_empty_matcher_lifecycle_command "$file" "StopFailure" "$(get_project_claude_stop_failure_command "$project_name")" || return 1
     has_expected_claude_permission_request_hook "$file" "$(get_project_claude_notify_command "$project_name")"
 }
 
@@ -1906,6 +1925,22 @@ unregister_claude_permission_request_hook() {
         "$file" "PermissionRequest" "$command" "$(get_managed_claude_permission_request_pattern)"
 }
 
+# A turn that dies on an API error (usage limit, server error) emits
+# StopFailure instead of Stop. The notifier needs that event to take down the
+# running indicator and badge the window, so the hook installs unconditionally
+# alongside Stop rather than behind an alert type.
+register_claude_stop_failure_hook() {
+    local file="$1" command="$2"
+    register_empty_matcher_lifecycle_hook \
+        "$file" "StopFailure" "$command" "$(get_managed_claude_stop_failure_pattern)"
+}
+
+unregister_claude_stop_failure_hook() {
+    local file="$1" command="$2"
+    unregister_empty_matcher_lifecycle_hook \
+        "$file" "StopFailure" "$command" "$(get_managed_claude_stop_failure_pattern)"
+}
+
 has_expected_claude_permission_request_hook() {
     local file="$1" command="$2"
     if is_notify_type_enabled "permission_prompt"; then
@@ -1942,6 +1977,10 @@ enable_hooks_in_settings() {
         "$(get_global_claude_post_tool_command)" \
         "$(get_global_claude_resume_after_input_command)" || return 1
 
+    register_claude_stop_failure_hook \
+        "$GLOBAL_SETTINGS_FILE" \
+        "$(get_global_claude_stop_failure_command)" || return 1
+
     register_claude_permission_request_hook \
         "$GLOBAL_SETTINGS_FILE" \
         "$(get_global_claude_notify_command)"
@@ -1972,6 +2011,10 @@ disable_hooks_in_settings() {
         "$GLOBAL_SETTINGS_FILE" \
         "$(get_global_claude_post_tool_command)" \
         "$(get_global_claude_resume_after_input_command)" || return 1
+
+    unregister_claude_stop_failure_hook \
+        "$GLOBAL_SETTINGS_FILE" \
+        "$(get_global_claude_stop_failure_command)" || return 1
 
     unregister_claude_permission_request_hook \
         "$GLOBAL_SETTINGS_FILE" \
@@ -2008,6 +2051,10 @@ disable_project_hooks_in_settings() {
         "$(get_project_claude_post_tool_command "$project_name")" \
         "$(get_project_claude_resume_after_input_command "$project_name")" || return 1
 
+    unregister_claude_stop_failure_hook \
+        "$project_settings" \
+        "$(get_project_claude_stop_failure_command "$project_name")" || return 1
+
     unregister_claude_permission_request_hook \
         "$project_settings" \
         "$(get_project_claude_notify_command "$project_name")"
@@ -2042,6 +2089,10 @@ enable_project_hooks_in_settings() {
         "$project_settings" \
         "$(get_project_claude_post_tool_command "$project_name")" \
         "$(get_project_claude_resume_after_input_command "$project_name")" || return 1
+
+    register_claude_stop_failure_hook \
+        "$project_settings" \
+        "$(get_project_claude_stop_failure_command "$project_name")" || return 1
 
     register_claude_permission_request_hook \
         "$project_settings" \

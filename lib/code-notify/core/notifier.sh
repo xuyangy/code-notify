@@ -150,6 +150,12 @@ print(value if isinstance(value, str) else "", end="")
         "tool_name")
             printf '%s' "$json" | sed -nE 's/.*"tool_name"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
             ;;
+        "error")
+            # StopFailure payloads carry the API error class here (rate_limit,
+            # server_error, ...); it selects the limit-reached badge. The
+            # pattern anchors on the colon so "error_details" cannot match.
+            printf '%s' "$json" | sed -nE 's/.*"error"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1
+            ;;
     esac
 }
 
@@ -1456,6 +1462,23 @@ if [[ "$HOOK_TYPE" == "notification" ]]; then
     fi
 fi
 
+# StopFailure fires when a turn ends on an API error instead of a Stop event
+# (Claude Code sends no Stop then, so nothing else would take the running
+# indicator down). The payload's "error" field carries the error class:
+# rate_limit is the "usage limit reached, stop and wait" outcome — kept as
+# its own hook type for a distinct badge and pause-style resume semantics;
+# every other class (or an unreadable payload — the safe default) is a plain
+# failure and is folded into the existing error path. Only the structured
+# field decides: a raw-substring fallback would misclassify failures whose
+# error_details or last_assistant_message merely mention "rate_limit".
+STOP_FAILURE_ERROR_TYPE=""
+if [[ "$HOOK_TYPE" == "StopFailure" ]]; then
+    STOP_FAILURE_ERROR_TYPE=$(json_extract_string "$HOOK_DATA" "error")
+    if [[ "$STOP_FAILURE_ERROR_TYPE" != "rate_limit" ]]; then
+        HOOK_TYPE="error"
+    fi
+fi
+
 # Prefer the specific AskUserQuestion notification over Claude's immediately
 # following generic permission alert. Exit before any running-state, badge,
 # audio, channel, or desktop-notification side effects so the 🙋 state remains
@@ -1536,6 +1559,14 @@ case "$HOOK_TYPE" in
         # the same turn without a UserPromptSubmit event.
         tmux_running_pause_for_input 2>/dev/null || true
         ;;
+    "StopFailure")
+        # The usage limit ended the turn mid-task. Pause rather than stop: the
+        # turn may continue when the limit resets, and PostToolUse (or the
+        # user's next prompt) re-lights the running indicator via the
+        # resume-pending marker. No pane watch — repaints of the limit dialog
+        # or its countdown must not be mistaken for the turn resuming.
+        tmux_running_pause_for_input 2>/dev/null || true
+        ;;
     "stop"|"error"|"failed")
         if [[ "$AGY_STOP_FINAL_CLEANUP" != "1" ]]; then
             tmux_running_stop 2>/dev/null || true
@@ -1559,7 +1590,7 @@ esac
 # Check if notification should be suppressed. "error" is included so that the
 # kill switch (cn off) and snooze silence failure alerts too — they are still
 # notifications and must honour an explicit request for quiet.
-if [[ "$HOOK_TYPE" == "stop" ]] || [[ "$HOOK_TYPE" == "notification" ]] || [[ "$HOOK_TYPE" == "error" ]] || [[ "$HOOK_TYPE" == "PreToolUse" ]] || is_claude_event_hook; then
+if [[ "$HOOK_TYPE" == "stop" ]] || [[ "$HOOK_TYPE" == "notification" ]] || [[ "$HOOK_TYPE" == "error" ]] || [[ "$HOOK_TYPE" == "StopFailure" ]] || [[ "$HOOK_TYPE" == "PreToolUse" ]] || is_claude_event_hook; then
     if should_suppress_notification; then
         exit 0
     fi
@@ -1819,6 +1850,24 @@ case "$HOOK_TYPE" in
             "$TOOL_DISPLAY team task is done")
         VOICE_MESSAGE="$MESSAGE"
         SOUND="Glass"
+        ;;
+    "StopFailure")
+        # Only the rate_limit error class keeps this hook type (others were
+        # normalized to "error" above): the session/usage limit ended the turn.
+        TITLE="$TOOL_DISPLAY ⏳"
+        BADGE_ICON="⏳"
+        SUBTITLE="Limit Reached"
+        set_event_messages \
+            "$TOOL_DISPLAY hit the usage limit" \
+            "$TOOL_DISPLAY reached the session limit" \
+            "$TOOL_DISPLAY is paused at the usage limit" \
+            "$TOOL_DISPLAY stopped at the usage limit" \
+            -- \
+            "Heads up! $TOOL_DISPLAY hit the usage limit and is waiting for it to reset" \
+            "$TOOL_DISPLAY reached the session limit, so the task is paused until it resets" \
+            "Limit reached! $TOOL_DISPLAY stopped mid-task until your usage resets" \
+            "$TOOL_DISPLAY is waiting out the usage limit before it can continue"
+        SOUND="Basso"
         ;;
     "error"|"failed")
         TITLE="$TOOL_DISPLAY 🧨"
@@ -2209,7 +2258,7 @@ if [[ -n "$BADGE_ICON" ]]; then
     # badges the window, focused or not.
     BADGE_VISIBLE_ACTION="skip"
     case "$HOOK_TYPE" in
-        "stop"|"error"|"failed")
+        "stop"|"error"|"failed"|"StopFailure")
             BADGE_VISIBLE_ACTION="apply"
             ;;
     esac

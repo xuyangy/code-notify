@@ -769,6 +769,14 @@ function Get-ClaudeStopCommand {
     return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" stop claude"
 }
 
+# StopFailure fires when a turn ends on an API error (usage limit reached,
+# server error, ...) - Claude Code sends no Stop event then, so this hook is
+# the only signal that the task is no longer running.
+function Get-ClaudeStopFailureCommand {
+    param([string]$NotifyScript)
+    return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" StopFailure claude"
+}
+
 function Get-CodexStopCommand {
     param([string]$NotifyScript)
     return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" stop codex"
@@ -785,6 +793,10 @@ function Get-ManagedClaudeNotificationPattern {
 
 function Get-ManagedClaudeStopPattern {
     return '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*stop(?:\s|$)'
+}
+
+function Get-ManagedClaudeStopFailurePattern {
+    return '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*StopFailure(?:\s|$)'
 }
 
 function Get-ManagedCodexHookPattern {
@@ -961,12 +973,15 @@ function Update-ClaudeSettingsHooks {
 
     $notifyCommand = Get-ClaudeNotifyCommand -NotifyScript $NotifyScript
     $stopCommand = Get-ClaudeStopCommand -NotifyScript $NotifyScript
+    $stopFailureCommand = Get-ClaudeStopFailureCommand -NotifyScript $NotifyScript
     $notificationPattern = Get-ManagedClaudeNotificationPattern
     $stopPattern = Get-ManagedClaudeStopPattern
+    $stopFailurePattern = Get-ManagedClaudeStopFailurePattern
 
     $notificationEntries = Remove-ManagedClaudeHookEntries -Entries @($Settings.hooks.Notification) -ExactCommand $notifyCommand -Pattern $notificationPattern
     $permissionEntries = Remove-ManagedClaudeHookEntries -Entries @($Settings.hooks.PermissionRequest) -ExactCommand $notifyCommand -Pattern $notificationPattern
     $stopEntries = Remove-ManagedClaudeHookEntries -Entries @($Settings.hooks.Stop) -ExactCommand $stopCommand -Pattern $stopPattern
+    $stopFailureEntries = Remove-ManagedClaudeHookEntries -Entries @($Settings.hooks.StopFailure) -ExactCommand $stopFailureCommand -Pattern $stopFailurePattern
 
     if (-not $Disable) {
         $notificationEntries += [PSCustomObject]@{
@@ -1001,6 +1016,15 @@ function Update-ClaudeSettingsHooks {
                 }
             )
         }
+        $stopFailureEntries += [PSCustomObject]@{
+            matcher = ""
+            hooks = @(
+                [PSCustomObject]@{
+                    type = "command"
+                    command = $stopFailureCommand
+                }
+            )
+        }
     }
 
     if ($notificationEntries.Count -gt 0) {
@@ -1019,6 +1043,12 @@ function Update-ClaudeSettingsHooks {
         $Settings.hooks | Add-Member -Force -NotePropertyName Stop -NotePropertyValue $stopEntries
     } else {
         $Settings.hooks.PSObject.Properties.Remove("Stop")
+    }
+
+    if ($stopFailureEntries.Count -gt 0) {
+        $Settings.hooks | Add-Member -Force -NotePropertyName StopFailure -NotePropertyValue $stopFailureEntries
+    } else {
+        $Settings.hooks.PSObject.Properties.Remove("StopFailure")
     }
 
     if ((Get-ObjectPropertyNames $Settings.hooks).Count -eq 0) {
@@ -1045,6 +1075,7 @@ function Test-ClaudeSettingsCurrentHooks {
 
     $notifyCommand = Get-ClaudeNotifyCommand -NotifyScript $NotifyScript
     $stopCommand = Get-ClaudeStopCommand -NotifyScript $NotifyScript
+    $stopFailureCommand = Get-ClaudeStopFailureCommand -NotifyScript $NotifyScript
     $hasPermissionHook = Test-HookEntriesContainCommand -Entries @($settings.hooks.PermissionRequest) -Matcher "" -Command $notifyCommand
     $permissionHookCurrent = if (Test-NotifyTypeEnabled -Type "permission_prompt") {
         $hasPermissionHook
@@ -1055,6 +1086,7 @@ function Test-ClaudeSettingsCurrentHooks {
     return (
         (Test-HookEntriesContainCommand -Entries @($settings.hooks.Notification) -Matcher "idle_prompt" -Command $notifyCommand) -and
         (Test-HookEntriesContainCommand -Entries @($settings.hooks.Stop) -Matcher "" -Command $stopCommand) -and
+        (Test-HookEntriesContainCommand -Entries @($settings.hooks.StopFailure) -Matcher "" -Command $stopFailureCommand) -and
         $permissionHookCurrent
     )
 }
@@ -2533,6 +2565,21 @@ if ($HookType -eq "codex") {
     $ProjectName = Get-CodexProjectName -Payload $HookData
 }
 
+# StopFailure fires when a turn ends on an API error instead of a Stop event.
+# The payload's "error" field carries the error class: rate_limit is the
+# "usage limit reached, stop and wait" outcome and keeps its own hook type
+# for the Limit Reached alert; every other class (or an unreadable payload)
+# is a plain failure and folds into the error path. Only the structured field
+# decides - matching the raw JSON would misclassify failures whose details
+# merely mention "rate_limit".
+$StopFailureErrorType = ""
+if ($HookType -eq "StopFailure") {
+    $StopFailureErrorType = Get-JsonStringValue -Json $HookData -Key "error"
+    if ($StopFailureErrorType -ne "rate_limit") {
+        $HookType = "error"
+    }
+}
+
 function Get-ToolDisplayName {
     param([string]$Tool = "claude")
 
@@ -2818,7 +2865,7 @@ function Test-ShouldSuppressNotification {
 }
 
 # Check if notification should be suppressed
-if ($HookType -eq "stop" -or $HookType -eq "notification") {
+if ($HookType -eq "stop" -or $HookType -eq "notification" -or $HookType -eq "StopFailure") {
     if (Test-ShouldSuppressNotification) {
         exit 0  # Skip this notification
     }
@@ -3065,6 +3112,25 @@ switch ($HookType.ToLower()) {
             "$ToolDisplay finished an agent-team task in $ProjectName" `
             "$ToolDisplay team task is done in $ProjectName"
         $VoiceMessage = $Message
+    }
+    "stopfailure" {
+        # Only the rate_limit error class reaches here (others were normalized
+        # to "error" above): the session/usage limit ended the turn.
+        $Title = "$ToolDisplay - Limit Reached"
+        $shortPool = @(
+            "$ToolDisplay hit the usage limit in $ProjectName",
+            "$ToolDisplay reached the session limit in $ProjectName",
+            "$ToolDisplay is paused at the usage limit in $ProjectName",
+            "$ToolDisplay stopped at the usage limit in $ProjectName"
+        )
+        $longPool = @(
+            "Heads up! $ToolDisplay hit the usage limit in $ProjectName and is waiting for it to reset",
+            "$ToolDisplay reached the session limit in $ProjectName, so the task is paused until it resets",
+            "Limit reached! $ToolDisplay stopped mid-task in $ProjectName until your usage resets",
+            "$ToolDisplay is waiting out the usage limit in $ProjectName before it can continue"
+        )
+        $Message = Select-WordedMessage -Short $shortPool -Long $longPool -Style $BannerWording
+        $VoiceMessage = Select-WordedMessage -Short $shortPool -Long $longPool -Style $VoiceWording
     }
     { $_ -in "error", "failed" } {
         $Title = "$ToolDisplay - Error"

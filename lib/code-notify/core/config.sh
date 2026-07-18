@@ -3002,8 +3002,10 @@ EOF
     # working" signal: the notifier cancels any pending debounced completion so a
     # tool that outlives the debounce window can't fire a premature "task
     # complete". The notifier scopes the approval ("input needed") banner to
-    # run_command and to the permission_prompt alert type at runtime, so this
-    # hook no longer depends on the alert config at install time.
+    # calls that pause for the user (run_command and MCP tools — call_mcp_tool
+    # or eager mcp_<server>_<tool> registrations) and to the permission_prompt
+    # alert type at runtime, so this hook no longer depends on the alert
+    # config at install time.
     local pre_tool_use_block
     pre_tool_use_block=$(cat <<EOF
     "PreToolUse": [

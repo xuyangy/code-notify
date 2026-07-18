@@ -461,6 +461,129 @@ agy_command_needs_approval() {
     [[ "$(agy_permission_decision "$1")" != "auto" ]]
 }
 
+# "<ServerName>/<ToolName>" for a call_mcp_tool event (agy's dispatch tool for
+# lazily-loaded MCP tools); empty when either half is absent. Same jq ->
+# python3 -> sed ladder as get_agy_tool_name. The sed fallback matches the keys
+# anywhere in the payload, so a colliding key inside the free-form
+# .toolCall.args.Arguments object can win — jq/python3 take precedence, and a
+# wrong target only skews the banner decision toward its "ask" default.
+get_agy_mcp_target() {
+    if has_jq; then
+        printf '%s' "$HOOK_DATA" | jq -r '(.toolCall.args // {})
+            | if ((.ServerName // "") != "") and ((.ToolName // "") != "")
+              then "\(.ServerName)/\(.ToolName)" else "" end' 2>/dev/null
+        return 0
+    fi
+    if has_python3; then
+        printf '%s' "$HOOK_DATA" | python3 -c '
+import json, sys
+try:
+    args = (json.load(sys.stdin).get("toolCall") or {}).get("args") or {}
+    s, t = args.get("ServerName") or "", args.get("ToolName") or ""
+    print("%s/%s" % (s, t) if s and t else "", end="")
+except Exception:
+    print("", end="")
+' 2>/dev/null
+        return 0
+    fi
+    local server tool
+    server=$(printf '%s' "$HOOK_DATA" | sed -nE \
+        's/.*"ServerName"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1)
+    tool=$(printf '%s' "$HOOK_DATA" | sed -nE \
+        's/.*"ToolName"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -n1)
+    if [[ -n "$server" ]] && [[ -n "$tool" ]]; then
+        printf '%s/%s' "$server" "$tool"
+    fi
+}
+
+# Resolve what agy will do with an MCP tool call against its permission lists:
+# prints "auto" when it runs without prompting (matched allow, or auto-denied)
+# or "ask" when it pauses for the user. Rules are mcp(<server>/<tool>) where *
+# is a wildcard — mcp(*), mcp(srv/*), mcp(srv/tool) — with the same precedence
+# as commands (deny > ask > allow); an unlisted MCP tool defaults to "ask".
+# $1 is the candidate target; $2 selects how rule targets are compared:
+# "slash" for the <server>/<tool> form (call_mcp_tool), or "underscore" for an
+# eagerly loaded tool's flat name with the mcp_ prefix stripped, where each
+# rule's "/" is flattened to "_" (eager tools register as mcp_<server>_<tool>).
+# Unreadable/absent settings or no parser -> "ask" (never suppress blindly).
+agy_mcp_permission_decision() {
+    local target="$1" style="${2:-slash}" settings out
+    settings="$(agy_permissions_file)"
+    [[ -f "$settings" ]] || { printf 'ask'; return 0; }
+
+    # shellcheck disable=SC2016  # $target/$style/$g are jq variables, not shell
+    local jq_prog='
+def reesc: gsub("(?<c>[\\\\.\\^\\$\\+\\(\\)\\[\\]\\{\\}\\|\\?])"; "\\" + .c);
+def globre($g): "^" + ($g | split("*") | map(reesc) | join(".*")) + "$";
+def pats(l): (.permissions[l] // [])
+  | map(select(type == "string" and test("^mcp\\(.*\\)$")))
+  | map(sub("^mcp\\("; "") | sub("\\)$"; ""))
+  | map(if $style == "underscore" then gsub("/"; "_") else . end);
+def anymatch(l): (pats(l) | any(. as $g | $target | test(globre($g))));
+if ($target | length) == 0 then "ask"
+elif anymatch("deny") then "auto"
+elif anymatch("ask") then "ask"
+elif anymatch("allow") then "auto"
+else "ask" end'
+
+    if has_jq; then
+        out=$(jq -r --arg target "$target" --arg style "$style" "$jq_prog" "$settings" 2>/dev/null)
+        [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
+    fi
+    if has_python3; then
+        out=$(python3 - "$target" "$style" "$settings" <<'PY' 2>/dev/null
+import json, re, sys
+target, style, path = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(path) as f:
+        perms = json.load(f).get("permissions") or {}
+except Exception:
+    print("ask", end=""); sys.exit(0)
+def pats(l):
+    out = []
+    for e in (perms.get(l) or []):
+        if isinstance(e, str) and e.startswith("mcp(") and e.endswith(")"):
+            p = e[len("mcp("):-1]
+            out.append(p.replace("/", "_") if style == "underscore" else p)
+    return out
+def match(p):
+    rx = "^" + ".*".join(re.escape(part) for part in p.split("*")) + "$"
+    return re.match(rx, target) is not None
+def anymatch(l):
+    return any(match(p) for p in pats(l))
+if not target: print("ask", end="")
+elif anymatch("deny"): print("auto", end="")
+elif anymatch("ask"): print("ask", end="")
+elif anymatch("allow"): print("auto", end="")
+else: print("ask", end="")
+PY
+)
+        [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
+    fi
+    printf 'ask'
+}
+
+# Whether an MCP tool event should raise the approval banner. agy prompts for
+# every MCP tool call unless an mcp(...) rule lets it auto-run, so this mirrors
+# agy_command_needs_approval: banner unless agy's own lists resolve to "auto"
+# (allowlisted, or auto-denied). $1 is the toolCall name — call_mcp_tool for
+# lazily-loaded tools (server/tool live in the payload args), mcp_<server>_<tool>
+# for eagerly loaded ones (server/tool are baked into the name).
+agy_mcp_needs_approval() {
+    local name="$1" target style
+    if [[ "$name" == "call_mcp_tool" ]]; then
+        target="$(get_agy_mcp_target)"
+        style="slash"
+        # Unextractable server/tool: assume it prompts — over-notifying beats
+        # swallowing a real approval pause.
+        [[ -n "$target" ]] || return 0
+    else
+        target="${name#mcp_}"
+        style="underscore"
+    fi
+    [[ "$(agy_mcp_permission_decision "$target" "$style")" != "auto" ]]
+}
+
 # True when permission_prompt alerts are enabled. The notifier does not source
 # config.sh, so read the same notify-types file config.sh writes (normalized,
 # pipe-separated). Absent file means the default (idle_prompt only) — approval
@@ -778,14 +901,27 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
             # Cancel the debounce and possibly start tmux as one transaction
             # with StopFinal, so a completion cannot stop a newly started turn.
             agy_with_running_lock agy_start_running_locked || true
-            # The approval banner is only meaningful for calls that pause for the
-            # user (run_command), only when permission_prompt alerts are on, and
-            # only when agy will actually stop to ask — commands its permission
-            # lists auto-run (e.g. an allowlisted "git status") fire PreToolUse
-            # too but never prompt, so bannering them is just noise. Every other
+            # The approval banner is only meaningful for calls that pause for
+            # the user — run_command and MCP tools (call_mcp_tool dispatch, or
+            # eager mcp_<server>_<tool> registrations) — only when
+            # permission_prompt alerts are on, and only when agy will actually
+            # stop to ask: calls its permission lists auto-run (an allowlisted
+            # "git status", an mcp(server/*) allow rule) fire PreToolUse too
+            # but never prompt, so bannering them is just noise. Every other
             # tool start is silent — it just cancelled the debounce.
-            if [[ "$(get_agy_tool_name)" == "run_command" ]] && agy_permission_prompt_enabled &&
-                agy_command_needs_approval "$(get_agy_command_line)"; then
+            agy_tool_name="$(get_agy_tool_name)"
+            agy_needs_banner=""
+            if agy_permission_prompt_enabled; then
+                case "$agy_tool_name" in
+                    run_command)
+                        agy_command_needs_approval "$(get_agy_command_line)" && agy_needs_banner=1
+                        ;;
+                    call_mcp_tool | mcp_*)
+                        agy_mcp_needs_approval "$agy_tool_name" && agy_needs_banner=1
+                        ;;
+                esac
+            fi
+            if [[ -n "$agy_needs_banner" ]]; then
                 HOOK_TYPE="notification"
                 AGY_FORCED_SUBTYPE="permission_prompt"
                 # This notification pauses the running indicator further down.

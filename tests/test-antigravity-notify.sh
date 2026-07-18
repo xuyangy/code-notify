@@ -177,11 +177,16 @@ ws() { printf '"workspacePaths":["/tmp/work/%s"]' "$1"; }
 
 # Match the user's Antigravity permission configuration: git commands are
 # auto-approved and therefore must not produce an "Input Required" banner.
+# MCP rules (mcp(<server>/<tool>), * wildcards) exercise the MCP approval
+# scenarios below: allow/deny'd tools auto-run/auto-deny (silent), an ask rule
+# beats allow, and an unlisted MCP tool defaults to ask (banner).
 mkdir -p "$HOME/.gemini/antigravity-cli"
 cat > "$HOME/.gemini/antigravity-cli/settings.json" <<'EOF'
 {
   "permissions": {
-    "allow": ["command(git)"]
+    "allow": ["command(git)", "mcp(chrome-devtools/*)", "mcp(memory/read_graph)"],
+    "ask": ["mcp(chrome-devtools/evaluate_script)"],
+    "deny": ["mcp(banned/*)"]
   }
 }
 EOF
@@ -195,6 +200,31 @@ run_agy_notifier "$fake_path" "PreToolUse" \
 # quotes in the hook payload, while stripping them for permission evaluation.
 run_agy_notifier "$fake_path" "PreToolUse" \
     "{\"conversationId\":\"c-allowed\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"\\\"git diff\\\"\"}},$(ws projAllowed)}"
+
+# 1c) An MCP tool call (via the call_mcp_tool dispatch tool) for a tool no
+# mcp(...) rule covers defaults to ask -> Input Required.
+run_agy_notifier "$fake_path" "PreToolUse" \
+    "{\"conversationId\":\"c-mcp-ask\",\"toolCall\":{\"name\":\"call_mcp_tool\",\"args\":{\"ServerName\":\"codebase-memory-mcp\",\"ToolName\":\"list_projects\",\"Arguments\":{}}},$(ws projMcpAsk)}"
+
+# 1d) An MCP tool covered by a wildcard allow rule auto-runs -> silent.
+run_agy_notifier "$fake_path" "PreToolUse" \
+    "{\"conversationId\":\"c-mcp-allowed\",\"toolCall\":{\"name\":\"call_mcp_tool\",\"args\":{\"ServerName\":\"chrome-devtools\",\"ToolName\":\"take_snapshot\",\"Arguments\":{}}},$(ws projMcpAllowed)}"
+
+# 1e) An ask rule takes precedence over the server's wildcard allow -> banner.
+run_agy_notifier "$fake_path" "PreToolUse" \
+    "{\"conversationId\":\"c-mcp-override\",\"toolCall\":{\"name\":\"call_mcp_tool\",\"args\":{\"ServerName\":\"chrome-devtools\",\"ToolName\":\"evaluate_script\",\"Arguments\":{}}},$(ws projMcpOverride)}"
+
+# 1f) A deny'd MCP tool is auto-denied without a prompt -> silent.
+run_agy_notifier "$fake_path" "PreToolUse" \
+    "{\"conversationId\":\"c-mcp-denied\",\"toolCall\":{\"name\":\"call_mcp_tool\",\"args\":{\"ServerName\":\"banned\",\"ToolName\":\"anything\",\"Arguments\":{}}},$(ws projMcpDenied)}"
+
+# 1g) Eagerly loaded MCP tools register as native tools named
+# mcp_<server>_<tool>: an allow rule must match the flattened name (silent),
+# and an unlisted eager tool must banner.
+run_agy_notifier "$fake_path" "PreToolUse" \
+    "{\"conversationId\":\"c-mcp-eager-ok\",\"toolCall\":{\"name\":\"mcp_memory_read_graph\",\"args\":{}},$(ws projMcpEagerOk)}"
+run_agy_notifier "$fake_path" "PreToolUse" \
+    "{\"conversationId\":\"c-mcp-eager-ok-unlisted\",\"toolCall\":{\"name\":\"mcp_foo_bar\",\"args\":{}},$(ws projMcpEagerUnlisted)}"
 
 # 2) PostToolUse with a STRUCTURED error -> Error (must not be read as success).
 run_agy_notifier "$fake_path" "PostToolUse" \
@@ -237,10 +267,11 @@ run_agy_notifier "$fake_path" "PostToolUse" \
 run_agy_notifier "$fake_path" "PreToolUse" \
     "{\"conversationId\":\"c-busy\",\"toolCall\":{\"name\":\"read_file\"},$(ws projBusy)}"
 
-# Five fire synchronously (projInput, projErr, projStop, projCancel error,
-# projApprove input); the debounced projDone complete arrives ~1s later -> six.
-# projBusy must produce nothing (silent cancel).
-wait_for_lines "$notification_log" 6 || fail "expected six Antigravity notification deliveries"
+# Eight fire synchronously (projInput, projMcpAsk, projMcpOverride,
+# projMcpEagerUnlisted, projErr, projStop, projCancel error, projApprove input); the
+# debounced projDone complete arrives ~1s later -> nine. projBusy, projAllowed,
+# projMcpAllowed, projMcpDenied, and projMcpEagerOk must produce nothing.
+wait_for_lines "$notification_log" 9 || fail "expected nine Antigravity notification deliveries"
 # Give any (incorrectly) pending debounce watchers time to fire before asserting.
 sleep 2
 
@@ -258,6 +289,18 @@ grep -q "Input Required - projApprove" "$notification_log" \
     || fail "PreToolUse in the approval scenario was not reported"
 grep -q "projAllowed" "$notification_log" \
     && fail "allowlisted git command emitted an input-required notification"
+grep -q "Input Required - projMcpAsk" "$notification_log" \
+    || fail "unlisted MCP tool call did not map to an input-required notification"
+grep -q "Input Required - projMcpOverride" "$notification_log" \
+    || fail "MCP ask rule did not override the server's wildcard allow"
+grep -q "Input Required - projMcpEagerUnlisted" "$notification_log" \
+    || fail "unlisted eager MCP tool (mcp_<server>_<tool>) did not banner"
+grep -q "projMcpAllowed" "$notification_log" \
+    && fail "allowlisted MCP tool emitted an input-required notification"
+grep -q "projMcpDenied" "$notification_log" \
+    && fail "deny'd MCP tool emitted an input-required notification (auto-denied, no prompt)"
+grep -q "projMcpEagerOk" "$notification_log" \
+    && fail "allowlisted eager MCP tool emitted an input-required notification"
 
 # A PostToolUse error must NOT also be reported as complete for the same project.
 grep -q "Task Complete - projErr" "$notification_log" \

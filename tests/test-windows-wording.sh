@@ -35,7 +35,10 @@ try {
     $content = Get-Content -Raw $InstallerPath
 
     # --- CLI: Invoke-WordingCommand manages the state files ---
-    if ($content -notmatch "(?ms)\$mainScript = @'\r?\n(?<module>.*?)\r?\n'@") {
+    # Single-quoted: in a double-quoted string PowerShell would expand
+    # $mainScript (backslash is not an escape character), collapsing the
+    # regex so it matched the first heredoc in the file instead.
+    if ($content -notmatch '(?ms)\$mainScript = @''\r?\n(?<module>.*?)\r?\n''@') {
         throw "could not extract Code-Notify PowerShell module from installer"
     }
     $moduleScript = $Matches['module']
@@ -68,7 +71,7 @@ try {
     if (Test-Path $projectVoiceFile) { throw "project reset should remove the state file" }
 
     # --- Notifier: style resolution helpers from the notify script ---
-    if ($content -notmatch "(?ms)\$notifyScript = @'\r?\n(?<notify>.*?)\r?\n'@") {
+    if ($content -notmatch '(?ms)\$notifyScript = @''\r?\n(?<notify>.*?)\r?\n''@') {
         throw "could not extract notify script from installer"
     }
     $notify = $Matches['notify']

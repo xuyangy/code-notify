@@ -27,7 +27,9 @@ try {
     $env:USERPROFILE = $testRoot
 
     $content = Get-Content -Raw $InstallerPath
-    if ($content -notmatch "(?ms)\$mainScript = @'\r?\n(?<module>.*?)\r?\n'@") {
+    # Single-quoted: a double-quoted string would expand $mainScript and
+    # collapse the regex to match the first heredoc in the file.
+    if ($content -notmatch '(?ms)\$mainScript = @''\r?\n(?<module>.*?)\r?\n''@') {
         throw "could not extract Code-Notify PowerShell module from installer"
     }
     $moduleScript = $Matches['module']

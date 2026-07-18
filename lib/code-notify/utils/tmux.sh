@@ -1185,6 +1185,17 @@ tmux_running_start() {
     read -r session_id window_id pane_id <<< "$target"
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
+    local spinner=0
+    if tmux_running_spinner_enabled; then
+        spinner=1
+        # The spinner is rendered independently from the window name, so it
+        # does not naturally replace a waiting/event badge the way the static
+        # running icon below does. Clear that badge BEFORE the running marker
+        # lands: the marker makes the spinner render on the very next status
+        # repaint, and the badge restore is several tmux round-trips away, so
+        # the reverse order flashes the spinner next to the still-badged name.
+        tmux_badge_clear "$window_id"
+    fi
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
     # A new prompt or a resumed tool turn supersedes any earlier input wait —
     # and any pending post-completion idle nudge.
@@ -1193,12 +1204,7 @@ tmux_running_start() {
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     tmux_idle_watch_disarm "$window_id"
     tmux_running_settle_arm "$window_id" "$pane_id"
-    if tmux_running_spinner_enabled; then
-        # The spinner is rendered independently from the window name, so it
-        # does not naturally replace a waiting/event badge the way the static
-        # running icon below does. Clear that badge when work starts or resumes
-        # to avoid displaying contradictory "running" and "needs input" states.
-        tmux_badge_clear "$window_id"
+    if (( spinner )); then
         tmux_agent_exit_track "$window_id"
         tmux_spinner_arm
     else
@@ -1236,16 +1242,21 @@ tmux_prompt_submit() {
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
 
+    local spinner=0
+    if tmux_running_spinner_enabled; then
+        spinner=1
+        # No rename in spinner mode: drop the event badge — before the running
+        # marker below, so no repaint ever shows spinner and badge together.
+        tmux_badge_clear "$window_id"
+    fi
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux_resume_flag_clear "$window_id"
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     tmux_idle_watch_disarm "$window_id"
     tmux_running_settle_arm "$window_id" "$TMUX_PANE"
-    if tmux_running_spinner_enabled; then
-        # No rename in spinner mode: drop the event badge and arm the snippet
-        # (a show-options no-op when already armed).
-        tmux_badge_clear "$window_id"
+    if (( spinner )); then
+        # Arm the snippet (a show-options no-op when already armed).
         tmux_agent_exit_track "$window_id"
         tmux_spinner_arm
     else
@@ -1290,6 +1301,16 @@ tmux_running_stop() {
         fi
     fi
     tmux_spinner_disarm_if_idle
+    if [[ -n "$since" ]] && tmux_running_spinner_enabled; then
+        # Dropping the marker does not repaint the status line by itself, so
+        # the spinner would linger until the next interval tick — or the event
+        # badge's rename, which some stops never send (badge-set skips the
+        # visible window). One status-only refresh makes the stop transition
+        # as immediate as the start one. After disarm-if-idle so the repaint
+        # sees the final state. Best-effort: targets the session's attached
+        # client, and a detached session simply has no client to refresh.
+        tmux refresh-client -S 2>/dev/null
+    fi
     return 0
 }
 
@@ -1410,15 +1431,19 @@ tmux_running_resume_after_input() {
 tmux_running_resume_window() {
     local window_id="$1"
     tmux_running_enabled || return 0
+    local spinner=0
+    if tmux_running_spinner_enabled; then
+        spinner=1
+        # Same shape as tmux_running_start: the waiting badge must not sit
+        # next to a live spinner, so it clears before the marker lands.
+        tmux_badge_clear "$window_id"
+    fi
     tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux_resume_flag_clear "$window_id"
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     tmux_idle_watch_disarm "$window_id"
-    if tmux_running_spinner_enabled; then
-        # Same shape as tmux_running_start: the waiting badge must not sit
-        # next to a live spinner.
-        tmux_badge_clear "$window_id"
+    if (( spinner )); then
         tmux_spinner_arm
     else
         tmux_badge_set "$TMUX_RUNNING_ICON" running "$window_id"

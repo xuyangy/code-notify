@@ -23,6 +23,12 @@ case "$os_name" in
         ;;
 esac
 
+# Voice is only wired up on macOS (see the `macos)` branch of notifier.sh's
+# OS case statement — Linux never calls speak_notification). Banner wording
+# still applies on both, since it goes through the same pool-selection code.
+can_speak=false
+[[ "$os_name" == "Darwin" ]] && can_speak=true
+
 test_dir="$(mktemp -d)"
 trap 'rm -rf "$test_dir"' EXIT
 
@@ -79,7 +85,9 @@ run_stop() {
     # Each run must notify: drop the rate-limit state from the previous one.
     rm -rf "$HOME/.claude/notifications/state"
     printf '{}' | PATH="$fake_path" bash "$NOTIFIER" stop claude wording-test
-    wait_for_say
+    # Speech runs detached only where it exists at all (macOS); on Linux the
+    # banner is written synchronously and there is nothing to wait for.
+    if "$can_speak"; then wait_for_say; fi
 }
 
 banner_matches() { grep -Eq "$1" "$banner_log"; }
@@ -89,8 +97,10 @@ say_matches() { [[ -f "$say_log" ]] && grep -Eq "$1" "$say_log"; }
 run_stop
 banner_matches "$short_re" || fail "default banner should use the short pool"
 banner_matches "$long_re" && fail "default banner must not use the long pool"
-say_matches "$long_re" || fail "default voice should use the long pool"
-say_matches 'in project wording-test' || fail "voice should speak the hyphenated project name"
+if "$can_speak"; then
+    say_matches "$long_re" || fail "default voice should use the long pool"
+    say_matches 'in project wording-test' || fail "voice should speak the hyphenated project name"
+fi
 
 # --- cn wording writes state files the notifier honours ---
 PATH="$fake_path" "$CN" wording banner long >/dev/null
@@ -101,8 +111,10 @@ banner_matches "$long_re" || fail "banner should follow wording-banner=long"
 
 PATH="$fake_path" "$CN" wording voice short >/dev/null
 run_stop
-say_matches "$short_re" || fail "voice should follow wording-voice=short"
-say_matches "$long_re" && fail "voice set to short must not use the long pool"
+if "$can_speak"; then
+    say_matches "$short_re" || fail "voice should follow wording-voice=short"
+    say_matches "$long_re" && fail "voice set to short must not use the long pool"
+fi
 
 # --- env vars override the state files ---
 : > "$banner_log"
@@ -110,7 +122,7 @@ say_matches "$long_re" && fail "voice set to short must not use the long pool"
 rm -rf "$HOME/.claude/notifications/state"
 printf '{}' | PATH="$fake_path" CODE_NOTIFY_BANNER_WORDING=short \
     bash "$NOTIFIER" stop claude wording-test
-wait_for_say
+if "$can_speak"; then wait_for_say; fi
 banner_matches "$short_re" || fail "CODE_NOTIFY_BANNER_WORDING should override the state file"
 banner_matches "$long_re" && fail "env-overridden banner must not use the long pool"
 
@@ -135,7 +147,9 @@ PATH="$fake_path" "$CN" wording project voice reset >/dev/null
 PATH="$fake_path" "$CN" wording project banner off >/dev/null
 run_stop
 banner_matches "$banner_project_re" && fail "banner project off must not show the project"
-say_matches 'in project wording-test' || fail "voice keeps the project while only banner is off"
+if "$can_speak"; then
+    say_matches 'in project wording-test' || fail "voice keeps the project while only banner is off"
+fi
 
 # env var overrides the state file (banner still off in the state file)
 : > "$banner_log"
@@ -143,7 +157,7 @@ say_matches 'in project wording-test' || fail "voice keeps the project while onl
 rm -rf "$HOME/.claude/notifications/state"
 printf '{}' | PATH="$fake_path" CODE_NOTIFY_BANNER_PROJECT=on \
     bash "$NOTIFIER" stop claude wording-test
-wait_for_say
+if "$can_speak"; then wait_for_say; fi
 banner_matches "$banner_project_re" || fail "CODE_NOTIFY_BANNER_PROJECT should override the state file"
 
 PATH="$fake_path" "$CN" wording project banner reset >/dev/null
@@ -155,7 +169,9 @@ PATH="$fake_path" "$CN" wording voice reset >/dev/null
     fail "reset should remove the banner state file"
 run_stop
 banner_matches "$short_re" || fail "banner should be short again after reset"
-say_matches "$long_re" || fail "voice should be long again after reset"
+if "$can_speak"; then
+    say_matches "$long_re" || fail "voice should be long again after reset"
+fi
 
 # --- garbage in the state file falls back to the default ---
 printf 'sonnet-form\n' > "$HOME/.claude/notifications/wording-banner"

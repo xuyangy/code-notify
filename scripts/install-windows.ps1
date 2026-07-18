@@ -3124,10 +3124,10 @@ switch ($HookType.ToLower()) {
             "$ToolDisplay stopped at the usage limit in $ProjectName"
         )
         $longPool = @(
-            "Heads up! $ToolDisplay hit the usage limit in $ProjectName and is waiting for it to reset",
-            "$ToolDisplay reached the session limit in $ProjectName, so the task is paused until it resets",
-            "Limit reached! $ToolDisplay stopped mid-task in $ProjectName until your usage resets",
-            "$ToolDisplay is waiting out the usage limit in $ProjectName before it can continue"
+            "Whoopsie! $ToolDisplay hit the usage limit in $ProjectName and is waiting for it to reset",
+            "Uh-oh! $ToolDisplay reached the session limit in $ProjectName, so the task is paused until it resets",
+            "Oh no! $ToolDisplay stopped mid-task in $ProjectName until your usage resets",
+            "Oops! $ToolDisplay is waiting out the usage limit in $ProjectName before it can continue"
         )
         $Message = Select-WordedMessage -Short $shortPool -Long $longPool -Style $BannerWording
         $VoiceMessage = Select-WordedMessage -Short $shortPool -Long $longPool -Style $VoiceWording

@@ -1863,10 +1863,10 @@ case "$HOOK_TYPE" in
             "$TOOL_DISPLAY is paused at the usage limit" \
             "$TOOL_DISPLAY stopped at the usage limit" \
             -- \
-            "Heads up! $TOOL_DISPLAY hit the usage limit and is waiting for it to reset" \
-            "$TOOL_DISPLAY reached the session limit, so the task is paused until it resets" \
-            "Limit reached! $TOOL_DISPLAY stopped mid-task until your usage resets" \
-            "$TOOL_DISPLAY is waiting out the usage limit before it can continue"
+            "Whoopsie! $TOOL_DISPLAY hit the usage limit and is waiting for it to reset" \
+            "Uh-oh! $TOOL_DISPLAY reached the session limit, so the task is paused until it resets" \
+            "Oh no! $TOOL_DISPLAY stopped mid-task until your usage resets" \
+            "Oops! $TOOL_DISPLAY is waiting out the usage limit before it can continue"
         SOUND="Basso"
         ;;
     "error"|"failed")

@@ -1111,6 +1111,11 @@ RATE_LIMIT_DIR="$NOTIFICATIONS_DIR/state"
 STOP_RATE_LIMIT_SECONDS="${CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS:-10}"
 NOTIFICATION_RATE_LIMIT_SECONDS="${CODE_NOTIFY_NOTIFICATION_RATE_LIMIT_SECONDS:-180}"
 EVENT_RATE_LIMIT_SECONDS="${CODE_NOTIFY_EVENT_RATE_LIMIT_SECONDS:-10}"
+DELEGATED_WORK_MARKER_TTL_SECONDS="${CODE_NOTIFY_DELEGATED_WORK_TTL_SECONDS:-3600}"
+if [[ ! "$DELEGATED_WORK_MARKER_TTL_SECONDS" =~ ^[0-9]+$ ]] ||
+    (( DELEGATED_WORK_MARKER_TTL_SECONDS <= 0 )); then
+    DELEGATED_WORK_MARKER_TTL_SECONDS=3600
+fi
 
 sanitize_rate_limit_key() {
     printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
@@ -1187,6 +1192,151 @@ consume_recent_ask_user_pending() {
     now=$(date +%s)
     age=$((now - marked_at))
     (( age >= 0 && age <= window ))
+}
+
+# Claude Code 2.1.145+ includes the session's in-flight task registry in Stop
+# payloads. A main turn can therefore end while delegated subagent or teammate
+# work is still running; treating that Stop as terminal would replace the
+# running badge with "Task Complete", followed later by a misleading idle
+# reminder. Persist a session-scoped marker from that authoritative snapshot
+# so both events can be suppressed without returning a blocking hook decision.
+get_delegated_work_marker_file() {
+    local session_id hook_scope
+    session_id=$(json_extract_string "$HOOK_DATA" "session_id")
+    [[ -n "$session_id" ]] || return 1
+    # Global and project-scoped hook commands can both run for one event. Keep
+    # their markers separate so either command can reconcile its own state.
+    hook_scope="${RAW_ARG3:-global}"
+    get_rate_limit_file "delegated_work_${TOOL_NAME}_${hook_scope}_${session_id}"
+}
+
+# Print one of:
+#   running - at least one running subagent/teammate is in background_tasks
+#   clear   - the documented array is present with no such running task
+#   unknown - the payload is malformed or the registry field is unavailable
+get_claude_delegated_work_state() {
+    local state="unknown"
+
+    if has_jq; then
+        state=$(printf '%s' "$HOOK_DATA" | jq -r '
+            if (has("background_tasks") and (.background_tasks | type == "array")) then
+                if any(.background_tasks[]?;
+                    ((.type == "subagent" or .type == "teammate" or
+                      .type == "cloud session" or .type == "remote_agent") and
+                     (.status == "running" or .status == "pending")))
+                then "running" else "clear" end
+            else
+                "unknown"
+            end
+        ' 2>/dev/null) || state="unknown"
+    elif has_python3; then
+        state=$(printf '%s' "$HOOK_DATA" | python3 -c '
+import json, sys
+try:
+    payload = json.load(sys.stdin)
+    tasks = payload.get("background_tasks")
+    if not isinstance(tasks, list):
+        state = "unknown"
+    elif any(
+        isinstance(task, dict)
+        and task.get("type") in {"subagent", "teammate", "cloud session", "remote_agent"}
+        and task.get("status") in {"running", "pending"}
+        for task in tasks
+    ):
+        state = "running"
+    else:
+        state = "clear"
+except Exception:
+    state = "unknown"
+print(state, end="")
+' 2>/dev/null) || state="unknown"
+    fi
+
+    case "$state" in
+        "running"|"clear"|"unknown") printf '%s\n' "$state" ;;
+        *) printf '%s\n' "unknown" ;;
+    esac
+}
+
+mark_delegated_work_running() {
+    local marker_file marker_tmp
+    marker_file=$(get_delegated_work_marker_file) || return 0
+    # Preserve the original observation time. Claude serializes an idle
+    # teammate as status=running, so refreshing on every Stop would prevent
+    # the fail-open TTL below from ever expiring.
+    if delegated_work_marker_exists; then
+        return 0
+    fi
+    mkdir -p "$RATE_LIMIT_DIR"
+    marker_tmp="${marker_file}.tmp.$$"
+    date +%s > "$marker_tmp" || return 0
+    mv -f "$marker_tmp" "$marker_file" 2>/dev/null || rm -f "$marker_tmp"
+}
+
+clear_delegated_work_marker() {
+    local marker_file
+    marker_file=$(get_delegated_work_marker_file) || return 0
+    rm -f "$marker_file" 2>/dev/null || true
+}
+
+delegated_work_marker_exists() {
+    local marker_file marked_at now age
+    marker_file=$(get_delegated_work_marker_file) || return 1
+    [[ -f "$marker_file" ]] || return 1
+    marked_at=$(cat "$marker_file" 2>/dev/null || true)
+    [[ "$marked_at" =~ ^[0-9]+$ ]] || {
+        rm -f "$marker_file" 2>/dev/null || true
+        return 1
+    }
+    now=$(date +%s)
+    age=$((now - marked_at))
+    if (( age < 0 || age >= DELEGATED_WORK_MARKER_TTL_SECONDS )); then
+        rm -f "$marker_file" 2>/dev/null || true
+        return 1
+    fi
+    return 0
+}
+
+claude_event_alert_enabled() {
+    local types_file="$HOME/.claude/notifications/notify-types"
+    local current="idle_prompt"
+    [[ -f "$types_file" ]] && current="$(cat "$types_file" 2>/dev/null)"
+    [[ "|$current|" == *"|$1|"* ]]
+}
+
+# Reconcile Stop against its task-registry snapshot, then answer whether this
+# Stop (or a later native idle_prompt) must be hidden. An unreadable Stop keeps
+# an existing marker but never creates one, avoiding both premature clearing
+# and guesses from an unverified payload.
+claude_delegated_work_should_suppress() {
+    local state
+    [[ "$TOOL_NAME" == "claude" ]] || return 1
+
+    if [[ "$HOOK_TYPE" == "stop" ]]; then
+        state=$(get_claude_delegated_work_state)
+        case "$state" in
+            "running")
+                mark_delegated_work_running
+                return 0
+                ;;
+            "clear")
+                clear_delegated_work_marker
+                return 1
+                ;;
+            "unknown")
+                delegated_work_marker_exists
+                return $?
+                ;;
+        esac
+    fi
+
+    if [[ "$HOOK_TYPE" == "notification" ]] &&
+        [[ "$NOTIFICATION_SUBTYPE" == "idle_prompt" ]]; then
+        delegated_work_marker_exists
+        return $?
+    fi
+
+    return 1
 }
 
 get_notification_subtype() {
@@ -1508,6 +1658,35 @@ elif [[ "$TOOL_NAME" == "claude" ]] &&
     [[ "$HOOK_TYPE" == "notification" ]] &&
     [[ "$NOTIFICATION_SUBTYPE" == "permission_prompt" ]] &&
     consume_recent_ask_user_pending; then
+    exit 0
+fi
+
+# background_tasks cannot distinguish a working teammate from one parked
+# idle: both serialize as type=teammate,status=running. The lifecycle events
+# are therefore the retirement signal for the persisted snapshot. They clear
+# state before their optional event toast proceeds normally.
+#
+# One retirement clears eagerly even if other delegates are still running:
+# the marker stores no per-delegate identity because event delivery is not
+# guaranteed, so counting down could wedge in the suppressing state — the
+# failure direction this feature is designed to avoid. The next Stop
+# snapshot re-arms the marker while delegated work remains, so the cost of
+# eager clearing is at most one early idle reminder in between.
+if [[ "$TOOL_NAME" == "claude" ]]; then
+    case "$HOOK_TYPE" in
+        "TeammateIdle"|"SubagentStop")
+            clear_delegated_work_marker
+            claude_event_alert_enabled "$HOOK_TYPE" || exit 0
+            ;;
+    esac
+fi
+
+# A Stop with delegated work still in flight is a pause, not completion. Exit
+# before persistent-alert classification, running-state mutation, rate-limit
+# updates, logging, and notification delivery. The marker also suppresses the
+# native idle reminder until a later Stop snapshot reports no running
+# subagent/teammate and clears it.
+if claude_delegated_work_should_suppress; then
     exit 0
 fi
 

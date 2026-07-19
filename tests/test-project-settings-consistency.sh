@@ -99,6 +99,28 @@ EOF
           }
         ]
       }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$(shell_quote "$(get_notify_script)") SubagentStop claude $(shell_quote "project")"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$(shell_quote "$(get_notify_script)") TeammateIdle claude $(shell_quote "project")"
+          }
+        ]
+      }
     ]
   }
 }

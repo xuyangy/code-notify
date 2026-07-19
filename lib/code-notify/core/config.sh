@@ -423,7 +423,7 @@ has_claude_hooks_for_commands() {
     stop_cmd="$4"
     event_prefix="${5:-}"
     event_suffix="${6:-}"
-    event_types="$(get_claude_event_alert_types)"
+    event_types="$(get_claude_event_hook_types)"
 
     if [[ ! -f "$file" ]]; then
         return 1
@@ -621,6 +621,58 @@ has_legacy_global_claude_hooks() {
 
 claude_global_hooks_need_repair() {
     has_legacy_global_claude_hooks "$GLOBAL_SETTINGS_FILE"
+}
+
+# Whether a settings file contains ANY code-notify-managed Claude hook
+# command, in the current shape or not. Enable and repair key on the strict
+# has_current_* predicates; teardown must key on this loose one, or an
+# upgraded install whose settings predate a newly mandatory hook type reads
+# as "already disabled" and its managed hooks are never removed.
+has_any_managed_claude_hooks() {
+    local file="$1"
+    local pattern
+
+    [[ -f "$file" ]] || return 1
+
+    pattern="$(get_managed_claude_notification_pattern)|$(get_managed_claude_stop_pattern)|$(get_managed_claude_event_pattern)|$(get_managed_claude_stop_failure_pattern)"
+
+    if has_jq; then
+        jq -e --arg pattern "$pattern" '
+            [.hooks // {} | .. | objects | select((.type? // "") == "command") | (.command? // "")]
+            | any(test($pattern))
+        ' "$file" >/dev/null 2>&1
+        return $?
+    fi
+
+    if has_python3; then
+        python3 - "$file" "$pattern" << 'PYTHON'
+import json
+import re
+import sys
+
+file_path, pattern = sys.argv[1:3]
+
+with open(file_path, "r") as fh:
+    settings = json.load(fh)
+
+regex = re.compile(pattern)
+
+def walk(node):
+    if isinstance(node, dict):
+        command = node.get("command")
+        if node.get("type") == "command" and isinstance(command, str) and regex.search(command):
+            return True
+        return any(walk(value) for value in node.values())
+    if isinstance(node, list):
+        return any(walk(item) for item in node)
+    return False
+
+raise SystemExit(0 if walk(settings.get("hooks", {})) else 1)
+PYTHON
+        return $?
+    fi
+
+    grep -qE 'claude-notify|code-notify.*notifier\.sh|(^|[\\/])notify\.(ps1|sh)' "$file"
 }
 
 repair_legacy_hooks_command() {
@@ -821,7 +873,7 @@ update_claude_hooks_in_settings_file() {
     notify_pattern="$(get_managed_claude_notification_pattern)"
     stop_pattern="$(get_managed_claude_stop_pattern)"
     event_pattern="$(get_managed_claude_event_pattern)"
-    event_types="$(get_claude_event_alert_types)"
+    event_types="$(get_claude_event_hook_types)"
 
     mkdir -p "$(dirname "$file")"
 
@@ -3220,6 +3272,14 @@ is_tool_disable_needed() {
         "antigravity")
             is_antigravity_imported
             ;;
+        "claude")
+            # is_tool_enabled requires the exact current hook set, which an
+            # install upgraded across a new mandatory hook type no longer
+            # matches. Its managed hooks still fire, so teardown falls back
+            # to the loose any-managed detection.
+            is_tool_enabled "claude" ||
+                has_any_managed_claude_hooks "$GLOBAL_SETTINGS_FILE"
+            ;;
         *)
             is_tool_enabled "$tool"
             ;;
@@ -3436,5 +3496,15 @@ get_claude_event_alert_types() {
         fi
     done
 
+    printf '%s\n' "$result"
+}
+
+# Retirement events are state signals even when their optional toasts are
+# disabled. The notifier gates delivery at runtime.
+get_claude_event_hook_types() {
+    local result
+    result="$(get_claude_event_alert_types)"
+    result="$(append_unique_notify_type "$result" "SubagentStop")"
+    result="$(append_unique_notify_type "$result" "TeammateIdle")"
     printf '%s\n' "$result"
 }

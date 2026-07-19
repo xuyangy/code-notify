@@ -777,6 +777,24 @@ function Get-ClaudeStopFailureCommand {
     return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" StopFailure claude"
 }
 
+# Claude Code lifecycle event hooks (SubagentStop, TeammateIdle, ...). The
+# retirement events retire the delegated-work marker recorded by a Stop that
+# ran while subagent or teammate work was still in flight, so they install
+# unconditionally; the notifier gates their optional toasts at runtime via
+# notify-types. The remaining event types install only when enabled.
+function Get-ClaudeEventTypes {
+    return @("SubagentStart", "SubagentStop", "TeammateIdle", "TaskCreated", "TaskCompleted")
+}
+
+function Get-ClaudeRetirementEventTypes {
+    return @("SubagentStop", "TeammateIdle")
+}
+
+function Get-ClaudeEventCommand {
+    param([string]$NotifyScript, [string]$EventType)
+    return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" $EventType claude"
+}
+
 function Get-CodexStopCommand {
     param([string]$NotifyScript)
     return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" stop codex"
@@ -797,6 +815,10 @@ function Get-ManagedClaudeStopPattern {
 
 function Get-ManagedClaudeStopFailurePattern {
     return '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*StopFailure(?:\s|$)'
+}
+
+function Get-ManagedClaudeEventPattern {
+    return '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(SubagentStart|SubagentStop|TeammateIdle|TaskCreated|TaskCompleted)(?:\s|$)'
 }
 
 function Get-ManagedCodexHookPattern {
@@ -1051,6 +1073,30 @@ function Update-ClaudeSettingsHooks {
         $Settings.hooks.PSObject.Properties.Remove("StopFailure")
     }
 
+    $eventPattern = Get-ManagedClaudeEventPattern
+    $retirementEvents = Get-ClaudeRetirementEventTypes
+    foreach ($eventType in (Get-ClaudeEventTypes)) {
+        $eventCommand = Get-ClaudeEventCommand -NotifyScript $NotifyScript -EventType $eventType
+        $eventEntries = Remove-ManagedClaudeHookEntries -Entries @($Settings.hooks.$eventType) -ExactCommand $eventCommand -Pattern $eventPattern
+        if (-not $Disable -and
+            (($retirementEvents -contains $eventType) -or (Test-NotifyTypeEnabled -Type $eventType))) {
+            $eventEntries += [PSCustomObject]@{
+                matcher = ""
+                hooks = @(
+                    [PSCustomObject]@{
+                        type = "command"
+                        command = $eventCommand
+                    }
+                )
+            }
+        }
+        if ($eventEntries.Count -gt 0) {
+            $Settings.hooks | Add-Member -Force -NotePropertyName $eventType -NotePropertyValue $eventEntries
+        } else {
+            $Settings.hooks.PSObject.Properties.Remove($eventType)
+        }
+    }
+
     if ((Get-ObjectPropertyNames $Settings.hooks).Count -eq 0) {
         $Settings.PSObject.Properties.Remove("hooks")
     }
@@ -1083,11 +1129,20 @@ function Test-ClaudeSettingsCurrentHooks {
         -not $hasPermissionHook
     }
 
+    $retirementHooksCurrent = $true
+    foreach ($eventType in (Get-ClaudeRetirementEventTypes)) {
+        $eventCommand = Get-ClaudeEventCommand -NotifyScript $NotifyScript -EventType $eventType
+        if (-not (Test-HookEntriesContainCommand -Entries @($settings.hooks.$eventType) -Matcher "" -Command $eventCommand)) {
+            $retirementHooksCurrent = $false
+        }
+    }
+
     return (
         (Test-HookEntriesContainCommand -Entries @($settings.hooks.Notification) -Matcher "idle_prompt" -Command $notifyCommand) -and
         (Test-HookEntriesContainCommand -Entries @($settings.hooks.Stop) -Matcher "" -Command $stopCommand) -and
         (Test-HookEntriesContainCommand -Entries @($settings.hooks.StopFailure) -Matcher "" -Command $stopFailureCommand) -and
-        $permissionHookCurrent
+        $permissionHookCurrent -and
+        $retirementHooksCurrent
     )
 }
 
@@ -2613,6 +2668,15 @@ try {
     $NotificationRateLimitSeconds = 180
 }
 
+try {
+    $DelegatedWorkMarkerTtlSeconds = [int]($env:CODE_NOTIFY_DELEGATED_WORK_TTL_SECONDS)
+} catch {
+    $DelegatedWorkMarkerTtlSeconds = 3600
+}
+if ($DelegatedWorkMarkerTtlSeconds -le 0) {
+    $DelegatedWorkMarkerTtlSeconds = 3600
+}
+
 function Get-ProjectNameForNotification {
     if ($ProjectName) {
         return $ProjectName
@@ -2811,6 +2875,178 @@ function Update-RateLimit {
     }
 }
 
+# Claude Code 2.1.145+ includes the session's in-flight task registry in Stop
+# payloads. A main turn can therefore end while delegated subagent or teammate
+# work is still running; treating that Stop as terminal would show completion
+# and later idle notifications prematurely. Persist a per-session marker from
+# that authoritative snapshot and suppress those notifications without
+# returning a blocking hook decision.
+function Get-DelegatedWorkMarkerPath {
+    $sessionId = Get-JsonStringValue -Json $HookData -Key "session_id"
+    if (-not $sessionId) {
+        return $null
+    }
+    $scope = if ($ProjectName) { $ProjectName } else { "global" }
+    return Get-RateLimitPath ("delegated_work_{0}_{1}_{2}" -f $ToolName, $scope, $sessionId)
+}
+
+# Return running, clear, or unknown. Only documented running subagent and
+# teammate entries count; shell jobs, monitors, workflows, and completed tasks
+# must not delay the agent's completion notification.
+function Get-ClaudeDelegatedWorkState {
+    if (-not $HookData) {
+        return "unknown"
+    }
+
+    try {
+        $payload = $HookData | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return "unknown"
+    }
+
+    $tasksProperty = $payload.PSObject.Properties["background_tasks"]
+    if (-not $tasksProperty -or $null -eq $tasksProperty.Value) {
+        return "unknown"
+    }
+
+    foreach ($task in @($tasksProperty.Value)) {
+        if ($null -eq $task) {
+            continue
+        }
+        if (($task.type -eq "subagent" -or $task.type -eq "teammate" -or
+             $task.type -eq "cloud session" -or $task.type -eq "remote_agent") -and
+            ($task.status -eq "running" -or $task.status -eq "pending")) {
+            return "running"
+        }
+    }
+
+    return "clear"
+}
+
+function Set-DelegatedWorkMarker {
+    $markerPath = Get-DelegatedWorkMarkerPath
+    if (-not $markerPath) {
+        return
+    }
+
+    # Preserve the first observation time. Claude serializes an idle teammate
+    # as status=running, so repeated Stops must not refresh the fail-open TTL.
+    if (Test-DelegatedWorkMarker) {
+        return
+    }
+
+    $temporaryPath = $null
+    try {
+        if (-not (Test-Path $NotificationStateDir)) {
+            New-Item -ItemType Directory -Path $NotificationStateDir -Force -ErrorAction Stop | Out-Null
+        }
+        $temporaryPath = "{0}.tmp.{1}" -f $markerPath, $PID
+        [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() |
+            Set-Content $temporaryPath -Encoding ASCII -ErrorAction Stop
+        Move-Item $temporaryPath $markerPath -Force -ErrorAction Stop
+    } catch {
+        if ($temporaryPath) {
+            Remove-Item $temporaryPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Remove-DelegatedWorkMarker {
+    $markerPath = Get-DelegatedWorkMarkerPath
+    if ($markerPath) {
+        Remove-Item $markerPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-DelegatedWorkMarker {
+    $markerPath = Get-DelegatedWorkMarkerPath
+    if (-not $markerPath -or -not (Test-Path $markerPath)) {
+        return $false
+    }
+
+    try {
+        $markedAt = [long]((Get-Content $markerPath -Raw -ErrorAction Stop).Trim())
+    } catch {
+        Remove-Item $markerPath -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $age = $now - $markedAt
+    if ($age -lt 0 -or $age -ge $DelegatedWorkMarkerTtlSeconds) {
+        Remove-Item $markerPath -Force -ErrorAction SilentlyContinue
+        return $false
+    }
+
+    return $true
+}
+
+# Reconcile Stop against its registry snapshot. An unreadable snapshot keeps
+# an existing marker but never creates one; this avoids clearing known live
+# work because of transient malformed input while making no unsupported guess.
+function Test-ClaudeDelegatedWorkShouldSuppress {
+    if ($ToolName -ne "claude") {
+        return $false
+    }
+
+    if ($HookType -eq "stop") {
+        $state = Get-ClaudeDelegatedWorkState
+        if ($state -eq "running") {
+            Set-DelegatedWorkMarker
+            return $true
+        }
+        if ($state -eq "clear") {
+            Remove-DelegatedWorkMarker
+            return $false
+        }
+        return (Test-DelegatedWorkMarker)
+    }
+
+    if ($HookType -eq "notification" -and
+        (Get-NotificationSubtype) -eq "idle_prompt") {
+        return (Test-DelegatedWorkMarker)
+    }
+
+    return $false
+}
+
+# Mirror of the bash claude_event_alert_enabled: event toasts are opt-in via
+# the pipe-delimited notify-types file (default idle_prompt only). The
+# retirement hooks are installed unconditionally as state signals, so their
+# toast delivery is gated here at runtime.
+function Test-ClaudeEventAlertEnabled {
+    param([string]$Type)
+
+    $typesFile = Join-Path $NotificationsDir "notify-types"
+    $current = "idle_prompt"
+    if (Test-Path $typesFile) {
+        $raw = Get-Content $typesFile -Raw -ErrorAction SilentlyContinue
+        if ($raw) {
+            $current = $raw.Trim()
+        }
+    }
+    return (($current -split '\|') -contains $Type)
+}
+
+# background_tasks omits the teammate's isIdle flag, so an idle teammate still
+# appears as status=running. TeammateIdle and SubagentStop are the retirement
+# signals for the persisted snapshot: they clear state first, then their
+# optional event toast proceeds only when the user enabled that alert type.
+#
+# One retirement clears eagerly even if other delegates are still running:
+# the marker stores no per-delegate identity because event delivery is not
+# guaranteed, so counting down could wedge in the suppressing state — the
+# failure direction this feature is designed to avoid. The next Stop
+# snapshot re-arms the marker while delegated work remains, so the cost of
+# eager clearing is at most one early idle reminder in between.
+if ($ToolName -eq "claude" -and
+    ($HookType -eq "TeammateIdle" -or $HookType -eq "SubagentStop")) {
+    Remove-DelegatedWorkMarker
+    if (-not (Test-ClaudeEventAlertEnabled -Type $HookType)) {
+        exit 0
+    }
+}
+
 # Function to check if notification should be suppressed
 function Test-ShouldSuppressNotification {
     # Skip suppression checks for test notifications
@@ -2867,6 +3103,14 @@ function Test-ShouldSuppressNotification {
     }
 
     return $false
+}
+
+# Exit before rate limits, terminal-state side effects, logging, and delivery:
+# a main Stop with delegated work still in flight is a pause, not completion.
+# The persisted marker also hides Claude's later native idle reminder until a
+# subsequent Stop reports no running subagent or teammate and clears it.
+if (Test-ClaudeDelegatedWorkShouldSuppress) {
+    exit 0
 }
 
 # Check if notification should be suppressed

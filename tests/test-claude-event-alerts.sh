@@ -151,7 +151,55 @@ for event in ("SubagentStop", "TeammateIdle", "TaskCompleted"):
         raise SystemExit(f"missing event command: {command}")
 PYTHON
 
+remove_notify_type "SubagentStop"
+remove_notify_type "TeammateIdle"
+remove_notify_type "TaskCompleted"
+enable_hooks_in_settings
+python3 - "$GLOBAL_SETTINGS_FILE" "$notify_script" <<'PYTHON'
+import json, sys
+settings_file, notify_script = sys.argv[1:3]
+hooks = json.load(open(settings_file)).get("hooks", {})
+for event in ("SubagentStop", "TeammateIdle"):
+    command = f"{notify_script} {event} claude"
+    if not any(h.get("command") == command for e in hooks.get(event, []) for h in e.get("hooks", [])):
+        raise SystemExit(f"retirement hook must remain installed: {event}")
+if "TaskCompleted" in hooks:
+    raise SystemExit("disabled notification-only event hook remained installed")
+PYTHON
+
 disable_hooks_in_settings
 [[ ! -f "$GLOBAL_SETTINGS_FILE" ]] || fail "managed event hooks should be removed on disable"
+
+# A settings file written before the retirement hooks became mandatory fails
+# the strict current-install predicate, but its managed hooks still fire.
+# Teardown must detect and remove them instead of reporting "already
+# disabled" (is_tool_disable_needed gates disable_single_tool in cn off).
+enable_hooks_in_settings
+python3 - "$GLOBAL_SETTINGS_FILE" <<'PYTHON'
+import json
+import sys
+
+settings_file = sys.argv[1]
+with open(settings_file, "r") as fh:
+    settings = json.load(fh)
+
+for event in ("SubagentStop", "TeammateIdle"):
+    settings.get("hooks", {}).pop(event, None)
+
+with open(settings_file, "w") as fh:
+    json.dump(settings, fh)
+PYTHON
+
+if has_current_global_claude_hooks "$GLOBAL_SETTINGS_FILE"; then
+    fail "pre-upgrade settings should fail the strict current-install predicate"
+fi
+is_tool_disable_needed "claude" ||
+    fail "teardown must still be needed for a pre-upgrade install"
+disable_tool "claude" || fail "disable_tool failed on a pre-upgrade install"
+[[ ! -f "$GLOBAL_SETTINGS_FILE" ]] ||
+    fail "pre-upgrade managed hooks should be removed on disable"
+if is_tool_disable_needed "claude"; then
+    fail "nothing should remain to disable after teardown"
+fi
 
 echo "PASS: Claude event alert hooks"

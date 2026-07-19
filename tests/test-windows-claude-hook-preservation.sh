@@ -111,6 +111,15 @@ try {
     if ($settings.hooks.PSObject.Properties['PermissionRequest']) {
         throw "PermissionRequest should not be installed when permission_prompt is disabled"
     }
+    foreach ($eventType in @("SubagentStop", "TeammateIdle")) {
+        $eventCommand = Get-ClaudeEventCommand -NotifyScript (Get-NotifyScript) -EventType $eventType
+        if (-not (Test-HookEntriesContainCommand -Entries @($settings.hooks.$eventType) -Matcher "" -Command $eventCommand)) {
+            throw "retirement hook $eventType was not installed"
+        }
+    }
+    if ($settings.hooks.PSObject.Properties['SubagentStart']) {
+        throw "SubagentStart should not be installed when its alert type is disabled"
+    }
 
     "idle_prompt|permission_prompt" | Set-Content $script:NotifyTypesFile -Encoding ASCII
     Enable-Notifications -Tool "claude"
@@ -139,6 +148,11 @@ try {
     }
     if ($settings.hooks.PSObject.Properties['PermissionRequest']) {
         throw "managed PermissionRequest hook should be removed during disable"
+    }
+    foreach ($eventType in @("SubagentStop", "TeammateIdle")) {
+        if ($settings.hooks.PSObject.Properties[$eventType]) {
+            throw "managed $eventType hook should be removed during disable"
+        }
     }
     if (Test-HookEntriesContainCommand -Entries @($settings.hooks.Notification) -Matcher "idle_prompt" -Command $notifyCommand) {
         throw "managed Notification hook should be removed during disable"

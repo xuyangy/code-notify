@@ -1748,6 +1748,7 @@ case "$HOOK_TYPE" in
                 # tells "waiting on you" apart from an actual input request.
                 TITLE="$TOOL_DISPLAY 🥱"
                 BADGE_ICON="🥱"
+                SUBTITLE="Idle"
                 set_event_messages \
                     "$TOOL_DISPLAY is idle" \
                     "$TOOL_DISPLAY is waiting" \

@@ -92,6 +92,9 @@ run_notifier_payload() {
 }
 
 run_notifier "$fake_path" "idle_prompt"
+first_notification=$(sed -n '1p' "$notification_log")
+[[ "$first_notification" == *"Idle"* ]] || fail "idle_prompt notification should be labeled Idle"
+[[ "$first_notification" != *"Input Required"* ]] || fail "idle_prompt notification should not be labeled Input Required"
 run_notifier "$fake_path" "idle_prompt"
 run_notifier "$fake_path" "permission_prompt"
 run_notifier "$fake_path" "permission_prompt"

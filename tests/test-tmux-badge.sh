@@ -2307,8 +2307,8 @@ EOF
     for _ in $(seq 1 100); do [[ "$(window_name)" == "🥱 zsh" ]] && break; sleep 0.1; done
     [[ "$(window_name)" == "🥱 zsh" ]] \
         || fail "review idle reminder should replace the completion badge (got: $(window_name))"
-    for _ in $(seq 1 100); do grep -q "Input Required" "$tn_log" 2>/dev/null && break; sleep 0.1; done
-    grep -q "Input Required" "$tn_log" \
+    for _ in $(seq 1 100); do grep -q "Idle" "$tn_log" 2>/dev/null && break; sleep 0.1; done
+    grep -q "Idle" "$tn_log" \
         || fail "untouched review should deliver the later idle notification"
     export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
     rm -f "$HOME/.codex/hooks.json" "$state_dir"/* "$state_dir"/.@code_notify_* \

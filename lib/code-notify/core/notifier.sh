@@ -1211,20 +1211,28 @@ get_delegated_work_marker_file() {
 }
 
 # Print one of:
-#   running - at least one running subagent/teammate is in background_tasks
-#   clear   - the documented array is present with no such running task
-#   unknown - the payload is malformed or the registry field is unavailable
+#   running       - a running subagent/cloud session/remote agent is in
+#                   background_tasks (statuses there are trustworthy: they
+#                   transition to completed when the work ends)
+#   teammate-only - the only running delegates are teammates, whose registry
+#                   entry stays status=running even when parked idle; the
+#                   caller weighs this against the TeammateIdle tombstone
+#   clear         - the documented array is present with no running delegate
+#   unknown       - the payload is malformed or the registry is unavailable
 get_claude_delegated_work_state() {
     local state="unknown"
 
     if has_jq; then
         state=$(printf '%s' "$HOOK_DATA" | jq -r '
+            def is_running: (.status == "running" or .status == "pending");
             if (has("background_tasks") and (.background_tasks | type == "array")) then
                 if any(.background_tasks[]?;
-                    ((.type == "subagent" or .type == "teammate" or
-                      .type == "cloud session" or .type == "remote_agent") and
-                     (.status == "running" or .status == "pending")))
-                then "running" else "clear" end
+                    ((.type == "subagent" or .type == "cloud session" or
+                      .type == "remote_agent") and is_running))
+                then "running"
+                elif any(.background_tasks[]?; (.type == "teammate" and is_running))
+                then "teammate-only"
+                else "clear" end
             else
                 "unknown"
             end
@@ -1237,15 +1245,20 @@ try:
     tasks = payload.get("background_tasks")
     if not isinstance(tasks, list):
         state = "unknown"
-    elif any(
-        isinstance(task, dict)
-        and task.get("type") in {"subagent", "teammate", "cloud session", "remote_agent"}
-        and task.get("status") in {"running", "pending"}
-        for task in tasks
-    ):
-        state = "running"
     else:
-        state = "clear"
+        def running(kinds):
+            return any(
+                isinstance(task, dict)
+                and task.get("type") in kinds
+                and task.get("status") in {"running", "pending"}
+                for task in tasks
+            )
+        if running({"subagent", "cloud session", "remote_agent"}):
+            state = "running"
+        elif running({"teammate"}):
+            state = "teammate-only"
+        else:
+            state = "clear"
 except Exception:
     state = "unknown"
 print(state, end="")
@@ -1253,7 +1266,7 @@ print(state, end="")
     fi
 
     case "$state" in
-        "running"|"clear"|"unknown") printf '%s\n' "$state" ;;
+        "running"|"teammate-only"|"clear"|"unknown") printf '%s\n' "$state" ;;
         *) printf '%s\n' "unknown" ;;
     esac
 }
@@ -1277,6 +1290,49 @@ clear_delegated_work_marker() {
     local marker_file
     marker_file=$(get_delegated_work_marker_file) || return 0
     rm -f "$marker_file" 2>/dev/null || true
+}
+
+# TeammateIdle is a one-shot signal, but the teammate it retires stays in
+# background_tasks as status=running for as long as it sits parked. Without
+# a durable record of the retirement, the next Stop would re-mark the session
+# from that stale registry entry and suppress every later completion. The
+# tombstone remembers "this session's teammates were seen idle" for the
+# marker TTL; while fresh, teammate-only snapshots read as clear. A second
+# teammate that is genuinely working during that window loses its deferral —
+# a premature completion toast, the failure direction this feature prefers.
+get_teammate_idle_tombstone_file() {
+    local session_id hook_scope
+    session_id=$(json_extract_string "$HOOK_DATA" "session_id")
+    [[ -n "$session_id" ]] || return 1
+    hook_scope="${RAW_ARG3:-global}"
+    get_rate_limit_file "teammate_idle_${TOOL_NAME}_${hook_scope}_${session_id}"
+}
+
+mark_teammate_idle_tombstone() {
+    local tombstone_file tombstone_tmp
+    tombstone_file=$(get_teammate_idle_tombstone_file) || return 0
+    mkdir -p "$RATE_LIMIT_DIR"
+    tombstone_tmp="${tombstone_file}.tmp.$$"
+    date +%s > "$tombstone_tmp" || return 0
+    mv -f "$tombstone_tmp" "$tombstone_file" 2>/dev/null || rm -f "$tombstone_tmp"
+}
+
+teammate_idle_tombstone_fresh() {
+    local tombstone_file marked_at now age
+    tombstone_file=$(get_teammate_idle_tombstone_file) || return 1
+    [[ -f "$tombstone_file" ]] || return 1
+    marked_at=$(cat "$tombstone_file" 2>/dev/null || true)
+    [[ "$marked_at" =~ ^[0-9]+$ ]] || {
+        rm -f "$tombstone_file" 2>/dev/null || true
+        return 1
+    }
+    now=$(date +%s)
+    age=$((now - marked_at))
+    if (( age < 0 || age >= DELEGATED_WORK_MARKER_TTL_SECONDS )); then
+        rm -f "$tombstone_file" 2>/dev/null || true
+        return 1
+    fi
+    return 0
 }
 
 delegated_work_marker_exists() {
@@ -1316,6 +1372,19 @@ claude_delegated_work_should_suppress() {
         state=$(get_claude_delegated_work_state)
         case "$state" in
             "running")
+                mark_delegated_work_running
+                return 0
+                ;;
+            "teammate-only")
+                # A teammate parked idle serializes exactly like a working
+                # one. Once TeammateIdle has been observed for this session
+                # (fresh tombstone), stale teammate entries must not re-mark
+                # it — that would suppress every later completion with no
+                # second retirement signal ever coming.
+                if teammate_idle_tombstone_fresh; then
+                    clear_delegated_work_marker
+                    return 1
+                fi
                 mark_delegated_work_running
                 return 0
                 ;;
@@ -1674,7 +1743,15 @@ fi
 # eager clearing is at most one early idle reminder in between.
 if [[ "$TOOL_NAME" == "claude" ]]; then
     case "$HOOK_TYPE" in
-        "TeammateIdle"|"SubagentStop")
+        "TeammateIdle")
+            # The tombstone outlives this one-shot event: the parked teammate
+            # keeps its status=running registry entry, so later Stops need a
+            # durable record that it already retired.
+            clear_delegated_work_marker
+            mark_teammate_idle_tombstone
+            claude_event_alert_enabled "$HOOK_TYPE" || exit 0
+            ;;
+        "SubagentStop")
             clear_delegated_work_marker
             claude_event_alert_enabled "$HOOK_TYPE" || exit 0
             ;;
@@ -1766,7 +1843,14 @@ case "$HOOK_TYPE" in
         ;;
     "stop"|"error"|"failed")
         if [[ "$AGY_STOP_FINAL_CLEANUP" != "1" ]]; then
-            tmux_running_stop 2>/dev/null || true
+            # consume-queued-prompt: a UserPromptSubmit that raced or queued
+            # ahead of this turn end already armed the indicator for the next
+            # turn; this teardown must not run it dark (see tmux_running_stop).
+            tmux_running_stop consume-queued-prompt 2>/dev/null || true
+            # Only this queued-prompt path shares its running state with
+            # UserPromptSubmit. Antigravity performs separate cleanup and
+            # must still receive its normal terminal badge.
+            TMUX_TERMINAL_BADGE_GUARD=1
         fi
         # Codex and Antigravity send nothing further once a turn ends —
         # there is no equivalent of Claude's native idle_prompt reminder —
@@ -2445,7 +2529,7 @@ get_notification_sound_file() {
 if badge_glance_clear_enabled; then
     tmux_badge_sweep 2>/dev/null || true
 fi
-if [[ -n "$BADGE_ICON" ]]; then
+if [[ -n "$BADGE_ICON" ]] && [[ "${TMUX_RUNNING_STOP_PRESERVED:-0}" != "1" ]]; then
     # Terminal events badge even the visible window — completion should be
     # glanceable everywhere — and applying there also replaces a stale
     # waiting badge whose turn the user just watched end (an approval
@@ -2463,7 +2547,13 @@ if [[ -n "$BADGE_ICON" ]]; then
     if tmux_badge_visible_enabled; then
         BADGE_VISIBLE_ACTION="apply"
     fi
-    tmux_badge_set "$BADGE_ICON" "$BADGE_CLEAR_MODE" "" "$BADGE_VISIBLE_ACTION" 2>/dev/null || true
+    if [[ "${TMUX_TERMINAL_BADGE_GUARD:-0}" == "1" ]]; then
+        tmux_badge_set_unless_running \
+            "$BADGE_ICON" "$BADGE_CLEAR_MODE" "" "$BADGE_VISIBLE_ACTION" 2>/dev/null || true
+    else
+        tmux_badge_set \
+            "$BADGE_ICON" "$BADGE_CLEAR_MODE" "" "$BADGE_VISIBLE_ACTION" 2>/dev/null || true
+    fi
 fi
 
 # Send notification based on OS

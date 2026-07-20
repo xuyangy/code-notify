@@ -344,6 +344,45 @@ tmux_badge_set() {
     tmux_badge_apply "$window_id" "$autorename" "$name" "$icon" "$clear_mode"
 }
 
+# Apply a terminal badge only while the originating window is still stopped.
+# tmux_running_stop releases the transition lock before the notifier performs
+# delivery, so a queued successor can begin in that gap even when Stop won the
+# earlier race and consumed no hint. Re-taking the same per-window lock makes
+# the final check and badge application atomic with prompt submission: either
+# completion lands first and the prompt replaces it, or the fresh running
+# marker lands first and completion leaves it alone.
+tmux_badge_set_unless_running() {
+    local icon="$1"
+    local clear_mode="${2:-glance}"
+    local target="${3:-}"
+    local visible_action="${4:-skip}"
+    if [[ -z "$target" ]]; then
+        tmux_focus_available || return 1
+        target="$TMUX_PANE"
+    else
+        { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 1
+    fi
+
+    local info window_id transition_lock since now status
+    info=$(tmux display-message -p -t "$target" \
+        '#{window_id}|#{automatic-rename}|#{&&:#{window_active},#{session_attached}}|#{window_name}' \
+        2>/dev/null) || return 1
+    IFS='|' read -r window_id _ <<< "$info"
+    [[ "$window_id" =~ ^@[0-9]+$ ]] || return 1
+    tmux_running_transition_lock_acquire "$window_id" || return 1
+    transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
+    now=$(date +%s)
+    if [[ "$since" =~ ^[0-9]+$ ]] && (( now - since < TMUX_RUNNING_TTL )); then
+        tmux_running_transition_lock_release "$transition_lock"
+        return 0
+    fi
+    tmux_badge_set "$icon" "$clear_mode" "$window_id" "$visible_action"
+    status=$?
+    tmux_running_transition_lock_release "$transition_lock"
+    return "$status"
+}
+
 # Restore a badged window: original name back, automatic-rename re-enabled if
 # it was on, badge options removed. No-op when the window carries no badge.
 # If the user renamed the window while badged, their name wins: keep it (and
@@ -1218,6 +1257,54 @@ tmux_running_start() {
     return 0
 }
 
+# Recoverable cross-process lock for the prompt/Stop transition. tmux's
+# `wait-for -L` mutex has no owner association, so a hook killed after locking
+# can strand the channel for the life of the tmux server. An atomic mkdir plus
+# owner PID gives the next hook a way to reclaim that narrow failure window.
+TMUX_RUNNING_LOCK_DIR="$HOME/.claude/notifications/state/running-locks"
+
+tmux_running_transition_lock_path() {
+    local window_id="$1" socket_base
+    socket_base="${TMUX%%,*}"
+    socket_base="${socket_base##*/}"
+    socket_base="${socket_base//[^A-Za-z0-9_.-]/_}"
+    printf '%s/%s.%s.lock' "$TMUX_RUNNING_LOCK_DIR" "${socket_base:-default}" "$window_id"
+}
+
+tmux_running_transition_lock_acquire() {
+    local window_id="$1" lockdir owner attempts=0
+    mkdir -p "$TMUX_RUNNING_LOCK_DIR" 2>/dev/null || return 1
+    lockdir="$(tmux_running_transition_lock_path "$window_id")"
+    while ! mkdir "$lockdir" 2>/dev/null; do
+        attempts=$((attempts + 1))
+        if (( attempts >= 100 )); then
+            owner=""
+            if [[ -r "$lockdir/pid" ]]; then
+                read -r owner < "$lockdir/pid" 2>/dev/null || true
+            fi
+            if [[ "$owner" =~ ^[0-9]+$ ]]; then
+                if ! kill -0 "$owner" 2>/dev/null; then
+                    rm -f "$lockdir/pid" 2>/dev/null || true
+                    rmdir "$lockdir" 2>/dev/null || true
+                fi
+            elif [[ ! -e "$lockdir/pid" ]]; then
+                rmdir "$lockdir" 2>/dev/null || true
+            fi
+            attempts=0
+        fi
+        sleep 0.01
+    done
+    printf '%s' "$$" > "$lockdir/pid" 2>/dev/null || true
+    TMUX_RUNNING_TRANSITION_LOCKDIR="$lockdir"
+    return 0
+}
+
+tmux_running_transition_lock_release() {
+    local lockdir="$1"
+    rm -f "$lockdir/pid" 2>/dev/null || true
+    rmdir "$lockdir" 2>/dev/null || true
+}
+
 # The UserPromptSubmit fast path: the user just handed the caller's window
 # more work, so the pending event badge clears (the engage-clear) and the
 # running marker replaces it. This runs synchronously on every prompt
@@ -1242,6 +1329,32 @@ tmux_prompt_submit() {
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
 
+    # Serialize the queued-successor handoff with terminal teardown. Without
+    # this lock, Stop can observe no hint, then let this submission write the
+    # hint and a fresh epoch, and finally unset that fresh epoch. Keeping the
+    # complete marker/badge transition inside the same per-window lock also
+    # prevents either side from clearing the rendering applied by the other.
+    tmux_running_transition_lock_acquire "$window_id" || return 0
+    local transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+
+    # A submission that arrives while this window's running marker is still
+    # up means the ending turn has a queued successor: hook processes run
+    # concurrently, so the older turn's Stop teardown can execute after this
+    # prompt armed the indicator — and nothing between a Stop and the next
+    # UserPromptSubmit re-lights it (tool hooks are resume-gated). Leave a
+    # hint for that Stop to consume so the successor turn keeps its
+    # indicator. A marker lingering from an interrupted turn (Esc emits no
+    # Stop) sets a false hint; its cost is one indicator kept ~a minute
+    # longer, until the native idle reminder pauses it.
+    local prev_running now_epoch
+    now_epoch="$(date +%s)"
+    prev_running=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
+    if [[ "$prev_running" =~ ^[0-9]+$ ]] && (( now_epoch - prev_running < TMUX_RUNNING_TTL )); then
+        tmux set-option -w -t "$window_id" @code_notify_queued_prompt "$now_epoch" 2>/dev/null
+    else
+        tmux set-option -wu -t "$window_id" @code_notify_queued_prompt 2>/dev/null
+    fi
+
     local spinner=0
     if tmux_running_spinner_enabled; then
         spinner=1
@@ -1249,7 +1362,10 @@ tmux_prompt_submit() {
         # marker below, so no repaint ever shows spinner and badge together.
         tmux_badge_clear "$window_id"
     fi
-    tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
+    if ! tmux set-option -w -t "$window_id" @code_notify_running "$now_epoch" 2>/dev/null; then
+        tmux_running_transition_lock_release "$transition_lock"
+        return 0
+    fi
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux_resume_flag_clear "$window_id"
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
@@ -1262,6 +1378,7 @@ tmux_prompt_submit() {
     else
         tmux_badge_apply "$window_id" "$autorename" "$name" "$TMUX_RUNNING_ICON" running
     fi
+    tmux_running_transition_lock_release "$transition_lock"
     tmux_running_schedule_sweep $((TMUX_RUNNING_TTL + 2))
     return 0
 }
@@ -1270,13 +1387,43 @@ tmux_prompt_submit() {
 # epoch, clears the rename marker if (and only if) the window still carries
 # one — an event badge that replaced it in the meantime is left alone — and
 # retires the spinner interval when this was the last running window.
+#
+# Pass "consume-queued-prompt" as $1 from genuine turn-end events (the
+# notifier's stop/error path). When UserPromptSubmit left a queued-prompt
+# hint — a submission arrived while this window's marker was still up — the
+# ending turn has a successor already armed, so the teardown is skipped and
+# the hint consumed: one hint covers one Stop, and the successor's own Stop
+# clears normally. Callers that take the indicator down for other reasons
+# (input pauses, auth completion, synthetic sweeps) must not pass the flag —
+# a pending hint describes a future Stop, not their event.
+# shellcheck disable=SC2120  # the flag is passed by notifier.sh, not this file
 tmux_running_stop() {
+    local honor_queued="${1:-}"
+    # Out-param for notifier.sh: a preserved successor must keep its running
+    # rendering instead of receiving this Stop's terminal badge.
+    TMUX_RUNNING_STOP_PRESERVED=0
     tmux_focus_available || return 0
     local target session_id window_id pane_id
     target=$(tmux_focus_capture_target) || return 0
     read -r session_id window_id pane_id <<< "$target"
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
+    tmux_running_transition_lock_acquire "$window_id" || return 0
+    local transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    if [[ "$honor_queued" == "consume-queued-prompt" ]]; then
+        local queued now_queued
+        queued=$(tmux show-options -wqv -t "$window_id" @code_notify_queued_prompt 2>/dev/null)
+        if [[ "$queued" =~ ^[0-9]+$ ]]; then
+            tmux set-option -wu -t "$window_id" @code_notify_queued_prompt 2>/dev/null
+            now_queued="$(date +%s)"
+            if (( now_queued - queued < TMUX_RUNNING_TTL )); then
+                # shellcheck disable=SC2034  # out-param read by notifier.sh
+                TMUX_RUNNING_STOP_PRESERVED=1
+                tmux_running_transition_lock_release "$transition_lock"
+                return 0
+            fi
+        fi
+    fi
     # A genuine terminal event must also retire a stale "waiting for input"
     # marker. tmux_running_pause_for_input sets it again after this cleanup,
     # and the notifier's stop path re-arms the idle watch after it.
@@ -1311,6 +1458,7 @@ tmux_running_stop() {
         # client, and a detached session simply has no client to refresh.
         tmux refresh-client -S 2>/dev/null
     fi
+    tmux_running_transition_lock_release "$transition_lock"
     return 0
 }
 

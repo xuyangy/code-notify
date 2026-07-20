@@ -307,6 +307,15 @@ else
     test_fail "tmux click-to-focus failed"
 fi
 
+# Test: a queued prompt submission keeps the running indicator across the
+# ending turn's stop teardown
+test_start "tmux queued-prompt indicator"
+if run_test_script tests/test-tmux-queued-prompt.sh; then
+    test_pass
+else
+    test_fail "tmux queued-prompt indicator failed"
+fi
+
 # Test: notifications badge the originating tmux window name with the event icon
 test_start "tmux window badge"
 if run_test_script tests/test-tmux-badge.sh; then

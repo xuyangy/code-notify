@@ -152,6 +152,28 @@ run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_ta
 run_notifier SubagentStop '{"session_id":"sess1","agent_id":"agent-2","stop_hook_active":false}'
 [[ ! -e "$marker_sess1" ]] || fail "SubagentStop should retire delegated-work state"
 
+# TeammateIdle is one-shot, but the parked teammate keeps its status=running
+# registry entry. The retirement's tombstone must stop later Stops from
+# re-marking the session off that stale entry — otherwise every subsequent
+# completion would be suppressed with no second retirement ever coming.
+tombstone_sess1="$HOME/.claude/notifications/state/teammate_idle_claude_test-project_sess1"
+[[ -f "$tombstone_sess1" ]] || fail "TeammateIdle should leave a tombstone"
+lines_before_tombstoned_stop="$(notification_lines)"
+run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"team-3","type":"teammate","status":"running"}]}'
+[[ ! -e "$marker_sess1" ]] || fail "tombstoned teammate entry should not re-mark delegated work"
+[[ "$(notification_lines)" -eq $((lines_before_tombstoned_stop + 1)) ]] ||
+    fail "completion should deliver despite a parked teammate entry"
+
+# A running subagent is authoritative and defers regardless of the tombstone.
+run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"agent-3","type":"subagent","status":"running"},{"id":"team-3","type":"teammate","status":"running"}]}'
+[[ -f "$marker_sess1" ]] || fail "running subagent should defer even with a fresh tombstone"
+run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"team-3","type":"teammate","status":"running"}]}'
+[[ ! -e "$marker_sess1" ]] || fail "subagent completion should clear the marker despite the parked teammate"
+
+# An expired tombstone restores teammate deferral (fail-safe for a genuinely
+# working teammate long after the last idle observation).
+printf '%s' "$(( $(date +%s) - 7200 ))" > "$tombstone_sess1"
+
 # Repeated Stop snapshots do not refresh the marker timestamp. If a lifecycle
 # event is lost, the fail-open TTL restores the idle safety net.
 run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"team-4","type":"teammate","status":"running"}]}'

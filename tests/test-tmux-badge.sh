@@ -29,6 +29,26 @@ cleanup() {
         kill "$idle_agent_pid" 2>/dev/null || true
         wait "$idle_agent_pid" 2>/dev/null || true
     fi
+    if [[ -n "${badge_clear_pid:-}" ]]; then
+        kill "$badge_clear_pid" 2>/dev/null || true
+        wait "$badge_clear_pid" 2>/dev/null || true
+    fi
+    if [[ -n "${badge_set_pid:-}" ]]; then
+        kill "$badge_set_pid" 2>/dev/null || true
+        wait "$badge_set_pid" 2>/dev/null || true
+    fi
+    if [[ -n "${click_clear_pid:-}" ]]; then
+        kill "$click_clear_pid" 2>/dev/null || true
+        wait "$click_clear_pid" 2>/dev/null || true
+    fi
+    if [[ -n "${reclaim_one_pid:-}" ]]; then
+        kill "$reclaim_one_pid" 2>/dev/null || true
+        wait "$reclaim_one_pid" 2>/dev/null || true
+    fi
+    if [[ -n "${reclaim_two_pid:-}" ]]; then
+        kill "$reclaim_two_pid" 2>/dev/null || true
+        wait "$reclaim_two_pid" 2>/dev/null || true
+    fi
     if [[ -n "$REAL_TMUX" ]]; then
         # || true: on skip/early-exit paths no server was started, so kill-server
         # fails on a nonexistent socket; under set -e that would abort the trap
@@ -84,8 +104,23 @@ case "$cmd" in
         # reads the stateful name (kept current by rename-window); the focus
         # target format (session/window/pane IDs) is a fixture.
         case "${rest[0]}" in
-            *"|"*) printf '%s\n' "$FAKE_TMUX_BADGE_INFO" ;;
-            '#{window_name}') cat "$FAKE_TMUX_STATE/${target}.window_name" 2>/dev/null; echo ;;
+            *"|"*)
+                if [[ "${FAKE_TMUX_DYNAMIC_BADGE_INFO:-}" == "1" ]]; then
+                    badge_window="${FAKE_TMUX_PANE_WINDOW-@2}"
+                    name=$(cat "$FAKE_TMUX_STATE/${badge_window}.window_name" 2>/dev/null)
+                    printf '%s|on|0|%s\n' "$badge_window" "$name"
+                else
+                    printf '%s\n' "$FAKE_TMUX_BADGE_INFO"
+                fi
+                ;;
+            '#{window_name}')
+                if [[ "${FAKE_TMUX_PAUSE_BADGE_CLEAR:-}" == "1" ]]; then
+                    : > "$FAKE_TMUX_BADGE_CLEAR_SIGNAL"
+                    while [[ ! -e "$FAKE_TMUX_BADGE_CLEAR_RELEASE" ]]; do sleep 0.01; done
+                fi
+                cat "$FAKE_TMUX_STATE/${target}.window_name" 2>/dev/null
+                echo
+                ;;
             '#{window_id}') printf '%s\n' "${FAKE_TMUX_PANE_WINDOW-@2}" ;;
             *) printf '%s\n' "$FAKE_TMUX_TARGET" ;;
         esac
@@ -145,6 +180,21 @@ case "$cmd" in
         printf '%s\n' "$FAKE_TMUX_SESSIONS"
         ;;
     show-options)
+        if [[ "${FAKE_TMUX_SETTLE_RACE_MARKER:-}" != "" ]] &&
+            [[ "${rest[0]}" == "@code_notify_settle_since" ]] &&
+            [[ ! -e "$FAKE_TMUX_SETTLE_RACE_MARKER" ]]; then
+            cat "$FAKE_TMUX_STATE/${target}.${rest[0]}" 2>/dev/null
+            : > "$FAKE_TMUX_SETTLE_RACE_MARKER"
+            printf '%s' "$FAKE_TMUX_SETTLE_RACE_EPOCH" \
+                > "$FAKE_TMUX_STATE/${target}.@code_notify_running"
+            rm -f "$FAKE_TMUX_STATE/${target}.@code_notify_settle_since"
+            exit 0
+        fi
+        if [[ "${FAKE_TMUX_PAUSE_BADGE_SET:-}" == "1" ]] &&
+            [[ "${rest[0]}" == "@code_notify_orig_name" ]]; then
+            : > "$FAKE_TMUX_BADGE_SET_SIGNAL"
+            while [[ ! -e "$FAKE_TMUX_BADGE_SET_RELEASE" ]]; do sleep 0.01; done
+        fi
         cat "$FAKE_TMUX_STATE/${target}.${rest[0]}" 2>/dev/null
         ;;
     set-option)
@@ -236,6 +286,14 @@ export FAKE_TMUX_SESSIONS=""
 
 window_name() { cat "$state_dir/@2.window_name" 2>/dev/null; }
 orig_option() { cat "$state_dir/@2.@code_notify_orig_name" 2>/dev/null; }
+wait_for_path() {
+    local path="$1" i
+    for ((i = 0; i < 300; i++)); do
+        [[ -e "$path" ]] && return 0
+        sleep 0.01
+    done
+    return 1
+}
 
 # --- disabled via environment ---
 CODE_NOTIFY_TMUX_BADGE=false tmux_badge_set "🟢" && fail "badge should be skipped when disabled via env"
@@ -269,6 +327,277 @@ tmux_badge_set "👋" || fail "second badge should succeed"
 [[ "$(window_name)" == "👋 zsh" ]] || fail "second badge should swap the icon, not stack (got: $(window_name))"
 [[ "$(orig_option)" == "zsh" ]] || fail "original name must survive a repeat badge"
 pass "repeat badge swaps icon"
+
+: > "$log_file"
+export FAKE_TMUX_DYNAMIC_BADGE_INFO=1
+tmux_badge_set "👋" || fail "identical badge should succeed"
+unset FAKE_TMUX_DYNAMIC_BADGE_INFO
+grep -q "rename-window" "$log_file" \
+    && fail "an identical concurrent event should not rewrite the window"
+pass "identical badge delivery is mutation-free"
+
+# --- concurrent clear/apply stays atomic and never adopts a badge as the
+# original name. Claude /code-review can launch many subagents whose hook
+# processes all mutate the same tmux window. Force the old failing ordering:
+# clear has captured the decorated name but not restored it yet, while a new
+# badge setter tries to read state. The setter must wait for clear's window
+# transition lock, then capture the restored name rather than "💬 project".
+tmux_badge_clear "@2"
+printf '%s' "project" > "$state_dir/@2.window_name"
+export FAKE_TMUX_DYNAMIC_BADGE_INFO=1
+tmux_badge_set "💬" engage || fail "concurrent badge setup should succeed"
+badge_clear_signal="$test_dir/badge-clear-read"
+badge_clear_release="$test_dir/badge-clear-release"
+badge_set_lock_attempt="$test_dir/badge-set-lock-attempt"
+badge_set_signal="$test_dir/badge-set-read"
+badge_set_release="$test_dir/badge-set-release"
+FAKE_TMUX_PAUSE_BADGE_CLEAR=1 \
+FAKE_TMUX_BADGE_CLEAR_SIGNAL="$badge_clear_signal" \
+FAKE_TMUX_BADGE_CLEAR_RELEASE="$badge_clear_release" \
+    tmux_badge_clear "@2" &
+badge_clear_pid=$!
+wait_for_path "$badge_clear_signal" || fail "badge clear did not reach its paused state read"
+# Instrument the real lock acquisition call, not scheduler timing. If
+# tmux_badge_set ever stops taking the lock, this positive handshake never
+# arrives and the regression fails deterministically.
+mkdir() {
+    if [[ -n "${FAKE_LOCK_ATTEMPT_SIGNAL:-}" ]] && [[ "$*" == *".lock"* ]]; then
+        : > "$FAKE_LOCK_ATTEMPT_SIGNAL"
+    fi
+    command mkdir "$@"
+}
+FAKE_TMUX_PAUSE_BADGE_SET=1 \
+FAKE_TMUX_BADGE_SET_SIGNAL="$badge_set_signal" \
+FAKE_TMUX_BADGE_SET_RELEASE="$badge_set_release" \
+FAKE_LOCK_ATTEMPT_SIGNAL="$badge_set_lock_attempt" \
+    tmux_badge_set "💬" engage &
+badge_set_pid=$!
+wait_for_path "$badge_set_lock_attempt" || fail "badge setter did not attempt the transition lock"
+: > "$badge_clear_release"
+wait "$badge_clear_pid"
+badge_clear_pid=""
+wait_for_path "$badge_set_signal" || fail "badge setter did not continue after clear released"
+: > "$badge_set_release"
+wait "$badge_set_pid"
+badge_set_pid=""
+unset -f mkdir
+[[ "$(window_name)" == "💬 project" ]] \
+    || fail "concurrent hooks must not stack badge icons (got: $(window_name))"
+[[ "$(orig_option)" == "project" ]] \
+    || fail "concurrent hooks must preserve the undecorated original name"
+unset FAKE_TMUX_DYNAMIC_BADGE_INFO
+tmux_badge_clear "@2"
+printf '%s' "zsh" > "$state_dir/@2.window_name"
+tmux_badge_set "👋" || fail "badge state should be restored after the concurrency test"
+pass "concurrent badge clear/apply preserves one event icon"
+
+# --- lock fallback, stale-owner recovery, and bounded contention ---
+saved_lock_dir="$TMUX_RUNNING_LOCK_DIR"
+saved_lock_timeout="$TMUX_RUNNING_LOCK_TIMEOUT_MS"
+saved_lock_stale="$TMUX_RUNNING_LOCK_STALE_SECONDS"
+bad_lock_parent="$test_dir/not-a-directory"
+printf '%s' "occupied" > "$bad_lock_parent"
+TMUX_RUNNING_LOCK_DIR="$bad_lock_parent/running-locks"
+tmux_badge_clear "@2"
+tmux_badge_set "💬" engage || fail "badge should use the socket-local lock fallback"
+[[ "$(window_name)" == "💬 zsh" ]] || fail "fallback lock should preserve normal badging"
+tmux_badge_clear "@2"
+TMUX_RUNNING_LOCK_DIR="$saved_lock_dir"
+
+# Force the shared-temp fallback (a TMUX value without a socket-directory
+# component) and reject both a planted final symlink and an intermediate
+# per-user symlink. A securely created private directory remains usable.
+saved_tmux="$TMUX"
+saved_tmpdir_set="${TMPDIR+x}"
+saved_tmpdir="${TMPDIR:-}"
+shared_tmp="$test_dir/shared-tmp"
+shared_uid="${UID:-$(id -u)}"
+shared_parent="$shared_tmp/code-notify-$shared_uid"
+shared_target="$test_dir/fallback-symlink-target"
+mkdir "$shared_tmp" "$shared_target"
+chmod 700 "$shared_tmp" "$shared_target"
+mkdir "$shared_parent"
+chmod 700 "$shared_parent"
+ln -s "$shared_target" "$shared_parent/running-locks"
+TMUX="fallback-noslash,123,0"
+TMPDIR="$shared_tmp"
+TMUX_RUNNING_LOCK_DIR="$bad_lock_parent/running-locks"
+if tmux_running_transition_lock_acquire "@2"; then
+    tmux_running_transition_lock_release \
+        "$TMUX_RUNNING_TRANSITION_LOCKDIR" "$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    fail "shared-temp fallback must reject a planted final symlink"
+fi
+rm -f "$shared_parent/running-locks"
+rmdir "$shared_parent"
+ln -s "$shared_target" "$shared_parent"
+if tmux_running_transition_lock_acquire "@2"; then
+    tmux_running_transition_lock_release \
+        "$TMUX_RUNNING_TRANSITION_LOCKDIR" "$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    fail "shared-temp fallback must reject a planted parent symlink"
+fi
+rm -f "$shared_parent"
+tmux_running_transition_lock_acquire "@2" \
+    || fail "secure shared-temp fallback should remain available"
+tmux_running_transition_lock_release \
+    "$TMUX_RUNNING_TRANSITION_LOCKDIR" "$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+# A socket placed directly in a shared directory makes the socket-adjacent
+# candidate unsafe; selection must continue to the same private hierarchy.
+chmod 777 "$shared_tmp"
+TMUX="$shared_tmp/direct.sock,123,0"
+tmux_running_transition_lock_acquire "@2" \
+    || fail "unsafe socket-adjacent fallback should use private shared-temp state"
+[[ "$TMUX_RUNNING_TRANSITION_LOCKDIR" == "$shared_parent/running-locks/"* ]] \
+    || fail "unsafe socket directory should fall through to the per-user fallback"
+tmux_running_transition_lock_release \
+    "$TMUX_RUNNING_TRANSITION_LOCKDIR" "$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+TMUX="$saved_tmux"
+if [[ "$saved_tmpdir_set" == "x" ]]; then TMPDIR="$saved_tmpdir"; else unset TMPDIR; fi
+TMUX_RUNNING_LOCK_DIR="$saved_lock_dir"
+pass "shared-temp lock fallback rejects symlinks and insecure ownership"
+
+mkdir -p "$TMUX_RUNNING_LOCK_DIR"
+stale_lock=$(tmux_running_transition_lock_path "@2")
+mkdir "$stale_lock"
+printf '%s %s %s' "$$" "$(( $(date +%s) - 10 ))" "reused.pid.token" > "$stale_lock/pid"
+TMUX_RUNNING_LOCK_STALE_SECONDS=1
+tmux_badge_set "💬" engage || fail "an old lock owned by a live/reused PID should be reclaimed"
+[[ "$(window_name)" == "💬 zsh" ]] || fail "stale-lock recovery should still apply the badge"
+tmux_badge_clear "@2"
+
+# Two waiters that simultaneously decide the same dead generation is stale
+# must serialize through the reclaim gate. Force waiter 1 to win that gate,
+# hold the recovered lock, and make waiter 2 positively attempt acquisition
+# while it is held; waiter 2 may acquire only after waiter 1 releases.
+mkdir "$stale_lock"
+printf '%s %s %s' "999999999" "$(( $(date +%s) - 10 ))" "dead.race.token" \
+    > "$stale_lock/pid"
+reclaim_gate="${stale_lock}.reclaim"
+reclaim_ready_one="$test_dir/reclaim-ready-one"
+reclaim_ready_two="$test_dir/reclaim-ready-two"
+reclaim_gate_won="$test_dir/reclaim-gate-won"
+reclaim_first_acquired="$test_dir/reclaim-first-acquired"
+reclaim_second_retry="$test_dir/reclaim-second-retry"
+reclaim_allow_retry="$test_dir/reclaim-allow-retry"
+reclaim_retry_done="$test_dir/reclaim-retry-done"
+reclaim_release_first="$test_dir/reclaim-release-first"
+reclaim_second_acquired="$test_dir/reclaim-second-acquired"
+reclaim_worker_failed="$test_dir/reclaim-worker-failed"
+mkdir() {
+    local last_arg="${!#}" status
+    if [[ "$last_arg" == "$reclaim_gate" ]]; then
+        if [[ "${LOCK_RECLAIM_RACE_ID:-}" == "1" ]]; then
+            : > "$reclaim_ready_one"
+            wait_for_path "$reclaim_ready_two" || return 1
+            if command mkdir "$@"; then
+                : > "$reclaim_gate_won"
+                return 0
+            fi
+            return 1
+        fi
+        : > "$reclaim_ready_two"
+        wait_for_path "$reclaim_gate_won" || return 1
+        command mkdir "$@"
+        status=$?
+        LOCK_RECLAIM_RACE_AFTER_GATE=1
+        return "$status"
+    fi
+    if [[ "${LOCK_RECLAIM_RACE_ID:-}" == "2" ]] &&
+        [[ "${LOCK_RECLAIM_RACE_AFTER_GATE:-}" == "1" ]] &&
+        [[ "$last_arg" == "$stale_lock" ]]; then
+        : > "$reclaim_second_retry"
+        wait_for_path "$reclaim_allow_retry" || return 1
+        if command mkdir "$@"; then status=0; else status=$?; fi
+        : > "$reclaim_retry_done"
+        return "$status"
+    fi
+    command mkdir "$@"
+}
+reclaim_race_worker() {
+    local id="$1" lock token
+    if ! tmux_running_transition_lock_acquire "@2"; then
+        : > "$reclaim_worker_failed"
+        return 1
+    fi
+    lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    if [[ "$id" == "1" ]]; then
+        : > "$reclaim_first_acquired"
+        wait_for_path "$reclaim_release_first" || return 1
+    else
+        : > "$reclaim_second_acquired"
+    fi
+    tmux_running_transition_lock_release "$lock" "$token"
+}
+LOCK_RECLAIM_RACE_ID=1 reclaim_race_worker 1 &
+reclaim_one_pid=$!
+LOCK_RECLAIM_RACE_ID=2 reclaim_race_worker 2 &
+reclaim_two_pid=$!
+wait_for_path "$reclaim_first_acquired" || fail "first stale-lock waiter did not acquire"
+wait_for_path "$reclaim_second_retry" || fail "second stale-lock waiter did not retry"
+: > "$reclaim_allow_retry"
+wait_for_path "$reclaim_retry_done" || fail "second stale-lock waiter did not contend with the recovered owner"
+[[ ! -e "$reclaim_second_acquired" ]] \
+    || fail "two stale-lock reclaimers entered the critical section together"
+: > "$reclaim_release_first"
+wait "$reclaim_one_pid"
+reclaim_one_pid=""
+wait "$reclaim_two_pid"
+reclaim_two_pid=""
+unset -f mkdir reclaim_race_worker
+[[ ! -e "$reclaim_worker_failed" ]] || fail "a stale-lock race worker timed out"
+[[ -e "$reclaim_second_acquired" ]] \
+    || fail "second stale-lock waiter should acquire after the first releases"
+pass "stale-lock reclamation admits exactly one waiter"
+
+# A hook can itself die after claiming the reclaim gate. That gate carries an
+# owner record too, so it must age out rather than permanently wedging every
+# later badge operation on the window.
+mkdir "$stale_lock"
+printf '%s %s %s' "999999999" "$(( $(date +%s) - 10 ))" "dead.lock.token" \
+    > "$stale_lock/pid"
+mkdir "$reclaim_gate"
+printf '%s %s %s' "999999998" "$(( $(date +%s) - 10 ))" "dead.gate.token" \
+    > "$reclaim_gate/pid"
+tmux_running_transition_lock_acquire "@2" \
+    || fail "a dead reclaim-gate owner should not wedge lock recovery"
+tmux_running_transition_lock_release \
+    "$TMUX_RUNNING_TRANSITION_LOCKDIR" "$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+[[ ! -e "$reclaim_gate" ]] || fail "stale reclaim gate should be retired"
+pass "stale reclaim gate is recoverable"
+
+# The reclaimer can be killed AFTER removing the primary lock but BEFORE
+# releasing its gate: the lock is gone, only an orphaned stale gate remains.
+# Every later acquire then re-creates the lock, sees that gate, and would
+# relinquish forever. The mkdir-succeeds path must retire the aged-out gate.
+rm -rf "$stale_lock" "$reclaim_gate"
+mkdir "$reclaim_gate"
+printf '%s %s %s' "999999997" "$(( $(date +%s) - 10 ))" "orphan.gate.token" \
+    > "$reclaim_gate/pid"
+tmux_running_transition_lock_acquire "@2" \
+    || fail "an orphaned stale gate over a free lock should not wedge acquisition"
+[[ ! -e "$reclaim_gate" ]] \
+    || fail "an orphaned stale gate should be retired on the free-lock path"
+tmux_running_transition_lock_release \
+    "$TMUX_RUNNING_TRANSITION_LOCKDIR" "$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+pass "orphaned stale gate over a free lock is recoverable"
+
+mkdir "$stale_lock"
+printf '%s %s %s' "$$" "$(date +%s)" "active.owner.token" > "$stale_lock/pid"
+TMUX_RUNNING_LOCK_STALE_SECONDS=30
+TMUX_RUNNING_LOCK_TIMEOUT_MS=30
+if tmux_running_transition_lock_acquire "@2"; then
+    acquired_dir="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    acquired_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    tmux_running_transition_lock_release "$acquired_dir" "$acquired_token"
+    fail "active lock contention should time out instead of stealing the lock"
+fi
+rm -f "$stale_lock/pid"
+rmdir "$stale_lock"
+TMUX_RUNNING_LOCK_DIR="$saved_lock_dir"
+TMUX_RUNNING_LOCK_TIMEOUT_MS="$saved_lock_timeout"
+TMUX_RUNNING_LOCK_STALE_SECONDS="$saved_lock_stale"
+tmux_badge_set "👋" || fail "badge state should be restored after lock recovery tests"
+pass "transition lock falls back, reclaims stale owners, and bounds waits"
 
 # --- clear restores name, automatic-rename, and removes options ---
 : > "$log_file"
@@ -1150,10 +1479,11 @@ cat > "$fake_bin/settle-notifier-stub" <<EOF
 #!/bin/bash
 running=0
 [[ -f "$state_dir/@2.@code_notify_running" ]] && running=1
-printf '%s|%s|%s|%s|%s|%s|%s\n' \
+printf '%s|%s|%s|%s|%s|%s|%s|%s\n' \
     "\$TMUX_PANE" "\$1" "\$2" "\$3" \
     "\${CODE_NOTIFY_TMUX_IDLE_AGENTS:-}" \
     "\$(cat "$state_dir/@2.window_name" 2>/dev/null)" "\$running" \
+    "\${CODE_NOTIFY_TMUX_STOP_ALREADY_APPLIED:-}" \
     >> "$settle_notify_log"
 EOF
 chmod +x "$fake_bin/settle-notifier-stub"
@@ -1190,12 +1520,38 @@ CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" \
     || fail "the settle stop should restore the window name (got: $(window_name))"
 [[ ! -f "$state_dir/@2.@code_notify_settle_pane" ]] \
     || fail "the settle stop should disarm the watch"
-[[ "$(cat "$settle_notify_log")" == "%3|stop|codex|"*"|zsh|0" ]] \
+[[ "$(cat "$settle_notify_log")" == "%3|stop|codex|"*"|zsh|0|1" ]] \
     || fail "settle should invoke stop only after clearing the running rendering (got: $(cat "$settle_notify_log"))"
 [[ "$(cat "$state_dir/@2.@code_notify_agent_pid" 2>/dev/null)" == "$$" ]] \
     || fail "the settle completion must keep the exit tracking for its badge"
 rm -f "$state_dir/%3.pane_content" "$state_dir/@2.@code_notify_agent_pid"
 pass "settled codex pane retires running state before synthetic completion"
+
+# --- a prompt racing settled-review teardown keeps the new run intact ---
+# Mutate the epoch immediately after the sweep's pre-lock settle read, exactly
+# where the old implementation could tear down a prompt that had just started.
+printf '%s' "review: stable" > "$state_dir/%3.pane_content"
+CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit \
+    || fail "codex prompt-submit for the settle race should succeed"
+tmux_agent_exit_sweep || fail "settle-race baseline tick should succeed"
+old_settle_epoch=$(cat "$state_dir/@2.@code_notify_running")
+new_settle_epoch=$((old_settle_epoch + 1))
+settle_race_marker="$test_dir/settle-race-fired"
+: > "$settle_notify_log"
+FAKE_TMUX_SETTLE_RACE_MARKER="$settle_race_marker" \
+FAKE_TMUX_SETTLE_RACE_EPOCH="$new_settle_epoch" \
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" \
+TMUX_SETTLE_SECONDS=0 tmux_agent_exit_sweep \
+    || fail "settle teardown racing a new prompt should succeed"
+[[ "$(cat "$state_dir/@2.@code_notify_running")" == "$new_settle_epoch" ]] \
+    || fail "settle teardown must not remove a prompt that started after its snapshot"
+[[ -f "$state_dir/@2.@code_notify_settle_pane" ]] \
+    || fail "settle teardown must keep the new prompt's watch"
+[[ ! -s "$settle_notify_log" ]] \
+    || fail "a superseded settle snapshot must not synthesize completion"
+tmux_running_stop || fail "settle-race cleanup should succeed"
+rm -f "$state_dir/%3.pane_content" "$settle_race_marker"
+pass "settled-review teardown preserves a concurrently started prompt"
 
 # --- scheduled settle completion preserves idle configuration ---
 # The synthetic stop runs inside the timer's fresh process and arms its idle
@@ -1224,7 +1580,7 @@ settle_handoff_round() {
     env -u TMUX_PANE /bin/sh -c "$payload"
 }
 settle_handoff_round "" || fail "default-allowlist handoff round should run cleanly"
-[[ "$(cat "$settle_notify_log")" == *"|codex|antigravity|zsh|0" ]] \
+[[ "$(cat "$settle_notify_log")" == *"|codex|antigravity|zsh|0|1" ]] \
     || fail "scheduled completion should inherit the default idle allowlist (got: $(cat "$settle_notify_log"))"
 rm -f "$state_dir/%3.pane_content" \
     "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
@@ -1233,7 +1589,7 @@ settle_handoff_round "antigravity" || fail "override-allowlist handoff round sho
     || fail "the scheduled payload should carry the session's allowlist"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "the scheduled settle stop should still retire the running marker"
-[[ "$(cat "$settle_notify_log")" == *"|antigravity|zsh|0" ]] \
+[[ "$(cat "$settle_notify_log")" == *"|antigravity|zsh|0|1" ]] \
     || fail "synthetic completion should receive the overridden idle allowlist (got: $(cat "$settle_notify_log"))"
 rm -f "$state_dir/%3.pane_content" "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
 printf '%s' "zsh" > "$state_dir/@2.window_name"
@@ -1497,8 +1853,8 @@ tmux_badge_clear "@2" || fail "badge clear should succeed"
 [[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
     || fail "clearing the badge should disarm the idle watch"
 clear_cmd=$(tmux_badge_build_clear_command) || fail "clear command should build"
-[[ "$clear_cmd" == *"@code_notify_idle_watch"* ]] \
-    || fail "the click-to-clear command should disarm the idle watch"
+[[ "$clear_cmd" == *"badge-clear-window '@2'"* ]] \
+    || fail "the click-to-clear command should use the locked clear subcommand"
 rm -f "$state_dir/%3.pane_content"
 pass "badge clear and notification click cancel the pending idle nudge"
 
@@ -1592,6 +1948,19 @@ snip="$(cat "$state_dir/.@code_notify_spinner_snip")"
 [[ "$snip" == *"🌑"* && "$snip" == *"🌘"* ]] || fail "spinner snippet should contain the moon frames"
 [[ "$snip" == *'#{T:@code_notify_clock}'* ]] || fail "spinner snippet should be wall-clock driven"
 [[ "$snip" == *'@code_notify_running'* ]] || fail "spinner snippet should gate on the running option"
+[[ "$snip" == *'#{?#{!=:#{@code_notify_orig_name},},,'* ]] \
+    || fail "event badges should suppress the spinner in the status format"
+if [[ -n "$REAL_TMUX" ]] && "$REAL_TMUX" -L "$QUOTE_SOCK" has-session 2>/dev/null; then
+    real_window=$("$REAL_TMUX" -L "$QUOTE_SOCK" display-message -p '#{window_id}')
+    real_now=$(date +%s)
+    "$REAL_TMUX" -L "$QUOTE_SOCK" set-option -w -t "$real_window" @code_notify_running "$real_now"
+    "$REAL_TMUX" -L "$QUOTE_SOCK" set-option -g @code_notify_clock "$real_now"
+    "$REAL_TMUX" -L "$QUOTE_SOCK" set-option -w -t "$real_window" @code_notify_orig_name 0
+    [[ -z "$("$REAL_TMUX" -L "$QUOTE_SOCK" display-message -p -t "$real_window" "$snip")" ]] \
+        || fail "a literal original window name of 0 must still suppress the spinner"
+    "$REAL_TMUX" -L "$QUOTE_SOCK" set-option -wu -t "$real_window" @code_notify_running
+    "$REAL_TMUX" -L "$QUOTE_SOCK" set-option -wu -t "$real_window" @code_notify_orig_name
+fi
 [[ "$(cat "$state_dir/.window-status-format")" == "$snip"THEME-FMT ]] \
     || fail "arm should prepend the snippet to window-status-format"
 [[ "$(cat "$state_dir/.window-status-current-format")" == "$snip"THEME-CUR ]] \
@@ -1748,7 +2117,7 @@ CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" \
     || fail "settled spinner-mode review should drop the running epoch"
 [[ ! -f "$state_dir/.@code_notify_spinner_snip" ]] \
     || fail "settled spinner-mode review should disarm the spinner"
-[[ "$(cat "$settle_notify_log")" == "%3|stop|codex|"*"|zsh|0" ]] \
+[[ "$(cat "$settle_notify_log")" == "%3|stop|codex|"*"|zsh|0|1" ]] \
     || fail "spinner should be visually inactive before synthetic completion (got: $(cat "$settle_notify_log"))"
 rm -f "$state_dir/%3.pane_content"
 pass "settled review removes the spinner before synthetic completion"
@@ -1875,11 +2244,9 @@ pass "disabled running-start still engage-clears"
 
 # --- clear command structure ---
 cmd=$(tmux_badge_build_clear_command) || fail "clear command should build inside tmux"
-[[ "$cmd" == *"-S '$test_dir/sock'"* ]] || fail "clear command should target the captured socket"
-[[ "$cmd" == *"rename-window -t '@2'"* ]] || fail "clear command should rename the origin window"
-[[ "$cmd" == *"@code_notify_orig_name"* ]] || fail "clear command should read the saved name"
-[[ "$cmd" == *"@code_notify_badged_name"* ]] || fail "clear command should read the saved badged name"
-[[ "$cmd" == *'#{window_name}'* ]] || fail "clear command should check the live window name"
+[[ "$cmd" == *"TMUX='$test_dir/sock,12345,0'"* ]] || fail "clear command should target the captured socket environment"
+[[ "$cmd" == *"badge-clear-window '@2'"* ]] && [[ "$cmd" == *"/tmux.sh'"* ]] \
+    || fail "clear command should delegate to the locked window-clear entry point"
 pass "clear command structure"
 
 # --- generated clear command restores a badged window ---
@@ -1889,6 +2256,37 @@ tmux_badge_set "🧨" || fail "badge for clear-command test should succeed"
 [[ "$(window_name)" == "zsh" ]] || fail "generated command should restore the original name"
 [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "generated command should unset the saved options"
 pass "generated clear command execution"
+
+# --- notification click clear serializes with a concurrent event badge ---
+tmux_badge_set "💬" engage || fail "badge for click-clear race should succeed"
+click_clear_signal="$test_dir/click-clear-read"
+click_clear_release="$test_dir/click-clear-release"
+click_set_lock_attempt="$test_dir/click-set-lock-attempt"
+FAKE_TMUX_PAUSE_BADGE_CLEAR=1 \
+FAKE_TMUX_BADGE_CLEAR_SIGNAL="$click_clear_signal" \
+FAKE_TMUX_BADGE_CLEAR_RELEASE="$click_clear_release" \
+    /bin/sh -c "$cmd" > /dev/null 2>&1 &
+click_clear_pid=$!
+wait_for_path "$click_clear_signal" || fail "click clear did not reach its locked state read"
+mkdir() {
+    if [[ -n "${FAKE_LOCK_ATTEMPT_SIGNAL:-}" ]] && [[ "$*" == *".lock"* ]]; then
+        : > "$FAKE_LOCK_ATTEMPT_SIGNAL"
+    fi
+    command mkdir "$@"
+}
+FAKE_LOCK_ATTEMPT_SIGNAL="$click_set_lock_attempt" tmux_badge_set "💬" engage &
+badge_set_pid=$!
+wait_for_path "$click_set_lock_attempt" || fail "concurrent event did not attempt the click clear's lock"
+: > "$click_clear_release"
+wait "$click_clear_pid"
+click_clear_pid=""
+wait "$badge_set_pid"
+badge_set_pid=""
+unset -f mkdir
+[[ "$(window_name)" == "💬 zsh" ]] \
+    || fail "click clear and concurrent event must leave exactly the newer badge (got: $(window_name))"
+tmux_badge_clear "@2"
+pass "generated click clear is atomic with concurrent badge delivery"
 
 # --- generated clear command is a no-op without a badge ---
 : > "$log_file"
@@ -1942,7 +2340,7 @@ EOF
     [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "engage" ]] \
         || fail "Claude badge should record clear mode engage"
     grep -qx -- "-focus" "$tn_log" || fail "notifier should pass -focus"
-    grep -q -- "@code_notify_orig_name" "$tn_log" \
+    grep -q -- "badge-clear-window" "$tn_log" \
         && fail "Claude notification must not carry a click-to-clear command (clears on prompt-submit)"
     grep -q "set-hook -g session-window-changed" "$log_file" \
         && fail "Claude badge-set must not arm the glance-clear focus hook"
@@ -2192,7 +2590,7 @@ EOF
         || fail "codex badge without a prompt hook should record clear mode glance"
     grep -q "set-hook -g session-window-changed" "$log_file" \
         || fail "codex (glance-clear) badge-set must arm the focus hook"
-    grep -q -- "@code_notify_orig_name" "$tn_log" \
+    grep -q -- "badge-clear-window" "$tn_log" \
         || fail "codex notification should carry the click-to-clear command"
     pass "notifier end-to-end: codex without a prompt hook keeps glance-clearing"
 
@@ -2250,7 +2648,7 @@ EOF
         || fail "codex badge with the prompt hook should record clear mode engage"
     grep -q "set-hook -g session-window-changed" "$log_file" \
         && fail "codex (engage-clear) badge-set must not arm the focus hook"
-    grep -q -- "@code_notify_orig_name" "$tn_log" \
+    grep -q -- "badge-clear-window" "$tn_log" \
         && fail "codex (engage-clear) notification must not carry a click-to-clear command"
     pass "notifier end-to-end: codex with the prompt hook engage-clears"
 
@@ -2265,6 +2663,23 @@ EOF
     [[ "$(cat "$state_dir/@2.@code_notify_clear_mode")" == "running" ]] \
         || fail "codex UserPromptSubmit should leave a running-mode marker"
     pass "notifier end-to-end: codex UserPromptSubmit swaps badge for running marker"
+
+    # A settle-derived completion has already removed its own old marker.
+    # If a new prompt claims the window before that synthetic notifier starts,
+    # it must neither stop the new run nor attach the old turn's idle watch.
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        CODE_NOTIFY_SKIP_CODEX_DESKTOP_CHECK=1 CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
+        CODE_NOTIFY_TMUX_STOP_ALREADY_APPLIED=1 \
+        PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        bash "$NOTIFIER" stop codex testproj > /dev/null 2>&1 \
+        || fail "already-applied synthetic stop should exit cleanly"
+    [[ "$(window_name)" == "🌕 zsh" ]] \
+        || fail "an old synthetic stop must not replace a new run (got: $(window_name))"
+    [[ "$(cat "$state_dir/@2.@code_notify_running" 2>/dev/null)" =~ ^[0-9]+$ ]] \
+        || fail "an old synthetic stop must preserve the new running epoch"
+    [[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+        || fail "an old synthetic stop must not arm an idle watch on a new run"
+    pass "notifier end-to-end: settled completion preserves a newer prompt"
 
     # Codex /review emits no native stop. Once its pane settles, the sweep must
     # remove the running rendering first, synthesize the normal completion

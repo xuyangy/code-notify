@@ -124,6 +124,7 @@ case "$cmd" in
     display-message)
         case "${rest[0]}" in
             '#{session_id} #{window_id} #{pane_id}') printf '%s\n' '$1 @2 %3' ;;
+            '#{window_id}') printf '%s\n' '@2' ;;
             *'#{window_id}|#{automatic-rename}|#{&&:#{window_active},#{session_attached}}|#{window_name}'*)
                 printf '%s\n' "@2|on|${FAKE_TMUX_VISIBLE:-1}|$(cat "$FAKE_TMUX_STATE/@2.window_name")"
                 ;;

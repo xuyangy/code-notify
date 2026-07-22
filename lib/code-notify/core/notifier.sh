@@ -1843,10 +1843,18 @@ case "$HOOK_TYPE" in
         ;;
     "stop"|"error"|"failed")
         if [[ "$AGY_STOP_FINAL_CLEANUP" != "1" ]]; then
-            # consume-queued-prompt: a UserPromptSubmit that raced or queued
-            # ahead of this turn end already armed the indicator for the next
-            # turn; this teardown must not run it dark (see tmux_running_stop).
-            tmux_running_stop consume-queued-prompt 2>/dev/null || true
+            if [[ "${CODE_NOTIFY_TMUX_STOP_ALREADY_APPLIED:-}" == "1" ]]; then
+                # The settle sweep removed this hook-less turn under the
+                # transition lock before invoking us. Do not run the generic
+                # stop again: a new prompt may have claimed the window in the
+                # small handoff between the sweep and this synthetic event.
+                :
+            else
+                # consume-queued-prompt: a UserPromptSubmit that raced or queued
+                # ahead of this turn end already armed the indicator for the next
+                # turn; this teardown must not run it dark (see tmux_running_stop).
+                tmux_running_stop consume-queued-prompt 2>/dev/null || true
+            fi
             # Only this queued-prompt path shares its running state with
             # UserPromptSubmit. Antigravity performs separate cleanup and
             # must still receive its normal terminal badge.
@@ -1863,7 +1871,12 @@ case "$HOOK_TYPE" in
         # a rate-limited completion is still a completion the user has not
         # seen, and the nudge run self-gates on snooze/kill switch anyway.
         if [[ "$HOOK_TYPE" == "stop" ]]; then
-            tmux_idle_watch_arm_current "$TOOL_NAME" "$PROJECT_NAME" 2>/dev/null || true
+            if [[ "${CODE_NOTIFY_TMUX_STOP_ALREADY_APPLIED:-}" == "1" ]]; then
+                tmux_idle_watch_arm_current_unless_running \
+                    "$TOOL_NAME" "$PROJECT_NAME" 2>/dev/null || true
+            else
+                tmux_idle_watch_arm_current "$TOOL_NAME" "$PROJECT_NAME" 2>/dev/null || true
+            fi
         fi
         ;;
 esac

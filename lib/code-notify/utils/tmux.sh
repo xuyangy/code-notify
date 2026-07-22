@@ -263,9 +263,20 @@ tmux_badge_name_is_badged() {
 # for callers that haven't queried the window yet.
 tmux_badge_apply() {
     local window_id="$1" autorename="$2" name="$3" icon="$4" clear_mode="$5"
-    local orig_name badged_name
+    local orig_name badged_name current_mode
     orig_name=$(tmux show-options -wqv -t "$window_id" @code_notify_orig_name 2>/dev/null)
     badged_name=$(tmux show-options -wqv -t "$window_id" @code_notify_badged_name 2>/dev/null)
+    if [[ -n "$orig_name" ]] && [[ "$name" == "$icon $orig_name" ]] &&
+        [[ "$badged_name" == "$name" ]]; then
+        current_mode=$(tmux show-options -wqv -t "$window_id" @code_notify_clear_mode 2>/dev/null)
+        if [[ "$current_mode" == "$clear_mode" ]]; then
+            # A burst of identical subagent events already has exactly the
+            # requested state. The first writer completed tracking/hook setup
+            # before releasing this same lock, so later writers need no tmux
+            # mutations at all.
+            return 0
+        fi
+    fi
     if [[ -z "$orig_name" ]]; then
         orig_name="$name"
         tmux set-option -w -t "$window_id" @code_notify_orig_name "$orig_name" 2>/dev/null || return 1
@@ -296,24 +307,35 @@ tmux_badge_apply() {
     return 0
 }
 
-# Resolve a target and badge it. The optional third argument targets a
-# specific window (or pane) instead of the caller's own pane, for callers
-# that iterate windows without running in them (e.g. the spinner-off fallback
-# re-badging every running window).
-tmux_badge_set() {
-    local icon="$1"
-    local clear_mode="${2:-glance}"
-    local target="${3:-}"
-    local visible_action="${4:-skip}"
-    [[ -n "$icon" ]] || return 1
-    tmux_badge_enabled || return 1
+# Resolve the caller's target once before locking. The original target is kept
+# for the state capture under the lock: a pane target retains tmux's session
+# context for linked windows, while the resolved window id provides a stable
+# per-window lock key.
+tmux_badge_resolve_target() {
+    local target="${1:-}"
     if [[ -z "$target" ]]; then
         tmux_focus_available || return 1
         target="$TMUX_PANE"
     else
-        # An explicit target needs no pane of its own — just a tmux server.
         { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 1
     fi
+    local window_id
+    window_id=$(tmux display-message -p -t "$target" '#{window_id}' 2>/dev/null) || return 1
+    [[ "$window_id" =~ ^@[0-9]+$ ]] || return 1
+    TMUX_BADGE_TARGET="$target"
+    TMUX_BADGE_WINDOW_ID="$window_id"
+    return 0
+}
+
+# Badge a resolved target while the caller holds its transition lock. Keeping
+# the decorated-name capture inside the lock prevents a concurrent clear from
+# turning a stale "💬 name" capture into the next saved original.
+tmux_badge_set_locked() {
+    local icon="$1"
+    local clear_mode="${2:-glance}"
+    local target="$3"
+    local visible_action="${4:-skip}"
+    local expected_window_id="${5:-}"
 
     # window_name goes last so embedded "|" cannot shift the other fields.
     local info window_id autorename visible name
@@ -323,6 +345,9 @@ tmux_badge_set() {
 
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 1
+    if [[ -n "$expected_window_id" ]] && [[ "$window_id" != "$expected_window_id" ]]; then
+        return 1
+    fi
     # Running markers land even on the visible window (the user just submitted
     # a prompt there). What an event badge does there depends on
     # visible_action ($4):
@@ -344,6 +369,34 @@ tmux_badge_set() {
     tmux_badge_apply "$window_id" "$autorename" "$name" "$icon" "$clear_mode"
 }
 
+# Resolve a target and badge it. The optional third argument targets a
+# specific window (or pane) instead of the caller's own pane, for callers
+# that iterate windows without running in them (e.g. the spinner-off fallback
+# re-badging every running window). Badge mutations share the running-state
+# transition lock so concurrent Claude team hooks cannot interleave a clear
+# and apply or turn a decorated name into the next saved original.
+tmux_badge_set() {
+    local icon="$1"
+    local clear_mode="${2:-glance}"
+    local target="${3:-}"
+    local visible_action="${4:-skip}"
+    [[ -n "$icon" ]] || return 1
+    tmux_badge_enabled || return 1
+    tmux_badge_resolve_target "$target" || return 1
+    target="$TMUX_BADGE_TARGET"
+    local window_id="$TMUX_BADGE_WINDOW_ID" transition_lock transition_token status
+    tmux_running_transition_lock_acquire "$window_id" || return 1
+    transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    if tmux_badge_set_locked "$icon" "$clear_mode" "$target" "$visible_action" "$window_id"; then
+        status=0
+    else
+        status=$?
+    fi
+    tmux_running_transition_lock_release "$transition_lock" "$transition_token"
+    return "$status"
+}
+
 # Apply a terminal badge only while the originating window is still stopped.
 # tmux_running_stop releases the transition lock before the notifier performs
 # delivery, so a queued successor can begin in that gap even when Stop won the
@@ -356,30 +409,26 @@ tmux_badge_set_unless_running() {
     local clear_mode="${2:-glance}"
     local target="${3:-}"
     local visible_action="${4:-skip}"
-    if [[ -z "$target" ]]; then
-        tmux_focus_available || return 1
-        target="$TMUX_PANE"
-    else
-        { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 1
-    fi
-
-    local info window_id transition_lock since now status
-    info=$(tmux display-message -p -t "$target" \
-        '#{window_id}|#{automatic-rename}|#{&&:#{window_active},#{session_attached}}|#{window_name}' \
-        2>/dev/null) || return 1
-    IFS='|' read -r window_id _ <<< "$info"
-    [[ "$window_id" =~ ^@[0-9]+$ ]] || return 1
+    [[ -n "$icon" ]] || return 1
+    tmux_badge_enabled || return 1
+    tmux_badge_resolve_target "$target" || return 1
+    target="$TMUX_BADGE_TARGET"
+    local window_id="$TMUX_BADGE_WINDOW_ID" transition_lock transition_token since now status
     tmux_running_transition_lock_acquire "$window_id" || return 1
     transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
     since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
     now=$(date +%s)
     if [[ "$since" =~ ^[0-9]+$ ]] && (( now - since < TMUX_RUNNING_TTL )); then
-        tmux_running_transition_lock_release "$transition_lock"
+        tmux_running_transition_lock_release "$transition_lock" "$transition_token"
         return 0
     fi
-    tmux_badge_set "$icon" "$clear_mode" "$window_id" "$visible_action"
-    status=$?
-    tmux_running_transition_lock_release "$transition_lock"
+    if tmux_badge_set_locked "$icon" "$clear_mode" "$target" "$visible_action" "$window_id"; then
+        status=0
+    else
+        status=$?
+    fi
+    tmux_running_transition_lock_release "$transition_lock" "$transition_token"
     return "$status"
 }
 
@@ -388,7 +437,8 @@ tmux_badge_set_unless_running() {
 # If the user renamed the window while badged, their name wins: keep it (and
 # leave automatic-rename off, as a manual rename implies) and only drop the
 # badge state.
-tmux_badge_clear() {
+# Clear badge state while the caller holds the window transition lock.
+tmux_badge_clear_locked() {
     local window_id="$1"
     local orig_name autorename badged_name current
     orig_name=$(tmux show-options -wqv -t "$window_id" @code_notify_orig_name 2>/dev/null)
@@ -415,6 +465,20 @@ tmux_badge_clear() {
     # visit, notification click, or the cleanup paths), so a pending
     # post-completion idle nudge is moot.
     tmux set-option -wu -t "$window_id" @code_notify_idle_watch 2>/dev/null
+}
+
+tmux_badge_clear() {
+    local window_id="$1"
+    [[ "$window_id" =~ ^@[0-9]+$ ]] || return 0
+    local transition_lock transition_token
+    tmux_running_transition_lock_acquire "$window_id" || return 0
+    transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    # A direct clear is an acknowledgement even if another hook already
+    # removed the visible badge; always cancel its pending idle nudge.
+    tmux set-option -wu -t "$window_id" @code_notify_idle_watch 2>/dev/null
+    tmux_badge_clear_locked "$window_id"
+    tmux_running_transition_lock_release "$transition_lock" "$transition_token"
 }
 
 # Clear badges the user has implicitly acknowledged: any badged window that is
@@ -745,6 +809,32 @@ tmux_idle_watch_arm_current() {
     tmux_idle_watch_arm "$agent" "$project" "$window_id" "$pane_id"
 }
 
+# The settle sweep has already removed the old run before it invokes the
+# notifier's synthetic completion. Arm that completion's idle watch only if a
+# new prompt has not claimed the window in the meantime. The check and write
+# share the transition lock with prompt-submit, so either the watch lands
+# first and the new prompt clears it, or the prompt lands first and this skips.
+tmux_idle_watch_arm_current_unless_running() {
+    local agent="$1" project="$2"
+    tmux_focus_available || return 0
+    local target session_id window_id pane_id
+    target=$(tmux_focus_capture_target) || return 0
+    read -r session_id window_id pane_id <<< "$target"
+    [[ "$window_id" =~ ^@[0-9]+$ ]] || return 0
+
+    tmux_running_transition_lock_acquire "$window_id" || return 0
+    local transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    local transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    local since now
+    since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
+    now=$(date +%s)
+    if [[ ! "$since" =~ ^[0-9]+$ ]] || (( now - since >= TMUX_RUNNING_TTL )); then
+        tmux_idle_watch_arm "$agent" "$project" "$window_id" "$pane_id"
+    fi
+    tmux_running_transition_lock_release "$transition_lock" "$transition_token"
+    return 0
+}
+
 tmux_idle_watch_disarm() {
     tmux set-option -wu -t "$1" @code_notify_idle_watch 2>/dev/null
 }
@@ -779,7 +869,8 @@ tmux_settle_watch_notify() {
     local pane_id="$1" agent="$2" project="$3" notifier
     notifier="${CODE_NOTIFY_NOTIFIER_PATH:-${TMUX_BADGE_LIB_PATH%/*}/../core/notifier.sh}"
     [[ -f "$notifier" ]] || return 1
-    TMUX_PANE="$pane_id" bash "$notifier" stop "$agent" "$project" >/dev/null 2>&1
+    CODE_NOTIFY_TMUX_STOP_ALREADY_APPLIED=1 TMUX_PANE="$pane_id" \
+        bash "$notifier" stop "$agent" "$project" >/dev/null 2>&1
 }
 
 # Ownership token for the repeating one-shot timer chains below. Each
@@ -886,7 +977,8 @@ tmux_agent_exit_schedule_sweep() {
 tmux_agent_exit_sweep() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
     local now window_id pid since settle_pane idle_watch resume orig live=0
-    local fp_now fp_prev settle_since settle_ctx mode
+    local fp_now fp_prev settle_since settle_ctx mode transition_lock transition_token
+    local current_pid current_since current_settle_since
     local ipane isince ifp1 ifp2 istate iagent iproject
     now=$(date +%s)
     # orig (the badge marker) reads last: it is the only field that may embed
@@ -916,14 +1008,28 @@ tmux_agent_exit_sweep() {
                 # pending input-resume/settle state, and an event badge
                 # without disturbing a manual window rename
                 # (tmux_badge_clear already preserves one).
-                tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
-                tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
-                tmux_resume_flag_clear "$window_id"
-                tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
-                tmux_running_settle_disarm "$window_id"
-                tmux_idle_watch_disarm "$window_id"
-                tmux_badge_clear "$window_id"
-                tmux_agent_exit_untrack "$window_id"
+                if ! tmux_running_transition_lock_acquire "$window_id"; then
+                    live=1
+                    continue
+                fi
+                transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+                transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+                current_pid=$(tmux show-options -wqv -t "$window_id" @code_notify_agent_pid 2>/dev/null)
+                if [[ "$current_pid" == "$pid" ]]; then
+                    tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
+                    tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+                    tmux_resume_flag_clear "$window_id"
+                    tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
+                    tmux_running_settle_disarm "$window_id"
+                    tmux_idle_watch_disarm "$window_id"
+                    tmux_badge_clear_locked "$window_id"
+                    tmux_agent_exit_untrack "$window_id"
+                else
+                    # A fresh hook already associated this window with a new
+                    # owner; leave its state intact and keep the sweep alive.
+                    live=1
+                fi
+                tmux_running_transition_lock_release "$transition_lock" "$transition_token"
                 continue
             fi
         fi
@@ -996,13 +1102,29 @@ tmux_agent_exit_sweep() {
         # window — drop the marker, clear the running rename (an event badge
         # that replaced it is left alone), and stop tracking; the next hook
         # event re-arms everything.
+        if ! tmux_running_transition_lock_acquire "$window_id"; then
+            live=1
+            continue
+        fi
+        transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+        transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+        current_since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
+        current_settle_since=$(tmux show-options -wqv -t "$window_id" @code_notify_settle_since 2>/dev/null)
+        if [[ "$current_since" != "$since" ]] || [[ "$current_settle_since" != "$settle_since" ]]; then
+            # A prompt started after the sweep snapshot. Its epoch/watch owns
+            # the window now, even when second-resolution epochs collide.
+            tmux_running_transition_lock_release "$transition_lock" "$transition_token"
+            live=1
+            continue
+        fi
         settle_ctx=$(tmux show-options -wqv -t "$window_id" @code_notify_settle_ctx 2>/dev/null)
         tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
         tmux_running_settle_disarm "$window_id"
         mode=$(tmux show-options -wqv -t "$window_id" @code_notify_clear_mode 2>/dev/null)
         if [[ "$mode" == "running" ]]; then
-            tmux_badge_clear "$window_id"
+            tmux_badge_clear_locked "$window_id"
         fi
+        tmux_running_transition_lock_release "$transition_lock" "$transition_token"
         # Run the missing terminal event through the real notifier after the
         # running rendering is gone. That applies the normal completion badge
         # and toast, then arms the same idle watch as a native stop. If the
@@ -1044,9 +1166,11 @@ tmux_running_spinner_enabled() {
 # The status-line snippet: while this window's @code_notify_running epoch is
 # fresher than the TTL, show the moon frame for the current wall-clock second
 # (a trailing space separates it from the theme's own content); otherwise show
-# nothing. Everything is computed by tmux during its normal status redraw —
-# no process is spawned. Frame choice is a nested-conditional table because
-# tmux formats have no array indexing.
+# nothing. An event badge owns @code_notify_orig_name and has higher display
+# priority, so it suppresses the independent spinner until the badge clears.
+# Everything is computed by tmux during its normal status redraw — no process
+# is spawned. Frame choice is a nested-conditional table because tmux formats
+# have no array indexing.
 tmux_spinner_build_format() {
     local frames=(🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘)
     local idx='#{e|m:#{T:@code_notify_clock},8}'
@@ -1056,7 +1180,7 @@ tmux_spinner_build_format() {
         frame="#{?#{e|==:$idx,$i},${frames[$i]},$frame}"
     done
     local age='#{e|-:#{T:@code_notify_clock},#{@code_notify_running}}'
-    printf '%s' "#{?#{@code_notify_running},#{?#{e|<:$age,$TMUX_RUNNING_TTL},$frame ,},}"
+    printf '%s' "#{?#{!=:#{@code_notify_orig_name},},,#{?#{@code_notify_running},#{?#{e|<:$age,$TMUX_RUNNING_TTL},$frame ,},}}"
 }
 
 # The global status-interval set in tmux_spinner_arm does not reach sessions
@@ -1224,7 +1348,10 @@ tmux_running_start() {
     read -r session_id window_id pane_id <<< "$target"
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
-    local spinner=0
+    local transition_lock transition_token spinner=0
+    tmux_running_transition_lock_acquire "$window_id" || return 0
+    transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
     if tmux_running_spinner_enabled; then
         spinner=1
         # The spinner is rendered independently from the window name, so it
@@ -1233,9 +1360,12 @@ tmux_running_start() {
         # lands: the marker makes the spinner render on the very next status
         # repaint, and the badge restore is several tmux round-trips away, so
         # the reverse order flashes the spinner next to the still-badged name.
-        tmux_badge_clear "$window_id"
+        tmux_badge_clear_locked "$window_id"
     fi
-    tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
+    if ! tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null; then
+        tmux_running_transition_lock_release "$transition_lock" "$transition_token"
+        return 0
+    fi
     # A new prompt or a resumed tool turn supersedes any earlier input wait —
     # and any pending post-completion idle nudge.
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
@@ -1246,9 +1376,10 @@ tmux_running_start() {
     if (( spinner )); then
         tmux_agent_exit_track "$window_id"
         tmux_spinner_arm
-    else
-        tmux_badge_set "$TMUX_RUNNING_ICON" running
+    elif tmux_badge_enabled; then
+        tmux_badge_set_locked "$TMUX_RUNNING_ICON" running "$TMUX_PANE" skip "$window_id" || true
     fi
+    tmux_running_transition_lock_release "$transition_lock" "$transition_token"
     # Make sure the retire timer is armed for this fresh marker — one
     # show-options round trip when it already is. A server-wide stale sweep
     # would also converge dead runs here, but it lists every window on every
@@ -1257,50 +1388,243 @@ tmux_running_start() {
     return 0
 }
 
-# Recoverable cross-process lock for the prompt/Stop transition. tmux's
-# `wait-for -L` mutex has no owner association, so a hook killed after locking
-# can strand the channel for the life of the tmux server. An atomic mkdir plus
-# owner PID gives the next hook a way to reclaim that narrow failure window.
+# Recoverable, bounded cross-process lock for one window's badge/running state.
+# tmux's `wait-for -L` mutex has no owner association, so a killed hook can
+# strand it for the server lifetime. An atomic directory records PID, age and
+# an ownership token; dead/old owners are reclaimed, waits time out instead of
+# hanging hooks forever, and a socket-local fallback keeps badging available
+# when the normal notification state directory is not writable.
 TMUX_RUNNING_LOCK_DIR="$HOME/.claude/notifications/state/running-locks"
+TMUX_RUNNING_LOCK_TIMEOUT_MS="${CODE_NOTIFY_TMUX_LOCK_TIMEOUT_MS:-2000}"
+TMUX_RUNNING_LOCK_STALE_SECONDS="${CODE_NOTIFY_TMUX_LOCK_STALE_SECONDS:-30}"
+[[ "$TMUX_RUNNING_LOCK_TIMEOUT_MS" =~ ^[0-9]+$ ]] || TMUX_RUNNING_LOCK_TIMEOUT_MS=2000
+[[ "$TMUX_RUNNING_LOCK_STALE_SECONDS" =~ ^[0-9]+$ ]] || TMUX_RUNNING_LOCK_STALE_SECONDS=30
+(( TMUX_RUNNING_LOCK_TIMEOUT_MS > 0 )) || TMUX_RUNNING_LOCK_TIMEOUT_MS=2000
+(( TMUX_RUNNING_LOCK_STALE_SECONDS > 0 )) || TMUX_RUNNING_LOCK_STALE_SECONDS=30
+
+tmux_running_transition_lock_fallback_dir() {
+    local socket_path socket_dir
+    socket_path="${TMUX%%,*}"
+    socket_dir="${socket_path%/*}"
+    if [[ -n "$socket_dir" ]] && [[ "$socket_dir" != "$socket_path" ]]; then
+        printf '%s/.code-notify-running-locks' "$socket_dir"
+        return 0
+    fi
+    tmux_running_transition_lock_shared_tmp_dir
+}
+
+tmux_running_transition_lock_shared_tmp_dir() {
+    local uid
+    uid="${UID:-$(id -u 2>/dev/null || printf 'user')}"
+    printf '%s/code-notify-%s/running-locks' "${TMPDIR:-/tmp}" "$uid"
+}
+
+# A fallback can live below a shared temporary directory. Never follow a
+# pre-planted final symlink or reuse a directory owned by another user (or one
+# whose group/other permissions expose it). Re-check after mkdir so a race at
+# creation time cannot silently substitute an unsafe path.
+tmux_running_transition_lock_dir_secure() {
+    local dir="$1" mode numeric
+    [[ -d "$dir" ]] && [[ ! -L "$dir" ]] && [[ -O "$dir" ]] || return 1
+    mode=$(stat -f '%Lp' "$dir" 2>/dev/null) || mode=$(stat -c '%a' "$dir" 2>/dev/null) || return 1
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+    numeric=$((8#$mode))
+    (( (numeric & 077) == 0 ))
+}
+
+tmux_running_transition_lock_prepare_fallback() {
+    local dir="$1" parent
+    parent="${dir%/*}"
+    [[ -n "$parent" ]] && [[ "$parent" != "$dir" ]] || return 1
+
+    # Create one level at a time. `mkdir -p` would follow an attacker-planted
+    # symlink in the per-user component before the final-path check could see
+    # it. Both the socket directory and TMPDIR already exist, so the immediate
+    # parent is the only intermediate component this fallback owns.
+    if [[ ! -e "$parent" ]] && [[ ! -L "$parent" ]]; then
+        ( umask 077; mkdir "$parent" ) 2>/dev/null || return 1
+    fi
+    tmux_running_transition_lock_dir_secure "$parent" || return 1
+
+    if [[ ! -e "$dir" ]] && [[ ! -L "$dir" ]]; then
+        ( umask 077; mkdir "$dir" ) 2>/dev/null || return 1
+    fi
+    tmux_running_transition_lock_dir_secure "$dir"
+}
+
+# Prefer the directory beside the tmux socket, but a custom socket may itself
+# live directly in a shared directory (for example /tmp). If that candidate
+# fails the ownership/mode checks, fall through to the private per-user temp
+# hierarchy rather than disabling badges.
+tmux_running_transition_lock_select_fallback() {
+    local candidate shared
+    candidate=$(tmux_running_transition_lock_fallback_dir) || return 1
+    if tmux_running_transition_lock_prepare_fallback "$candidate"; then
+        TMUX_RUNNING_FALLBACK_DIR="$candidate"
+        return 0
+    fi
+    shared=$(tmux_running_transition_lock_shared_tmp_dir) || return 1
+    [[ "$shared" != "$candidate" ]] || return 1
+    tmux_running_transition_lock_prepare_fallback "$shared" || return 1
+    TMUX_RUNNING_FALLBACK_DIR="$shared"
+    return 0
+}
 
 tmux_running_transition_lock_path() {
-    local window_id="$1" socket_base
+    local window_id="$1" base_dir="${2:-$TMUX_RUNNING_LOCK_DIR}" socket_base
     socket_base="${TMUX%%,*}"
     socket_base="${socket_base##*/}"
     socket_base="${socket_base//[^A-Za-z0-9_.-]/_}"
-    printf '%s/%s.%s.lock' "$TMUX_RUNNING_LOCK_DIR" "${socket_base:-default}" "$window_id"
+    printf '%s/%s.%s.lock' "$base_dir" "${socket_base:-default}" "$window_id"
+}
+
+tmux_running_transition_lock_mtime() {
+    local path="$1" value
+    value=$(stat -f '%m' "$path" 2>/dev/null) || value=$(stat -c '%Y' "$path" 2>/dev/null) || return 1
+    [[ "$value" =~ ^[0-9]+$ ]] || return 1
+    printf '%s' "$value"
+}
+
+tmux_running_transition_lock_is_stale() {
+    local lockdir="$1" owner created now mtime
+    [[ -d "$lockdir" ]] || return 1
+    if [[ -r "$lockdir/pid" ]]; then
+        read -r owner created _ < "$lockdir/pid" 2>/dev/null || true
+    fi
+    if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+        return 0
+    fi
+    now=$(date +%s)
+    if [[ "$owner" =~ ^[0-9]+$ ]]; then
+        [[ "$created" =~ ^[0-9]+$ ]] &&
+            (( now - created >= TMUX_RUNNING_LOCK_STALE_SECONDS ))
+        return
+    fi
+    mtime=$(tmux_running_transition_lock_mtime "$lockdir") || return 1
+    (( now - mtime >= TMUX_RUNNING_LOCK_STALE_SECONDS ))
+}
+
+# Claim the per-generation reclaim gate. It uses the same tokenized directory
+# shape as the main lock so a reclaimer killed in this tiny critical section
+# delays recovery only until the stale threshold instead of wedging the window
+# forever. Removing a stale gate cannot expose a second main-lock owner: every
+# main candidate checks for the gate immediately after mkdir, and the gate
+# winner revalidates the main generation before deleting it.
+tmux_running_transition_reclaim_gate_acquire() {
+    local reclaimdir="$1" now token
+    if ! mkdir "$reclaimdir" 2>/dev/null; then
+        if tmux_running_transition_lock_is_stale "$reclaimdir"; then
+            rm -f "$reclaimdir/pid" 2>/dev/null || true
+            rmdir "$reclaimdir" 2>/dev/null || true
+        fi
+        return 1
+    fi
+    now=$(date +%s)
+    token="$$.$now.${RANDOM:-0}.${RANDOM:-0}"
+    if ! ( umask 077; printf '%s %s %s' "$$" "$now" "$token" > "$reclaimdir/pid" ); then
+        rm -f "$reclaimdir/pid" 2>/dev/null || true
+        rmdir "$reclaimdir" 2>/dev/null || true
+        return 1
+    fi
+    TMUX_RUNNING_TRANSITION_LOCKDIR="$reclaimdir"
+    TMUX_RUNNING_TRANSITION_LOCKTOKEN="$token"
+    return 0
 }
 
 tmux_running_transition_lock_acquire() {
-    local window_id="$1" lockdir owner attempts=0
-    mkdir -p "$TMUX_RUNNING_LOCK_DIR" 2>/dev/null || return 1
-    lockdir="$(tmux_running_transition_lock_path "$window_id")"
-    while ! mkdir "$lockdir" 2>/dev/null; do
-        attempts=$((attempts + 1))
-        if (( attempts >= 100 )); then
-            owner=""
-            if [[ -r "$lockdir/pid" ]]; then
-                read -r owner < "$lockdir/pid" 2>/dev/null || true
+    local window_id="$1" base_dir lockdir reclaimdir fallback_dir
+    local token now attempts=0 using_fallback=0
+    local max_attempts=$(( (TMUX_RUNNING_LOCK_TIMEOUT_MS + 9) / 10 ))
+
+    base_dir="$TMUX_RUNNING_LOCK_DIR"
+    if { [[ ! -d "$base_dir" ]] && ! mkdir -p "$base_dir" 2>/dev/null; } ||
+        [[ ! -w "$base_dir" ]]; then
+        tmux_running_transition_lock_select_fallback || return 1
+        fallback_dir="$TMUX_RUNNING_FALLBACK_DIR"
+        base_dir="$fallback_dir"
+        using_fallback=1
+    fi
+    lockdir="$(tmux_running_transition_lock_path "$window_id" "$base_dir")"
+    reclaimdir="${lockdir}.reclaim"
+
+    while true; do
+        if mkdir "$lockdir" 2>/dev/null; then
+            # A stale-owner reclaimer may have removed the preceding lock just
+            # before this mkdir. It owns the adjacent gate until that removal
+            # is complete; relinquish this still-empty candidate and retry so
+            # the reclaimer can never mistake it for the stale generation.
+            if [[ -e "$reclaimdir" ]] || [[ -L "$reclaimdir" ]]; then
+                rmdir "$lockdir" 2>/dev/null || true
+                # A reclaimer killed after removing the primary lock but before
+                # releasing this gate would otherwise strand the window: every
+                # later acquire re-creates the lock, sees the orphaned gate, and
+                # relinquishes forever. Retire the gate once it ages out. Only a
+                # dead/old owner is removed, so a live reclaimer keeps its gate.
+                if tmux_running_transition_lock_is_stale "$reclaimdir"; then
+                    rm -f "$reclaimdir/pid" 2>/dev/null || true
+                    rmdir "$reclaimdir" 2>/dev/null || true
+                fi
+                attempts=$((attempts + 1))
+                (( attempts < max_attempts )) || return 1
+                sleep 0.01
+                continue
             fi
-            if [[ "$owner" =~ ^[0-9]+$ ]]; then
-                if ! kill -0 "$owner" 2>/dev/null; then
+            break
+        fi
+
+        # A parent that looked writable may still reject the atomic mkdir due
+        # to ACLs or a concurrent permission change. Fall back only when no
+        # lock exists there; an existing primary lock must remain authoritative.
+        if [[ ! -d "$lockdir" ]] && (( using_fallback == 0 )); then
+            tmux_running_transition_lock_select_fallback || return 1
+            fallback_dir="$TMUX_RUNNING_FALLBACK_DIR"
+            base_dir="$fallback_dir"
+            lockdir="$(tmux_running_transition_lock_path "$window_id" "$base_dir")"
+            reclaimdir="${lockdir}.reclaim"
+            using_fallback=1
+            continue
+        fi
+
+        attempts=$((attempts + 1))
+        if (( attempts % 10 == 0 )) &&
+            tmux_running_transition_lock_is_stale "$lockdir"; then
+            # Only one waiter may reclaim, and it must revalidate after taking
+            # the gate. A waiter that merely observed the old owner can never
+            # delete a lock another waiter recreated in the meantime.
+            if tmux_running_transition_reclaim_gate_acquire "$reclaimdir"; then
+                local reclaim_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+                local reclaim_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+                if tmux_running_transition_lock_is_stale "$lockdir"; then
                     rm -f "$lockdir/pid" 2>/dev/null || true
                     rmdir "$lockdir" 2>/dev/null || true
                 fi
-            elif [[ ! -e "$lockdir/pid" ]]; then
-                rmdir "$lockdir" 2>/dev/null || true
+                tmux_running_transition_lock_release "$reclaim_lock" "$reclaim_token"
             fi
-            attempts=0
+            continue
         fi
+        (( attempts < max_attempts )) || return 1
         sleep 0.01
     done
-    printf '%s' "$$" > "$lockdir/pid" 2>/dev/null || true
+
+    now=$(date +%s)
+    token="$$.$now.${RANDOM:-0}.${RANDOM:-0}"
+    if ! ( umask 077; printf '%s %s %s' "$$" "$now" "$token" > "$lockdir/pid" ); then
+        rm -f "$lockdir/pid" 2>/dev/null || true
+        rmdir "$lockdir" 2>/dev/null || true
+        return 1
+    fi
     TMUX_RUNNING_TRANSITION_LOCKDIR="$lockdir"
+    TMUX_RUNNING_TRANSITION_LOCKTOKEN="$token"
     return 0
 }
 
 tmux_running_transition_lock_release() {
-    local lockdir="$1"
+    local lockdir="$1" token="${2:-}" owner created current_token
+    [[ -n "$lockdir" ]] && [[ -n "$token" ]] || return 0
+    if [[ -r "$lockdir/pid" ]]; then
+        read -r owner created current_token < "$lockdir/pid" 2>/dev/null || true
+    fi
+    [[ "$current_token" == "$token" ]] || return 0
     rm -f "$lockdir/pid" 2>/dev/null || true
     rmdir "$lockdir" 2>/dev/null || true
 }
@@ -1321,11 +1645,9 @@ tmux_prompt_submit() {
         return 0
     fi
 
-    # window_name goes last so embedded "|" cannot shift the other fields.
-    local info window_id autorename visible name
-    info=$(tmux display-message -p -t "$TMUX_PANE" \
-        '#{window_id}|#{automatic-rename}|#{&&:#{window_active},#{session_attached}}|#{window_name}' 2>/dev/null) || return 0
-    IFS='|' read -r window_id autorename visible name <<< "$info"
+    local target session_id window_id pane_id
+    target=$(tmux_focus_capture_target) || return 0
+    read -r session_id window_id pane_id <<< "$target"
     local window_re='^@[0-9]+$'
     [[ "$window_id" =~ $window_re ]] || return 0
 
@@ -1336,6 +1658,7 @@ tmux_prompt_submit() {
     # prevents either side from clearing the rendering applied by the other.
     tmux_running_transition_lock_acquire "$window_id" || return 0
     local transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    local transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
 
     # A submission that arrives while this window's running marker is still
     # up means the ending turn has a queued successor: hook processes run
@@ -1360,10 +1683,10 @@ tmux_prompt_submit() {
         spinner=1
         # No rename in spinner mode: drop the event badge — before the running
         # marker below, so no repaint ever shows spinner and badge together.
-        tmux_badge_clear "$window_id"
+        tmux_badge_clear_locked "$window_id"
     fi
     if ! tmux set-option -w -t "$window_id" @code_notify_running "$now_epoch" 2>/dev/null; then
-        tmux_running_transition_lock_release "$transition_lock"
+        tmux_running_transition_lock_release "$transition_lock" "$transition_token"
         return 0
     fi
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
@@ -1376,9 +1699,9 @@ tmux_prompt_submit() {
         tmux_agent_exit_track "$window_id"
         tmux_spinner_arm
     else
-        tmux_badge_apply "$window_id" "$autorename" "$name" "$TMUX_RUNNING_ICON" running
+        tmux_badge_set_locked "$TMUX_RUNNING_ICON" running "$TMUX_PANE" skip "$window_id" || true
     fi
-    tmux_running_transition_lock_release "$transition_lock"
+    tmux_running_transition_lock_release "$transition_lock" "$transition_token"
     tmux_running_schedule_sweep $((TMUX_RUNNING_TTL + 2))
     return 0
 }
@@ -1410,6 +1733,7 @@ tmux_running_stop() {
     [[ "$window_id" =~ $window_re ]] || return 0
     tmux_running_transition_lock_acquire "$window_id" || return 0
     local transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    local transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
     if [[ "$honor_queued" == "consume-queued-prompt" ]]; then
         local queued now_queued
         queued=$(tmux show-options -wqv -t "$window_id" @code_notify_queued_prompt 2>/dev/null)
@@ -1419,7 +1743,7 @@ tmux_running_stop() {
             if (( now_queued - queued < TMUX_RUNNING_TTL )); then
                 # shellcheck disable=SC2034  # out-param read by notifier.sh
                 TMUX_RUNNING_STOP_PRESERVED=1
-                tmux_running_transition_lock_release "$transition_lock"
+                tmux_running_transition_lock_release "$transition_lock" "$transition_token"
                 return 0
             fi
         fi
@@ -1444,7 +1768,7 @@ tmux_running_stop() {
         tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
         mode=$(tmux show-options -wqv -t "$window_id" @code_notify_clear_mode 2>/dev/null)
         if [[ "$mode" == "running" ]]; then
-            tmux_badge_clear "$window_id"
+            tmux_badge_clear_locked "$window_id"
         fi
     fi
     tmux_spinner_disarm_if_idle
@@ -1458,7 +1782,7 @@ tmux_running_stop() {
         # client, and a detached session simply has no client to refresh.
         tmux refresh-client -S 2>/dev/null
     fi
-    tmux_running_transition_lock_release "$transition_lock"
+    tmux_running_transition_lock_release "$transition_lock" "$transition_token"
     return 0
 }
 
@@ -1579,23 +1903,31 @@ tmux_running_resume_after_input() {
 tmux_running_resume_window() {
     local window_id="$1"
     tmux_running_enabled || return 0
-    local spinner=0
+    [[ "$window_id" =~ ^@[0-9]+$ ]] || return 0
+    local transition_lock transition_token spinner=0
+    tmux_running_transition_lock_acquire "$window_id" || return 0
+    transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
     if tmux_running_spinner_enabled; then
         spinner=1
         # Same shape as tmux_running_start: the waiting badge must not sit
         # next to a live spinner, so it clears before the marker lands.
-        tmux_badge_clear "$window_id"
+        tmux_badge_clear_locked "$window_id"
     fi
-    tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null || return 0
+    if ! tmux set-option -w -t "$window_id" @code_notify_running "$(date +%s)" 2>/dev/null; then
+        tmux_running_transition_lock_release "$transition_lock" "$transition_token"
+        return 0
+    fi
     tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
     tmux_resume_flag_clear "$window_id"
     tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
     tmux_idle_watch_disarm "$window_id"
     if (( spinner )); then
         tmux_spinner_arm
-    else
-        tmux_badge_set "$TMUX_RUNNING_ICON" running "$window_id"
+    elif tmux_badge_enabled; then
+        tmux_badge_set_locked "$TMUX_RUNNING_ICON" running "$window_id" skip "$window_id" || true
     fi
+    tmux_running_transition_lock_release "$transition_lock" "$transition_token"
     tmux_running_schedule_sweep $((TMUX_RUNNING_TTL + 2))
     return 0
 }
@@ -1904,7 +2236,8 @@ tmux_running_schedule_sweep() {
 # ever comes.
 tmux_running_sweep_stale() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
-    local now window_id since mode oldest=""
+    local now window_id since mode oldest="" retry=0
+    local transition_lock transition_token current_since
     now=$(date +%s)
     while IFS='|' read -r window_id since mode; do
         [[ "$since" =~ ^[0-9]+$ ]] || continue
@@ -1916,15 +2249,31 @@ tmux_running_sweep_stale() {
             fi
             continue
         fi
+        if ! tmux_running_transition_lock_acquire "$window_id"; then
+            retry=1
+            continue
+        fi
+        transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+        transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+        current_since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
+        if [[ "$current_since" != "$since" ]] || [[ ! "$current_since" =~ ^[0-9]+$ ]] ||
+            (( now - current_since < TMUX_RUNNING_TTL )); then
+            tmux_running_transition_lock_release "$transition_lock" "$transition_token"
+            continue
+        fi
         tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
         tmux_running_settle_disarm "$window_id"
         tmux_idle_watch_disarm "$window_id"
+        mode=$(tmux show-options -wqv -t "$window_id" @code_notify_clear_mode 2>/dev/null)
         if [[ "$mode" == "running" ]]; then
-            tmux_badge_clear "$window_id"
+            tmux_badge_clear_locked "$window_id"
         fi
+        tmux_running_transition_lock_release "$transition_lock" "$transition_token"
     done < <(tmux list-windows -a -F \
         '#{window_id}|#{@code_notify_running}|#{@code_notify_clear_mode}' 2>/dev/null)
-    if [[ -n "$oldest" ]]; then
+    if (( retry )); then
+        tmux_running_schedule_sweep 1
+    elif [[ -n "$oldest" ]]; then
         tmux_running_schedule_sweep $((oldest + TMUX_RUNNING_TTL - now + 2))
     fi
     tmux_spinner_disarm_if_idle
@@ -1977,11 +2326,12 @@ tmux_running_convert_static_badges_to_spinner() {
 
 # Build the command a notifier click handler runs to clear the badge on the
 # originating window. Same execution context as tmux_focus_build_command
-# (/bin/sh -c, minimal PATH, no attached client), so it embeds the absolute
-# tmux path and socket. Reads the saved state at click time, so it is a no-op
-# when the badge was already cleared (or never set).
+# (/bin/sh -c, minimal PATH, no attached client), so it embeds the tmux path,
+# socket environment and this library's absolute path. The library subcommand
+# takes the same bounded per-window lock as hook-driven clears; a notification
+# click therefore cannot race a concurrent event into a stacked badge.
 tmux_badge_build_clear_command() {
-    local target session_id window_id pane_id tmux_bin socket_path
+    local target session_id window_id pane_id tmux_bin socket_path bash_bin clear_path
 
     target=$(tmux_focus_capture_target) || return 1
     read -r session_id window_id pane_id <<< "$target"
@@ -1994,53 +2344,32 @@ tmux_badge_build_clear_command() {
     if [[ -z "$tmux_bin" ]] || [[ -z "$socket_path" ]]; then
         return 1
     fi
+    bash_bin="${BASH:-$(command -v bash 2>/dev/null)}"
+    [[ -x "$bash_bin" ]] || return 1
+    [[ -f "$TMUX_BADGE_LIB_PATH" ]] || return 1
+    clear_path="${tmux_bin%/*}:${PATH:-/usr/bin:/bin}"
 
-    local q_tmux q_socket q_window
-    q_tmux=$(tmux_focus_shell_quote "$tmux_bin")
-    q_socket=$(tmux_focus_shell_quote "$socket_path")
+    local q_bash q_lib q_env q_path q_window
+    q_bash=$(tmux_focus_shell_quote "$bash_bin")
+    q_lib=$(tmux_focus_shell_quote "$TMUX_BADGE_LIB_PATH")
+    q_env=$(tmux_focus_shell_quote "$TMUX")
+    q_path=$(tmux_focus_shell_quote "$clear_path")
     q_window=$(tmux_focus_shell_quote "$window_id")
 
-    local cmd
-    cmd="t() { $q_tmux -S $q_socket \"\$@\" 2>/dev/null; }; "
-    # Clicking the notification means the user attended this window, so a
-    # pending post-completion idle nudge is moot — even when the badge was
-    # already cleared by some other path.
-    cmd+="t set-option -wu -t $q_window @code_notify_idle_watch; "
-    cmd+="n=\$(t show-options -wqv -t $q_window @code_notify_orig_name); "
-    cmd+="if [ -n \"\$n\" ]; then "
-    # Same manual-rename guard as tmux_badge_clear: only restore when the
-    # window still carries the exact name written at badge time, the original
-    # name, or the name query failed (with the legacy suffix match when no
-    # badged name was saved); a name the user chose while badged is kept, and
-    # automatic-rename stays off.
-    cmd+="w=\$(t display-message -p -t $q_window '#{window_name}'); "
-    cmd+="b=\$(t show-options -wqv -t $q_window @code_notify_badged_name); "
-    cmd+="r=0; "
-    cmd+="if [ -z \"\$w\" ] || [ \"\$w\" = \"\$n\" ]; then r=1; "
-    cmd+="elif [ -n \"\$b\" ]; then if [ \"\$w\" = \"\$b\" ]; then r=1; fi; "
-    cmd+="else case \"\$w\" in *\" \$n\") r=1;; esac; fi; "
-    cmd+="if [ \"\$r\" = 1 ]; then "
-    cmd+="t rename-window -t $q_window \"\$n\"; "
-    cmd+="if [ \"\$(t show-options -wqv -t $q_window @code_notify_autorename)\" = on ]; then "
-    cmd+="t set-option -w -t $q_window automatic-rename on; fi; "
-    cmd+="fi; "
-    cmd+="t set-option -wu -t $q_window @code_notify_orig_name; "
-    cmd+="t set-option -wu -t $q_window @code_notify_autorename; "
-    cmd+="t set-option -wu -t $q_window @code_notify_badged_name; "
-    cmd+="fi"
-
-    printf '%s' "$cmd"
+    printf '%s' "if [ -f $q_lib ]; then TMUX=$q_env PATH=$q_path $q_bash $q_lib badge-clear-window $q_window; fi"
 }
 
 # When run as a script rather than sourced, dispatch the requested subcommand:
 #   - badge-sweep: the tmux focus hook (`bash <this> badge-sweep`)
 #   - badge-clear-current: the UserPromptSubmit hook clearing this window's badge
+#   - badge-clear-window: a notification click clearing a resolved window id
 #   - running-sweep: the scheduled stale-marker timer (tmux_running_schedule_sweep)
 # Sourcing — the normal path, where BASH_SOURCE[0] differs from $0 — skips this.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     case "${1:-}" in
         badge-sweep) tmux_badge_sweep ;;
         badge-clear-current) tmux_badge_clear_current ;;
+        badge-clear-window) tmux_badge_clear "${2:-}" ;;
         running-start) tmux_running_start ;;
         running-stop) tmux_running_stop ;;
         running-pause) tmux_running_pause_for_input "${2:-}" ;;

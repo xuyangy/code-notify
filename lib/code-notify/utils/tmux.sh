@@ -2923,7 +2923,12 @@ tmux_running_resume_window() {
 # under the window transition lock so a late poll cannot clear a successor
 # request or turn that claimed the same window in the meantime.
 tmux_running_cancel_input_window() {
+    # $4 == "keep-badge" retires the pause but leaves the engage-clear badge
+    # up, for terminal signals that end the request while the pane goes on
+    # asking the user for something (see the interrupt branch in
+    # tmux_resume_poll_sweep). A rejection passes nothing and clears it.
     local window_id="$1" expected_pending="$2" expected_pause_fp="$3"
+    local keep_badge="${4:-}"
     [[ "$window_id" =~ ^@[0-9]+$ ]] || return 1
     [[ -n "$expected_pending" ]] || return 1
     [[ -n "$expected_pause_fp" ]] || return 1
@@ -2974,7 +2979,7 @@ tmux_running_cancel_input_window() {
     # The rejected request owns an engage-clear permission badge. Do not wipe
     # an unrelated legacy/glance badge that happens to share the window.
     mode=$(tmux show-options -wqv -t "$window_id" @code_notify_clear_mode 2>/dev/null)
-    if [[ "$mode" == "engage" ]]; then
+    if [[ "$mode" == "engage" ]] && [[ "$keep_badge" != "keep-badge" ]]; then
         tmux_badge_clear_locked "$window_id" "$preserve_monitor"
     fi
     tmux_running_transition_lock_release "$transition_lock" "$transition_token"
@@ -3136,7 +3141,7 @@ tmux_resume_poll_sweep() {
     local now window_id pending activity fp pane_field pane pane_meta pause_rest
     local pause_gen pause_agent pane_state cancel_enabled baseline_learned
     local cancel_baseline cancel_now fp_sum fp_size changed dialog fp_saved fp_now content
-    local marker_now pane_window waiting=0
+    local marker_now pane_window interrupt_enabled waiting=0
     now=$(date +%s)
     while IFS='|' read -r window_id pending activity fp; do
         [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
@@ -3182,6 +3187,10 @@ tmux_resume_poll_sweep() {
         cancel_enabled=0
         if tmux_resume_poll_cancel_enabled "$pause_agent"; then
             cancel_enabled=1
+        fi
+        interrupt_enabled=0
+        if tmux_resume_poll_interrupt_enabled "$pause_agent"; then
+            interrupt_enabled=1
         fi
         fp_saved="$fp_sum $fp_size"
         [[ "$pane" =~ ^%[0-9]+$ ]] || continue
@@ -3335,6 +3344,35 @@ tmux_resume_poll_sweep() {
                     "$pane_state $fp_now 1 0" 2>/dev/null
                 waiting=1
             fi
+        elif (( interrupt_enabled )) &&
+            [[ "$(tmux_interrupt_flag "$content")" == "1" ]] &&
+            [[ "$(tmux_busy_flag "$content")" != "1" ]]; then
+            # Escape is terminal for the request this pause is waiting on: the
+            # dialog it was watching can never be answered now, so the poll
+            # would otherwise watch a dead prompt for the rest of the TTL and
+            # then abandon @code_notify_resume_pending entirely — the TTL only
+            # stops polling, it clears nothing. Retire the pause here instead.
+            #
+            # Reaching this branch already establishes most of the guards the
+            # ordinary interrupt watch applies: the dialog is not on screen (an
+            # on-screen marker returns above), it did not just vanish this tick
+            # (that re-baselines above), and the content is byte-identical to
+            # the previous tick, so this is a settled pane and not a capture
+            # taken mid-repaint. TMUX_BUSY_MARKERS still vetoes, because the
+            # interrupt text also matches a merely cancelled TOOL call, after
+            # which the turn carries on working.
+            #
+            # The badge deliberately survives, exactly as it does when the
+            # interrupt watch retires an ordinary turn: that path clears only a
+            # "running" badge and leaves an engage-clear one standing. The pane
+            # here is sitting on "what should I do instead?" — an input request
+            # in its own right — so dropping the badge would retract a true
+            # waiting-for-you signal, which is the costlier error of the two.
+            # The agent's next work signal engage-clears it as usual.
+            if ! tmux_running_cancel_input_window "$window_id" "$pending" "$fp" \
+                keep-badge; then
+                waiting=1
+            fi
         else
             # Still tick: a preceding one-shot change was not an answer, so
             # drop the changed flag.
@@ -3406,6 +3444,21 @@ tmux_resume_poll_cancel_enabled() {
     local agent="$1"
     [[ -n "$TMUX_DIALOG_CANCEL_MARKERS" ]] && [[ -n "$agent" ]] &&
         [[ "|$TMUX_DIALOG_CANCEL_AGENTS|" == *"|$agent|"* ]]
+}
+
+# Whether a pause owned by $1 may be retired by the agent's own interrupt line.
+# The ordinary interrupt watch cannot cover this: it is gated on
+# @code_notify_running, which pausing for input has already taken down, so an
+# Escape during an approval prompt is invisible to it. Gate identically to
+# tmux_running_interrupt_arm so turning the interrupt watch off turns this off
+# with it. Pauses armed before the agent was packed into the snapshot simply
+# keep the old behaviour.
+tmux_resume_poll_interrupt_enabled() {
+    local agent="$1"
+    [[ -n "$TMUX_INTERRUPT_MARKERS" ]] && [[ -n "$agent" ]] &&
+        [[ "|$TMUX_INTERRUPT_WATCH_AGENTS|" == *"|$agent|"* ]] &&
+        [[ "${TMUX_INTERRUPT_SECONDS:-0}" =~ ^[0-9]+$ ]] &&
+        (( TMUX_INTERRUPT_SECONDS > 0 ))
 }
 
 # Retained-history rejection count used by both the pause-time baseline and

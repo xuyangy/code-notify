@@ -1763,6 +1763,101 @@ rm -f "$state_dir/@2.window_activity" "$state_dir/%3.pane_content" \
 tmux_running_stop || fail "cleanup after the history-gate test should succeed"
 pass "a late repaint does not make every tick rescan retained history"
 
+# --- Escape during an approval prompt retires the pause but keeps the badge ---
+# The ordinary interrupt watch is gated on @code_notify_running, which pausing
+# for input already took down, so an Escape while a permission dialog is up is
+# invisible to it and the poll would watch a dead prompt for the whole TTL —
+# which then only stops polling, clearing nothing. The badge must survive: the
+# pane is left asking "what should I do instead?", an input request in its own
+# right, and the agent's next work signal engage-clears it.
+agy_interrupted=$'● Bash(bash tests/test-tmux-badge.sh) (ctrl+o to expand)\n  └ Interrupted · What should Antigravity CLI do instead?\n>'
+arm_interrupt_pause() {
+    printf '%s' "$dialog_head" > "$state_dir/%3.pane_content"
+    CODE_NOTIFY_TMUX_AGENT_NAME=antigravity tmux_running_start \
+        || fail "running-start before the interrupt test should succeed"
+    : > "$log_file"
+    saved_agent_exit_poll="$TMUX_AGENT_EXIT_POLL_SECONDS"
+    TMUX_AGENT_EXIT_POLL_SECONDS=0
+    CODE_NOTIFY_TMUX_AGENT_NAME=antigravity tmux_running_pause_for_input watch \
+        || fail "watched pause before the interrupt test should succeed"
+    TMUX_AGENT_EXIT_POLL_SECONDS="$saved_agent_exit_poll"
+    tmux_badge_set "💬" engage \
+        || fail "permission badge before the interrupt test should succeed"
+    payload=$(sed -n 's/^run-shell -b -d 2 \(.*\)$/\1/p' "$log_file" | tail -n 1)
+    [[ -n "$payload" ]] || fail "the interrupt poll payload should be extractable"
+    printf '%s' "$(( $(cat "$state_dir/@2.@code_notify_resume_pending") + 5 ))" \
+        > "$state_dir/@2.window_activity"
+    export FAKE_TMUX_PANE_HEIGHT=3
+    fire_poll_payload || fail "the dialog baseline tick should run cleanly"
+    [[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+        || fail "the dialog baseline tick should keep the pause"
+}
+retire_interrupt_pause() {
+    unset FAKE_TMUX_PANE_HEIGHT
+    rm -f "$state_dir/@2.@code_notify_resume_pending" \
+        "$state_dir/@2.@code_notify_pause_fp" "$state_dir/@2.window_activity" \
+        "$state_dir/%3.pane_content" "$state_dir/.@code_notify_resume_poll_scheduled"
+    tmux_resume_flag_clear "@2"
+    tmux_badge_clear "@2" > /dev/null 2>&1
+    tmux_running_stop || fail "cleanup after an interrupt case should succeed"
+}
+
+arm_interrupt_pause
+# Escape. The dialog collapses to the interrupt line: marker-vanish re-baselines.
+printf '%s' "$agy_interrupted" > "$state_dir/%3.pane_content"
+fire_poll_payload || fail "the interrupt-appears tick should run cleanly"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "the tick that merely loses the dialog must not retire the pause"
+# The pane settles on the interrupt line: now it is terminal.
+: > "$log_file"
+fire_poll_payload || fail "the settled-interrupt tick should run cleanly"
+[[ ! -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "a settled interrupt should retire the dead pause"
+[[ ! -f "$state_dir/@2.@code_notify_pause_fp" ]] \
+    || fail "a settled interrupt should consume the dialog snapshot"
+[[ ! -e "$(tmux_resume_flag_path '@2')" ]] \
+    || fail "a settled interrupt should remove the mirrored resume flag"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a settled interrupt must not light the running indicator"
+[[ "$(window_name)" == "💬 zsh" ]] \
+    || fail "a settled interrupt must keep the input badge (got: $(window_name))"
+grep -q "^run-shell -b -d 2 " "$log_file" \
+    && fail "a retired pause must not schedule another resume poll"
+retire_interrupt_pause
+
+# A working line vetoes it: the interrupt text also matches a merely cancelled
+# TOOL call, after which the turn carries on and the dialog is still live.
+arm_interrupt_pause
+printf '%s\n%s' "$agy_interrupted" "✻ Reticulating splines…" \
+    > "$state_dir/%3.pane_content"
+fire_poll_payload || fail "the busy-interrupt tick should run cleanly"
+fire_poll_payload || fail "the settled busy-interrupt tick should run cleanly"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "a working line must veto the interrupt teardown"
+retire_interrupt_pause
+
+# An on-screen dialog wins outright: the request is visibly still answerable.
+arm_interrupt_pause
+printf '%s\n%s' "$agy_interrupted" "$dialog_head" > "$state_dir/%3.pane_content"
+fire_poll_payload || fail "the dialog-plus-interrupt tick should run cleanly"
+fire_poll_payload || fail "the settled dialog-plus-interrupt tick should run cleanly"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "an on-screen dialog must outrank a stale interrupt line"
+retire_interrupt_pause
+
+# A non-allowlisted agent keeps the old behaviour.
+saved_interrupt_agents="$TMUX_INTERRUPT_WATCH_AGENTS"
+TMUX_INTERRUPT_WATCH_AGENTS="claude|codex"
+arm_interrupt_pause
+printf '%s' "$agy_interrupted" > "$state_dir/%3.pane_content"
+fire_poll_payload || fail "the unwatched-agent interrupt tick should run cleanly"
+fire_poll_payload || fail "the settled unwatched-agent tick should run cleanly"
+[[ -f "$state_dir/@2.@code_notify_resume_pending" ]] \
+    || fail "an agent outside the interrupt allowlist must not retire its pause"
+retire_interrupt_pause
+TMUX_INTERRUPT_WATCH_AGENTS="$saved_interrupt_agents"
+pass "an interrupted approval prompt retires its pause and keeps the badge"
+
 # --- a stale rejection poll cannot consume a same-second successor pause ---
 # Epoch seconds and a pane/count baseline can repeat across parallel asks. The
 # packed pause generation must still differ, and the locked cancel helper must

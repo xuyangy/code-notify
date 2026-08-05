@@ -129,11 +129,7 @@ container_relay_project() {
 # Unknown events are ignored: a newer hook talking to an older relay must
 # degrade to silence, never to a wrong notification.
 container_relay_dispatch() {
-    # cwd is parsed from the record and intentionally not used: see
-    # container_relay_project for why the container's idea of its working
-    # directory is not something to act on. It stays in the wire format so an
-    # older relay and a newer hook keep understanding each other.
-    local agent="$1" event="$2" cwd="$3" tool_name="$4"
+    local agent="$1" event="$2"
     local notifier project
     notifier="$(container_relay_notifier)"
     [[ -f "$notifier" ]] || return 0
@@ -178,6 +174,8 @@ container_relay_dispatch() {
             bash "$notifier" StopFailure "$agent" "$project" < /dev/null > /dev/null 2>&1 || true
             ;;
         session_end)
+            # The agent left mid-turn, or a turn was interrupted: silent
+            # teardown, no notification of any kind.
             container_relay_teardown
             ;;
     esac
@@ -190,8 +188,9 @@ container_relay_dispatch() {
 CONTAINER_RELAY_TURN_ACTIVE=0
 
 # Retire the running indicator without notifying. Used when the agent exits
-# (/exit, Ctrl-C, container death) rather than finishing a turn: there is no
-# completion to announce, but a spinner left running would outlive the session.
+# (/exit, Ctrl-C, container death) or a turn is interrupted rather than
+# finishing: there is no completion to announce, but a spinner left running
+# would outlive the turn.
 # tmux_running_stop is exactly that teardown — the notifier's stop path calls
 # it first and delivers the toast separately.
 #
@@ -215,15 +214,29 @@ container_relay_consume() {
     rm -f "$file" 2>/dev/null
     [[ -n "$record" ]] || return 0
 
+    # The record's other two fields are split off but deliberately go no
+    # further, so only the event is worth sanitizing (three processes a field,
+    # on a path that runs for every event of every turn):
+    #
+    #   - cwd is named by the container and would only ever be an argument to
+    #     `git -C` on the host — see container_relay_project for why that value
+    #     is ignored rather than validated;
+    #   - tool_name has nowhere to go. The notifier's approval wording is
+    #     agent-scoped ("omp needs your approval") for every agent, including
+    #     Claude, whose own hook payload carries the name too. Naming the tool
+    #     would be a notifier feature, not a relay one.
+    #
+    # Both stay in the wire format so an older relay and a newer hook keep
+    # understanding each other, and `read` still has to consume them or a
+    # trailing field would land in the one value that IS used.
+    # shellcheck disable=SC2034  # cwd and tool_name are split off, not used
     IFS=$'\t' read -r event cwd tool_name <<< "$record"
     event="$(container_relay_sanitize "${event:-}")"
-    cwd="$(container_relay_sanitize "${cwd:-}")"
-    tool_name="$(container_relay_sanitize "${tool_name:-}")"
 
     # Event names are an internal vocabulary: reject anything that is not one.
     [[ "$event" =~ ^[a-z_]+$ ]] || return 0
 
-    container_relay_dispatch "$agent" "$event" "$cwd" "$tool_name"
+    container_relay_dispatch "$agent" "$event"
 }
 
 # Process everything currently spooled, in filename order — which the hook

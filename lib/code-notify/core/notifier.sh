@@ -2466,7 +2466,9 @@ send_macos_notification() {
             -group "code-notify-$TOOL_NAME-$PROJECT_NAME"
             -activate "$bundle_id"
         )
-        # Show the originating tool's icon when known (claude/codex/gemini).
+        # Show the originating tool's icon when terminal-notifier bundles one
+        # (claude/codex/pi/omp/antigravity/opencode). Names it doesn't know just
+        # warn on stderr and fall back to the default icon, so pass any tool.
         if [[ -n "$TOOL_NAME" ]]; then
             tn_args+=(-appIcon "$TOOL_NAME")
         fi

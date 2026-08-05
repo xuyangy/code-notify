@@ -89,6 +89,30 @@ export default function (pi: any) {
 		return undefined;
 	});
 
+	// Those three claim blind, because a switch/branch is exactly the case where
+	// the primary session's id changes — comparing against the old one would
+	// refuse every /new, /resume and /fork. omp emits them from the main session
+	// for user actions, but an auto-handoff (compaction.strategy = handoff) fires
+	// session_switch from whichever session compacted, subagents included: one
+	// such handoff would hand primary to a subagent and silence the real turn's
+	// completion for the rest of the process.
+	//
+	// session_stop is the correction. omp emits it only for a main-agent turn
+	// settling — subagent sessions return early on agentKind — so it is the one
+	// unambiguous statement of which session owns the pane, and it lands just
+	// before that same turn's agent_end, so a stolen claim is repaired in time
+	// for the completion it would have swallowed. It is deliberately NOT the
+	// completion trigger: several settle paths (a run ending mid-tool-use, a
+	// deferred handoff, a blocked continuation) reach agent_end without it, and
+	// a missed completion is the failure this bridge exists to prevent.
+	//
+	// Returning undefined is required: a truthy result asks omp for another
+	// continuation turn.
+	pi.on("session_stop", async (_event: any, ctx: any) => {
+		claimPrimary(ctx);
+		return undefined;
+	});
+
 	// Tabs and newlines are the record separators, so they cannot survive in a
 	// field. The cap keeps a pathological value from filling the mount.
 	const clean = (value: unknown): string =>

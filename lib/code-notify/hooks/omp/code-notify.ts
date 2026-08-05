@@ -74,8 +74,9 @@ export default function (pi: any) {
 		if (current) primarySessionId = current;
 	};
 
-	// The first session to start owns the pane. /new, /resume and /fork replace
-	// it through their own events, which a subagent never emits.
+	// The first session to start owns the pane, and /new, /resume and /fork
+	// replace it through their own events. Why these three claim blind, and what
+	// corrects a claim they get wrong, is with the session_stop handler below.
 	pi.on("session_start", async (_event: any, ctx: any) => {
 		if (!primarySessionId) claimPrimary(ctx);
 		return undefined;

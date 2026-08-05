@@ -1131,7 +1131,19 @@ get_tool_display_name() {
     esac
 }
 
+# Spoken form of the tool name. The banner has room for the terse name, but
+# speech needs one that survives a TTS voice: "omp" comes out as a mumbled
+# "ohmp" or spelled letter by letter, so it is spoken by its full name.
+get_tool_voice_name() {
+    local tool="$1"
+    case "$tool" in
+        "omp") echo "oh-my-pi" ;;
+        *) get_tool_display_name "$tool" ;;
+    esac
+}
+
 TOOL_DISPLAY=$(get_tool_display_name "$TOOL_NAME")
+TOOL_VOICE=$(get_tool_voice_name "$TOOL_NAME")
 
 # Rate limiting for stop notifications (prevents spam from parallel sub-agents)
 NOTIFICATIONS_DIR="$HOME/.claude/notifications"
@@ -2359,6 +2371,42 @@ except Exception:
         SOUND="Pop"
         ;;
 esac
+
+# Swap the banner name for the spoken one (see get_tool_voice_name) in the
+# finished line, rather than threading a second variable through every message
+# pool. Whole-word occurrences only: "omp" is also a substring of "completed",
+# and a blind ${VOICE_MESSAGE//} would speak "coh-my-pileted". Runs before the
+# project suffix is appended, so a project that happens to be named after the
+# tool keeps its own name. Skipped entirely when the two names match, which is
+# every tool but omp.
+apply_voice_tool_name() {
+    local rest="$VOICE_MESSAGE"
+    local out="" head before after consumed=""
+
+    while [[ "$rest" == *"$TOOL_DISPLAY"* ]]; do
+        head="${rest%%"$TOOL_DISPLAY"*}"
+        rest="${rest#*"$TOOL_DISPLAY"}"
+        # An empty head means the match either opens the line or abuts the
+        # previous match, in which case the character before it is that
+        # match's last one.
+        before="${head: -1}"
+        if [[ -z "$before" ]] && [[ -n "$consumed" ]]; then
+            before="${TOOL_DISPLAY: -1}"
+        fi
+        consumed=1
+        after="${rest:0:1}"
+        if [[ "$before" != [A-Za-z0-9] ]] && [[ "$after" != [A-Za-z0-9] ]]; then
+            out+="$head$TOOL_VOICE"
+        else
+            out+="$head$TOOL_DISPLAY"
+        fi
+    done
+    VOICE_MESSAGE="$out$rest"
+}
+
+if [[ "$TOOL_VOICE" != "$TOOL_DISPLAY" ]] && [[ -n "$VOICE_MESSAGE" ]]; then
+    apply_voice_tool_name
+fi
 
 # Project context is already carried in the notification subtitle and channel
 # metadata. Speak it as well, so identical events from different worktrees are

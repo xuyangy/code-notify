@@ -92,6 +92,14 @@ case "$COMMAND_NAME" in
                 shift
                 repair_legacy_hooks_command "${1:-}"
                 ;;
+            "relay")
+                # Internal: run by the pi-less-yolo launcher for the length of a
+                # containerized agent session. Not in `cn help` — nobody types
+                # this by hand.
+                shift
+                source "$LIB_DIR/utils/container-relay.sh"
+                handle_relay_command "$@"
+                ;;
             "project")
                 shift
                 source "$LIB_DIR/commands/project.sh"

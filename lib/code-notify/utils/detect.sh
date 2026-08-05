@@ -142,6 +142,29 @@ detect_antigravity() {
     return 1
 }
 
+# Detect pi (containerized via pi-less-yolo)
+detect_pi() {
+    # pi runs inside a container, so `command -v pi` says nothing on the host.
+    # Its state directory is the marker: pi-less-yolo bind-mounts it, and the
+    # hook this install writes goes inside it.
+    local state_dir="${CODE_NOTIFY_PI_STATE_DIR:-$HOME/.pi/agent}"
+    if [[ -d "$state_dir" ]]; then
+        echo "$state_dir"
+        return 0
+    fi
+    return 1
+}
+
+# Detect omp / oh-my-pi (containerized via pi-less-yolo)
+detect_omp() {
+    local state_dir="${CODE_NOTIFY_OMP_STATE_DIR:-$HOME/.omp/agent}"
+    if [[ -d "$state_dir" ]]; then
+        echo "$state_dir"
+        return 0
+    fi
+    return 1
+}
+
 # Get list of all installed AI coding tools
 get_installed_tools() {
     local tools=()
@@ -160,6 +183,14 @@ get_installed_tools() {
 
     if detect_antigravity &> /dev/null; then
         tools+=("antigravity")
+    fi
+
+    if detect_pi &> /dev/null; then
+        tools+=("pi")
+    fi
+
+    if detect_omp &> /dev/null; then
+        tools+=("omp")
     fi
 
     # Return space-separated list
@@ -182,6 +213,12 @@ is_tool_installed() {
             ;;
         "antigravity")
             detect_antigravity &> /dev/null
+            ;;
+        "pi")
+            detect_pi &> /dev/null
+            ;;
+        "omp")
+            detect_omp &> /dev/null
             ;;
         *)
             return 1

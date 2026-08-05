@@ -201,6 +201,9 @@ normalize_tool_argument() {
         "agy")
             printf '%s\n' "antigravity"
             ;;
+        "oh-my-pi")
+            printf '%s\n' "omp"
+            ;;
         *)
             printf '%s\n' "$tool"
             ;;
@@ -357,7 +360,7 @@ enable_notifications_global() {
 
     if [[ -z "$installed_tools" ]]; then
         warning "No supported AI tools detected"
-        info "Supported tools: Claude Code, Codex, Gemini CLI, Antigravity CLI"
+        info "Supported tools: Claude Code, Codex, Gemini CLI, Antigravity CLI, pi, omp"
         return 1
     fi
 
@@ -427,6 +430,8 @@ enable_single_tool() {
         "codex") config_file="$CODEX_HOOKS_FILE" ;;
         "gemini") config_file="$GEMINI_SETTINGS_FILE" ;;
         "antigravity") config_file="$ANTIGRAVITY_HOOKS_FILE" ;;
+        "pi") config_file="$PI_HOOKS_FILE" ;;
+        "omp") config_file="$OMP_HOOKS_FILE" ;;
     esac
 
     success "$tool: ENABLED"
@@ -457,7 +462,7 @@ disable_notifications_global() {
     # No tool specified - disable all enabled tools
     local disabled_count=0
 
-    for t in claude codex gemini antigravity; do
+    for t in claude codex gemini antigravity pi omp; do
         if is_tool_disable_needed "$t"; then
             if disable_single_tool "$t" "quiet"; then
                 ((disabled_count++))
@@ -499,6 +504,70 @@ disable_single_tool() {
     fi
 
     success "$tool: DISABLED"
+    return 0
+}
+
+# Where pi-less-yolo's mise tasks live, per the config file its installer
+# writes. Empty when pi-less-yolo is not installed that way.
+get_pi_less_yolo_tasks_dir() {
+    local conf="$HOME/.config/mise/conf.d/pi-less-yolo.toml"
+    [[ -f "$conf" ]] || return 1
+    sed -nE 's/^includes[[:space:]]*=[[:space:]]*\["(.*)"\].*/\1/p' "$conf" | head -n1
+}
+
+# Whether the launcher starts the relay FOR THIS AGENT. Installing the hook
+# alone is only half the bridge: without the relay the container spools events
+# nobody reads, and the user would see silence with `cn status` claiming
+# ENABLED. So the check has to be per-agent — the two run tasks are patched
+# independently, and a repo where only `pi` was wired must not make `omp`
+# report a working relay.
+#
+# Two halves, matched separately because they live in different files: the
+# shared flags file defines the relay invocation, and the agent's own run task
+# is what actually starts it. Both patterns skip commented-out lines, so
+# documentation about the bridge never reads as the bridge.
+container_agent_launcher_patched() {
+    local agent="$1" tasks_dir
+    tasks_dir="$(get_pi_less_yolo_tasks_dir)" || return 1
+    [[ -n "$tasks_dir" ]] || return 1
+
+    grep -qE '^[^#]*code-notify relay' "$tasks_dir/pi/_docker_flags" 2>/dev/null || return 1
+    grep -qE '^[[:space:]]*_cn_relay_start([[:space:]]|$)' "$tasks_dir/$agent/_default" 2>/dev/null
+}
+
+show_container_agent_status() {
+    local agent="$1" label="$2" hooks_file="$3"
+
+    if ! is_tool_installed "$agent"; then
+        echo "  ${DIM}- $label: not installed${RESET}"
+        return 0
+    fi
+
+    if is_tool_enabled "$agent"; then
+        echo "  ${CHECK_MARK} $label: ${GREEN}ENABLED${RESET}"
+        echo "     Hook: $hooks_file (auto-discovered inside the container)"
+        if container_agent_launcher_patched "$agent"; then
+            echo "     Relay: started by the pi-less-yolo launcher for each session"
+        else
+            echo "     ${YELLOW}Relay: not wired into the launcher — no notifications will fire${RESET}"
+            echo "     The pi-less-yolo task must start 'code-notify relay $agent \$CODE_NOTIFY_SPOOL'"
+        fi
+        if [[ "$agent" == "omp" ]]; then
+            if is_notify_type_enabled "permission_prompt"; then
+                echo "     Approval alerts: ENABLED via tool_approval_requested"
+            else
+                echo "     Approval alerts: disabled (run 'cn alerts add permission_prompt')"
+            fi
+        else
+            echo "     Events: prompt submit and turn end (pi has no approval prompt of its own)"
+        fi
+    elif is_container_hooks_present "$agent"; then
+        echo "  ${WARNING} $label: ${YELLOW}REPAIR NEEDED${RESET}"
+        echo "     Hook: $hooks_file is from a different code-notify version"
+        echo "     Run: ${CYAN}cn on $agent${RESET}"
+    else
+        echo "  ${MUTE} $label: ${DIM}DISABLED${RESET}"
+    fi
     return 0
 }
 
@@ -599,6 +668,10 @@ show_status() {
     else
         echo "  ${DIM}- Antigravity CLI: not installed${RESET}"
     fi
+
+    # pi and omp (containerized via pi-less-yolo)
+    show_container_agent_status "pi" "pi" "$PI_HOOKS_FILE"
+    show_container_agent_status "omp" "omp (oh-my-pi)" "$OMP_HOOKS_FILE"
 
     # Voice status
     echo ""
@@ -1113,13 +1186,15 @@ show_voice_status() {
     fi
 
     # Per-tool voice
-    for tool in claude codex gemini antigravity; do
+    for tool in claude codex gemini antigravity pi omp; do
         local tool_display
         case "$tool" in
             "claude") tool_display="Claude" ;;
             "codex") tool_display="Codex" ;;
             "gemini") tool_display="Gemini" ;;
             "antigravity") tool_display="Antigravity" ;;
+            "pi") tool_display="pi" ;;
+            "omp") tool_display="omp" ;;
         esac
 
         if is_voice_enabled "tool" "$tool"; then

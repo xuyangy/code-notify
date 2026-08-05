@@ -67,7 +67,8 @@ This first CalVer release collects the fork-specific work since upstream
 
 ## Features
 
-- **Multi-tool support** - Claude Code, OpenAI Codex, Google Gemini CLI, Google Antigravity CLI (`agy`)
+- **Multi-tool support** - Claude Code, OpenAI Codex, Google Gemini CLI, Google Antigravity CLI (`agy`), pi and omp (oh-my-pi)
+- **Agents in containers** - pi and omp run inside Docker (via pi-less-yolo), where nothing can reach the host's notifier. An extension in the bind-mounted state directory spools each lifecycle event, and a host-side relay in the originating tmux pane turns them into ordinary notifications — approval alerts included
 - **Works everywhere** - Terminal, VSCode, Cursor, or any editor
 - **Cross-platform** - macOS, Linux, Windows
 - **Native notifications** - Uses system notification APIs
@@ -182,6 +183,8 @@ See [docs/installation.md](docs/installation.md) for more details.
 | `cn on codex`        | Enable Codex hooks and suppress duplicate Codex TUI toasts |
 | `cn on gemini`       | Enable for Gemini CLI only                   |
 | `cn on antigravity`  | Enable for Antigravity CLI (`agy`); `cn on agy` also works |
+| `cn on pi`           | Enable for pi (containerized via pi-less-yolo) |
+| `cn on omp`          | Enable for omp (oh-my-pi); `cn on oh-my-pi` also works |
 | `cn off`             | Disable notifications                        |
 | `cn off all`         | Explicit alias for disabling all tools       |
 | `cn test`            | Send test notification                       |
@@ -343,6 +346,8 @@ Code-Notify uses the hook systems built into AI coding tools:
 - **Codex**: `~/.codex/hooks.json`
 - **Gemini CLI**: `~/.gemini/settings.json`
 - **Antigravity CLI (`agy`)**: imported plugin at `~/.claude/notifications/agy-plugin/` (registered with `agy plugin install`)
+- **pi**: extension at `~/.pi/agent/extensions/code-notify.ts`
+- **omp (oh-my-pi)**: extension at `~/.omp/agent/extensions/code-notify.ts`
 
 For Codex, Code-Notify configures `~/.codex/hooks.json` with Codex lifecycle hooks and disables Codex TUI notifications in `~/.codex/config.toml` to avoid duplicate toasts. The `Stop` hook sends task-complete notifications. When `permission_prompt` is enabled, Code-Notify also adds a `PermissionRequest` hook for approval/edit requests.
 
@@ -355,6 +360,27 @@ For Antigravity CLI, Code-Notify builds a small plugin and registers it with `ag
 - **Idle reminder** — inside tmux, a completion also arms the tmux-derived idle watch: if the pane then holds still for `CODE_NOTIFY_TMUX_IDLE_SECONDS` (default 60) without you engaging the window, one synthetic `idle_prompt` nudge fires (see the feature list above).
 
 Disable everything with `cn off antigravity`, which runs `agy plugin uninstall code-notify`.
+
+### pi and omp, which run in a container
+
+[pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) and [omp (oh-my-pi)](https://github.com/can1357/oh-my-pi) are normally launched through [pi-less-yolo](https://github.com/cjermain/pi-less-yolo), which runs them inside a Docker container. Nothing in there can deliver a notification: the container has no `$TMUX`, no access to the host tmux socket, and no notification binary. So the bridge is split in two.
+
+The **agent-side half** is an ordinary extension, written by `cn on pi` / `cn on omp` into the agent state directory that pi-less-yolo already bind-mounts — so the container sees it as auto-discovered, and no image rebuild or run-flag change is involved. It does not notify; it appends one small file per lifecycle event to a spool directory inside that same mount.
+
+The **host-side half** is `code-notify relay <agent> <spool>`, started by the pi-less-yolo run task in the tmux pane the container renders into, and stopped when `docker run` returns. It reads those files in order and invokes the notifier exactly as an in-process hook would, so badges, the running indicator, click-to-focus, snooze, sounds and voice all work unchanged. Nothing polls while no agent is running.
+
+That second half needs the launcher to cooperate, which means one small patch to your pi-less-yolo clone (`tasks/pi/_docker_flags` exports `CODE_NOTIFY_SPOOL`; `tasks/pi/_default` and `tasks/omp/_default` start and stop the relay). `cn status` reports whether it is in place — without it the container spools events nobody reads. Set `PI_NO_CODE_NOTIFY=1` to skip the bridge for a run.
+
+Events, by agent:
+
+- **omp** — `input` starts the running indicator, `tool_approval_requested` fires the approval alert (gated by the `permission_prompt` alert type), the `ask` tool fires `elicitation_dialog`, `tool_approval_resolved` brings the indicator back once you answer, and `agent_end` delivers task-complete or, for a turn that died, a failure alert.
+- **pi** — `input` and `agent_settled` only. pi has no tool-approval prompt of its own (the container is what constrains it), so there is no approval event to relay.
+
+Quitting mid-turn (`/exit`, Ctrl-C, a container that dies) retires the running indicator silently — there is no completion to announce, but a spinner must not outlive the session.
+
+One known gap: omp's `input` event covers prompts typed into its editor, not a prompt supplied on the command line, so `mise run omp -- "do the thing"` gets no running indicator for that **first** turn. Everything else about that turn still works — approval alerts and the completion notification both fire — and every prompt typed afterwards behaves normally. The fix would be to switch to omp's `message_start` event, which is what its own notification integration uses; it is left alone deliberately, because getting the message filter slightly wrong fires `prompt_submit` twice per turn, and a second submission while the indicator is up reads as a queued successor and makes the turn's completion withhold its badge. A missing spinner on one turn of one invocation style is the better failure.
+
+Disable with `cn off pi` / `cn off omp`, which removes the extension.
 
 For Claude Code, it adds hooks like:
 

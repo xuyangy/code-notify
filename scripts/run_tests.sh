@@ -434,6 +434,30 @@ else
     test_fail "per-event sound pools failed"
 fi
 
+# Test 28: Containerized agents (pi, omp) relay spool records to the notifier
+test_start "container relay (pi/omp)"
+if run_test_script tests/test-container-relay.sh; then
+    test_pass
+else
+    test_fail "container relay failed"
+fi
+
+# Test 29: Containerized agent hook install/removal and launcher detection
+test_start "container agent hooks (pi/omp)"
+if run_test_script tests/test-container-agents.sh; then
+    test_pass
+else
+    test_fail "container agent hooks failed"
+fi
+
+# Test 30: In-container hook spool naming survives concurrent sessions
+test_start "container hook spool naming (pi/omp)"
+if run_test_script tests/test-container-hook-spool.sh; then
+    test_pass
+else
+    test_fail "container hook spool naming failed"
+fi
+
 # Summary
 echo ""
 echo "Test Summary:"

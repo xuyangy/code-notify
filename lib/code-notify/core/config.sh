@@ -79,6 +79,25 @@ ANTIGRAVITY_PLUGINS_DIR="${ANTIGRAVITY_PLUGINS_DIR:-$(dirname "$ANTIGRAVITY_IMPO
 ANTIGRAVITY_IMPORTED_PLUGIN_DIR="$ANTIGRAVITY_PLUGINS_DIR/$ANTIGRAVITY_PLUGIN_NAME"
 ANTIGRAVITY_IMPORTED_HOOKS_FILE="$ANTIGRAVITY_IMPORTED_PLUGIN_DIR/hooks.json"
 
+# Containerized agents: pi and omp (oh-my-pi), launched through pi-less-yolo.
+#
+# Both auto-discover extensions from <state dir>/extensions/*.ts — inside the
+# directory pi-less-yolo already bind-mounts into the container. So installing
+# the hook is writing one file on the host: no image rebuild, no run-flag
+# change. It cannot notify from in there; it only spools events for the
+# host-side relay (see utils/container-relay.sh).
+#
+# omp also scans hooks/pre|post/, but a file there is named after the tool it
+# hooks, and this is an extension — extensions/ is also what keeps the two
+# agents symmetric. (omp's shipped examples/README still points at a bare
+# hooks/, which this version does not scan at all.)
+PI_STATE_DIR="${CODE_NOTIFY_PI_STATE_DIR:-$HOME/.pi/agent}"
+PI_HOOKS_FILE="$PI_STATE_DIR/extensions/code-notify.ts"
+OMP_STATE_DIR="${CODE_NOTIFY_OMP_STATE_DIR:-$HOME/.omp/agent}"
+OMP_HOOKS_FILE="$OMP_STATE_DIR/extensions/code-notify.ts"
+# Source of both, shipped with this install.
+CONTAINER_HOOK_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../hooks" 2>/dev/null && pwd)"
+
 # Ensure config directory exists
 ensure_config_dir() {
     mkdir -p "$CONFIG_DIR" "$BACKUP_DIR"
@@ -3194,6 +3213,81 @@ disable_antigravity_hooks() {
 }
 
 # ============================================
+# Containerized agents (pi, omp)
+# ============================================
+
+# Source and target are returned by separate functions, never packed into one
+# whitespace-delimited line: $HOME, and therefore both paths, can contain
+# spaces, and a positional re-read would silently truncate them — pointing
+# `cn on`/`cn off` at the wrong file.
+get_container_hook_source() {
+    case "$1" in
+        "pi") printf '%s\n' "$CONTAINER_HOOK_SOURCE_DIR/pi/code-notify.ts" ;;
+        "omp") printf '%s\n' "$CONTAINER_HOOK_SOURCE_DIR/omp/code-notify.ts" ;;
+        *) return 1 ;;
+    esac
+}
+
+get_container_hook_target() {
+    case "$1" in
+        "pi") printf '%s\n' "$PI_HOOKS_FILE" ;;
+        "omp") printf '%s\n' "$OMP_HOOKS_FILE" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Install the hook by copying it into the agent's auto-discovery directory.
+# Always overwrites: an upgraded code-notify ships a newer hook, and the file
+# is code-notify's to own (it says so in its header).
+enable_container_hooks() {
+    local agent="$1" source target
+    source="$(get_container_hook_source "$agent")" || return 1
+    target="$(get_container_hook_target "$agent")" || return 1
+
+    if [[ ! -f "$source" ]]; then
+        echo "Error: $agent hook source missing at $source" >&2
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$target")" || return 1
+    cp "$source" "$target" || return 1
+    return 0
+}
+
+disable_container_hooks() {
+    local agent="$1" target
+    target="$(get_container_hook_target "$agent")" || return 1
+
+    [[ -e "$target" ]] || return 0
+    rm -f "$target" || return 1
+    return 0
+}
+
+# Enabled means the installed hook matches the one this install ships — not
+# merely that some file is there. A code-notify upgrade that changes the hook
+# therefore reads as "needs re-enabling", the same way a changed Claude hook
+# command does, so `cn on <agent>` refreshes it instead of reporting success
+# over a stale bridge.
+is_container_hooks_enabled() {
+    local agent="$1" source target
+    source="$(get_container_hook_source "$agent")" || return 1
+    target="$(get_container_hook_target "$agent")" || return 1
+
+    [[ -f "$target" ]] || return 1
+    [[ -f "$source" ]] || return 1
+    cmp -s "$source" "$target"
+}
+
+# `cn off` must still remove a hook that no longer matches the shipped source
+# (installed by an older code-notify, or edited by hand).
+is_container_hooks_present() {
+    local agent="$1" target
+    target="$(get_container_hook_target "$agent")" || return 1
+
+    [[ -f "$target" ]]
+}
+
+# ============================================
 # Multi-tool helpers
 # ============================================
 
@@ -3213,6 +3307,9 @@ enable_tool() {
             ;;
         "antigravity")
             enable_antigravity_hooks
+            ;;
+        "pi"|"omp")
+            enable_container_hooks "$tool"
             ;;
         *)
             return 1
@@ -3237,6 +3334,9 @@ disable_tool() {
         "antigravity")
             disable_antigravity_hooks
             ;;
+        "pi"|"omp")
+            disable_container_hooks "$tool"
+            ;;
         *)
             return 1
             ;;
@@ -3260,6 +3360,9 @@ is_tool_enabled() {
         "antigravity")
             is_antigravity_enabled
             ;;
+        "pi"|"omp")
+            is_container_hooks_enabled "$tool"
+            ;;
         *)
             return 1
             ;;
@@ -3276,6 +3379,12 @@ is_tool_disable_needed() {
     case "$tool" in
         "antigravity")
             is_antigravity_imported
+            ;;
+        "pi"|"omp")
+            # A hook installed by an older code-notify no longer matches the
+            # shipped source, so it reads as disabled — but it is still on disk
+            # and still spooling, and `cn off` must remove it.
+            is_container_hooks_present "$tool"
             ;;
         "claude")
             # is_tool_enabled requires the exact current hook set, which an

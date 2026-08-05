@@ -142,6 +142,12 @@ REQUIRED_FILES=(
     "lib/code-notify/utils/persist.sh"
     "lib/code-notify/utils/snooze.sh"
     "lib/code-notify/utils/tmux.sh"
+    "lib/code-notify/utils/container-relay.sh"
+    # Hook sources for the containerized agents. `cn on pi` / `cn on omp` copy
+    # these into the agent's own extensions directory, so a missing one leaves
+    # those commands with nothing to install.
+    "lib/code-notify/hooks/pi/code-notify.ts"
+    "lib/code-notify/hooks/omp/code-notify.ts"
 )
 
 # Stage the new files in a temp dir on the SAME filesystem as the install

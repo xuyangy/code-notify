@@ -1104,6 +1104,13 @@ case "$TOOL_NAME" in
     "antigravity")
         BADGE_CLEAR_MODE="engage"
         ;;
+    "pi"|"omp")
+        # The container hook emits prompt_submit for every user turn and the
+        # relay delivers it as UserPromptSubmit, so these have the same real
+        # engagement signal Claude does. The hook is installed as one file, all
+        # events or none — there is no partial install to gate on.
+        BADGE_CLEAR_MODE="engage"
+        ;;
 esac
 
 badge_glance_clear_enabled() {
@@ -1118,6 +1125,8 @@ get_tool_display_name() {
         "codex") echo "Codex" ;;
         "gemini") echo "Gemini" ;;
         "antigravity") echo "Antigravity" ;;
+        "pi") echo "pi" ;;
+        "omp") echo "omp" ;;
         *) echo "AI" ;;
     esac
 }

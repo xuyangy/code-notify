@@ -958,7 +958,22 @@ tmux_agent_exit_track() {
     local window_id="$1" pid
     [[ "${TMUX_AGENT_EXIT_POLL_SECONDS:-0}" =~ ^[0-9]+$ ]] || return 0
     (( TMUX_AGENT_EXIT_POLL_SECONDS > 0 )) || return 0
-    pid=$(tmux_agent_exit_resolve_pid "${CODE_NOTIFY_TMUX_AGENT_NAME:-}" "${PPID:-}") || return 0
+    # Containerized agents (pi, omp) are not ancestors of the process running
+    # this hook — the relay that delivers their events is a sibling of the
+    # container, not a child of the agent — so the ancestor walk below cannot
+    # find them. The relay supplies the launcher PID instead: when the launcher
+    # is gone the session is over, which is all this tracking means.
+    #
+    # Zero is excluded, not merely non-numeric input: the sweep tests this with
+    # `kill -0`, and `kill -0 0` addresses the caller's whole process group, so
+    # a 0 would read as an agent that never exits and strand the badge and
+    # spinner the sweep exists to clear. The relay validates before exporting;
+    # this guard does not rely on that, because it is the shared path.
+    if [[ "${CODE_NOTIFY_TMUX_AGENT_PID:-}" =~ ^[1-9][0-9]*$ ]]; then
+        pid="$CODE_NOTIFY_TMUX_AGENT_PID"
+    else
+        pid=$(tmux_agent_exit_resolve_pid "${CODE_NOTIFY_TMUX_AGENT_NAME:-}" "${PPID:-}") || return 0
+    fi
     tmux set-option -w -t "$window_id" @code_notify_agent_pid "$pid" 2>/dev/null || return 0
     tmux_agent_exit_schedule_sweep
 }

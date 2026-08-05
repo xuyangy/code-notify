@@ -373,7 +373,7 @@ That second half needs the launcher to cooperate, which means one small patch to
 
 Events, by agent:
 
-- **omp** — `input` starts the running indicator, `tool_approval_requested` fires the approval alert (gated by the `permission_prompt` alert type), the `ask` tool fires `elicitation_dialog`, `tool_approval_resolved` brings the indicator back once you answer, and `agent_end` delivers task-complete or, for a turn that died, a failure alert.
+- **omp** — `input` starts the running indicator, `tool_approval_requested` fires the approval alert (gated by the `permission_prompt` alert type), the `ask` tool fires `elicitation_dialog`, `tool_approval_resolved` brings the indicator back once you answer, and `agent_end` delivers task-complete or, for a turn that died, a failure alert. omp settles an interrupt through that same `agent_end`, so the outcome is read from the turn's last assistant message: cancelling with Escape retires the indicator silently instead of announcing a completion, the same way the tmux interrupt watch handles Claude and Codex.
 - **pi** — `input` and `agent_settled` only. pi has no tool-approval prompt of its own (the container is what constrains it), so there is no approval event to relay.
 
 Quitting mid-turn (`/exit`, Ctrl-C, a container that dies) retires the running indicator silently — there is no completion to announce, but a spinner must not outlive the session.

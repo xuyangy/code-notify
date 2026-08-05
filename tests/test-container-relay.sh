@@ -102,16 +102,20 @@ fi
 pass "events dispatch in spool order"
 
 # An unknown event (newer hook, older relay) and a record trying to smuggle a
-# command must both produce nothing at all.
+# command must both produce nothing at all. session_end joins them: it is the
+# silent teardown an exit or an interrupt takes, so it must reach the notifier
+# no more than they do. (No turn is in flight here, so the teardown itself
+# returns before touching tmux.)
 BEFORE="$(wc -l < "$LOG")"
 spool_event 0006 future_event "$PROJECT_DIR"
 spool_event 0007 'stop; touch /tmp/code-notify-relay-pwned' "$PROJECT_DIR"
+spool_event 0008 session_end "$PROJECT_DIR"
 sleep 0.6
 
 if [[ "$(wc -l < "$LOG")" -ne "$BEFORE" ]]; then
-    fail "an unknown or malformed event was dispatched: $(cat "$LOG")"
+    fail "an unknown, malformed or silent event was dispatched: $(cat "$LOG")"
 fi
-pass "unknown and malformed events are ignored"
+pass "unknown, malformed and silent events reach no notifier"
 
 if [[ -e /tmp/code-notify-relay-pwned ]]; then
     rm -f /tmp/code-notify-relay-pwned

@@ -165,35 +165,59 @@ export default function (pi: any) {
 	// Turn end. willContinue marks an internal continuation (retry, compaction,
 	// follow-up), which is not something to notify about; a subagent finishing
 	// is not the turn ending either.
+	//
+	// An abort is a turn that ended without finishing, so it announces nothing:
+	// session_end is the relay's silent teardown (the running indicator comes
+	// down, no toast, sound or voice), which is what the tmux interrupt watch
+	// does for the agents that hook this process directly. It also retires the
+	// input pause, so an Escape at an approval prompt leaves nothing behind.
 	pi.on("agent_end", async (event: any, ctx: any) => {
 		if (event?.willContinue) return undefined;
 		if (!isPrimary(ctx)) return undefined;
-		emit(endedInError(event) ? "stop_failure" : "stop");
+		switch (settleOutcome(event)) {
+			case "aborted":
+				emit("session_end");
+				break;
+			case "error":
+				emit("stop_failure");
+				break;
+			default:
+				emit("stop");
+		}
 		return undefined;
 	});
 
 	// Lets the relay retire the running indicator without waiting for its
-	// parent-exit sweep when omp exits mid-turn (/exit, Ctrl-C).
+	// parent-exit sweep when omp exits mid-turn (/exit, Ctrl-C). The same
+	// silent teardown serves an interrupted turn (see agent_end above).
 	pi.on("session_shutdown", async (_event: any, ctx: any) => {
 		if (isPrimary(ctx)) emit("session_end");
 		return undefined;
 	});
 }
 
-// A turn that ended on an API error carries the failure on the last assistant
-// message rather than on the event itself. Treated as best-effort: an
-// unrecognised shape falls back to a normal completion.
-function endedInError(event: any): boolean {
+// How the turn ended. Both an API failure and an interrupt are carried on the
+// last assistant message rather than on the event itself — omp settles an abort
+// through the same agent_end as a completion (only its own TTSR self-repair
+// marks one willContinue), so without reading this an Escape announces "task
+// complete" for a turn the user just killed. omp's own completion notification
+// reads exactly this and stays silent for both, which keeps the two consistent.
+//
+// Best-effort: an unrecognised shape falls back to a normal completion, because
+// a missed completion is the failure this bridge exists to prevent.
+function settleOutcome(event: any): "error" | "aborted" | "complete" {
 	try {
 		const messages = event?.messages;
-		if (!Array.isArray(messages)) return false;
+		if (!Array.isArray(messages)) return "complete";
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
 			if (message?.role !== "assistant") continue;
-			return message?.stopReason === "error";
+			if (message?.stopReason === "error") return "error";
+			if (message?.stopReason === "aborted") return "aborted";
+			return "complete";
 		}
 	} catch {
 		// fall through
 	}
-	return false;
+	return "complete";
 }

@@ -103,4 +103,64 @@ run_case omp tool_approval_requested 2 \
 run_case pi input 2 \
     "pi keeps both events when two hook instances emit in the same millisecond"
 
+# How an omp turn settles, which the event alone does not say: omp reports an
+# interrupt and an API failure through the same agent_end as a completion,
+# carrying the outcome on the last assistant message. Reading it wrong announces
+# "task complete" for a turn the user just killed with Escape.
+OUTCOME="$TEST_ROOT/outcome.mjs"
+cat > "$OUTCOME" <<'OUTCOME_EOF'
+// One session, one agent_end, then the event names actually spooled.
+import { readdirSync, readFileSync } from "node:fs";
+
+const [hookPath, spool, payload] = process.argv.slice(2);
+
+const mod = await import(hookPath);
+const handlers = new Map();
+mod.default({ on: (event, handler) => handlers.set(event, handler) });
+
+await handlers.get("agent_end")(JSON.parse(payload), {
+    sessionManager: { getSessionId: () => "session-a" },
+});
+
+const names = readdirSync(spool)
+    .filter(name => name.endsWith(".ev"))
+    .sort()
+    .map(name => readFileSync(`${spool}/${name}`, "utf8").split("\t")[0]);
+console.log(names.join(","));
+OUTCOME_EOF
+
+run_outcome() {
+    local label="$1" expected="$2" payload="$3"
+    local spool emitted
+    spool="$TEST_ROOT/outcome-$(printf '%s' "$label" | tr -c '[:alnum:]' '-')"
+    mkdir -p "$spool"
+
+    emitted="$(CODE_NOTIFY_SPOOL="$spool" "$RUNNER" "${RUNNER_ARGS[@]}" "$OUTCOME" \
+        "$HOOKS_DIR/omp/code-notify.ts" "$spool" "$payload")" \
+        || fail "$label — harness failed to run"
+
+    [[ "$emitted" == "$expected" ]] \
+        || fail "$label — expected '$expected', got '$emitted'"
+    pass "$label"
+}
+
+run_outcome "a finished turn emits stop" "stop" \
+    '{"messages":[{"role":"assistant","stopReason":"stop"}]}'
+# session_end is the relay's silent teardown: indicator down, nothing announced.
+run_outcome "an interrupted turn announces nothing" "session_end" \
+    '{"messages":[{"role":"assistant","stopReason":"aborted"}]}'
+run_outcome "a failed turn emits stop_failure" "stop_failure" \
+    '{"messages":[{"role":"assistant","stopReason":"error"}]}'
+# The LAST assistant message decides, not the last message: omp appends its own
+# continuity messages after an interrupted turn.
+run_outcome "a trailing non-assistant message does not hide the interrupt" "session_end" \
+    '{"messages":[{"role":"assistant","stopReason":"aborted"},{"role":"user"}]}'
+# omp aborts its own stream to inject rules (TTSR self-repair) and schedules the
+# retry itself — an internal continuation, not the turn ending.
+run_outcome "an abort that will continue emits nothing" "" \
+    '{"willContinue":true,"messages":[{"role":"assistant","stopReason":"aborted"}]}'
+# Fails open: an unrecognised shape is a completion, because a missed completion
+# is the failure this bridge exists to prevent.
+run_outcome "an unrecognised settle still completes" "stop" '{}'
+
 echo "All container hook spool tests passed"

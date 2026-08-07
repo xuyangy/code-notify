@@ -676,6 +676,21 @@ TMUX_DIALOG_CANCEL_AGENTS="${CODE_NOTIFY_TMUX_DIALOG_CANCEL_AGENTS:-antigravity}
 # static while working must not be listed.
 TMUX_SETTLE_AGENTS="${CODE_NOTIFY_TMUX_SETTLE_AGENTS:-codex}"
 TMUX_SETTLE_SECONDS="${CODE_NOTIFY_TMUX_SETTLE_SECONDS:-15}"
+# Seconds of proven stillness before the BADGE-ONLY variant of that watch
+# reconciles — the queued-prompt preserve armed by tmux_running_stop, which
+# asks a strictly weaker question than the allowlist watch above: not "did
+# this turn end without a hook" but "did the successor the hint promised
+# actually start". Repainting is what answers that, and a live Codex turn
+# repaints in every phase it has — the ticking "Working (Ns • esc to
+# interrupt)" counter, the answer streaming in (no working row is drawn at
+# all there, but the text grows every frame), and exec output — so a single
+# poll tick with no repaint is enough, where the 15s window above is sized
+# for deciding a turn's END from stillness alone. Kept as its own knob
+# because the failure directions differ: firing early here shows a completion
+# badge on a live turn, which that turn's own Stop replaces, while firing
+# early above invents a completion notification. Clamped to the settle
+# window; a non-numeric or larger value falls back to it.
+TMUX_PRESERVE_SETTLE_SECONDS="${CODE_NOTIFY_TMUX_PRESERVE_SETTLE_SECONDS:-4}"
 # Agents with no native idle reminder (pipe-separated). Claude nudges by
 # itself once it has been waiting for input for a while (its idle_prompt
 # notification); Codex and Antigravity never do, so their windows can sit in
@@ -1013,6 +1028,16 @@ tmux_running_settle_arm() {
     # positional parse.
     tmux set-option -w -t "$window_id" @code_notify_settle_ctx \
         "$agent $(basename "$PWD")" 2>/dev/null
+    # Cleared on a force arm too, so a preserve's first sweep tick can only
+    # baseline and its reconcile lands on the second. Seeding the fingerprint
+    # from the pane here instead was tried and reverted: this arm runs INSIDE
+    # the Stop hook, and the agent repaints the moment that hook returns —
+    # Codex draws a "Running Stop hook: …" row for exactly the hook's
+    # lifetime — so the seeded capture never matched the pane a tick later. It
+    # bought nothing and cost a capture-pane on the hook's own path. Landing on
+    # the first tick is not reachable from this function in any case: the sweep
+    # chain's phase is independent of the Stop, so a preserve that wants a
+    # deterministic reconcile needs a one-shot timer of its own.
     tmux set-option -wu -t "$window_id" @code_notify_settle_fp 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_settle_since 2>/dev/null
     # The settle check rides the agent-exit sweep; make sure it is ticking
@@ -1484,10 +1509,11 @@ tmux_agent_exit_schedule_sweep() {
     # override so tests exercising the fired payload keep their stub (empty
     # behaves as unset).
     q_poll=$(tmux_focus_shell_quote "$TMUX_AGENT_EXIT_POLL_SECONDS")
-    local q_settle q_idle q_idle_agents q_notifier
+    local q_settle q_preserve q_idle q_idle_agents q_notifier
     local q_dialog_secs q_dialog_agents q_dialog_markers q_dialog_options
     local q_cancel_markers q_cancel_agents
     q_settle=$(tmux_focus_shell_quote "$TMUX_SETTLE_SECONDS")
+    q_preserve=$(tmux_focus_shell_quote "$TMUX_PRESERVE_SETTLE_SECONDS")
     q_idle=$(tmux_focus_shell_quote "$TMUX_IDLE_SECONDS")
     q_idle_agents=$(tmux_focus_shell_quote "$TMUX_IDLE_AGENTS")
     q_notifier=$(tmux_focus_shell_quote "${CODE_NOTIFY_NOTIFIER_PATH:-}")
@@ -1513,6 +1539,7 @@ tmux_agent_exit_schedule_sweep() {
     inner+="$q_tmux -S $q_socket set-option -gu @code_notify_agent_exit_sweep_scheduled; "
     inner+="if [ -f $q_lib ]; then TMUX=$q_env CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS=$q_poll "
     inner+="CODE_NOTIFY_TMUX_SETTLE_SECONDS=$q_settle "
+    inner+="CODE_NOTIFY_TMUX_PRESERVE_SETTLE_SECONDS=$q_preserve "
     inner+="CODE_NOTIFY_TMUX_IDLE_SECONDS=$q_idle CODE_NOTIFY_TMUX_IDLE_AGENTS=$q_idle_agents "
     inner+="CODE_NOTIFY_NOTIFIER_PATH=$q_notifier "
     inner+="CODE_NOTIFY_TMUX_DIALOG_NOTIFY_SECONDS=$q_dialog_secs "
@@ -1541,7 +1568,7 @@ tmux_agent_exit_schedule_sweep() {
 tmux_agent_exit_sweep() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
     local now window_id pid since gen settle_pane idle_watch resume orig live=0
-    local fp_now fp_prev settle_since settle_ctx settle_badge_only mode transition_lock transition_token
+    local fp_now fp_prev settle_since settle_ctx settle_badge_only settle_needed mode transition_lock transition_token
     local current_pid current_since current_settle_since current_badge_only current_gen
     local ipane isince ifp1 ifp2 istate iagent iproject
     local dialog_ctx dialog_since dialog_grace dialog_active dialog_run dialog_gen
@@ -1913,7 +1940,16 @@ tmux_agent_exit_sweep() {
             tmux set-option -w -t "$window_id" @code_notify_settle_since "$now" 2>/dev/null
             continue
         fi
-        (( now - settle_since >= TMUX_SETTLE_SECONDS )) || continue
+        # A badge-only watch (the queued-prompt preserve) reconciles on the
+        # shorter window: it only has to see that no successor turn is
+        # repainting (see TMUX_PRESERVE_SETTLE_SECONDS).
+        settle_needed="$TMUX_SETTLE_SECONDS"
+        if [[ -n "$settle_badge_only" ]] &&
+            [[ "$TMUX_PRESERVE_SETTLE_SECONDS" =~ ^[0-9]+$ ]] &&
+            (( TMUX_PRESERVE_SETTLE_SECONDS < TMUX_SETTLE_SECONDS )); then
+            settle_needed="$TMUX_PRESERVE_SETTLE_SECONDS"
+        fi
+        (( now - settle_since >= settle_needed )) || continue
         # Settled: the agent is idle. Mirror tmux_running_stop for this
         # window — drop the marker, clear the running rename (an event badge
         # that replaced it is left alone), and stop tracking; the next hook
@@ -2545,6 +2581,15 @@ tmux_prompt_submit() {
     # indicator; tmux_running_stop arms a settle watch on that preserve so the
     # sweep reconciles it once the pane proves idle, rather than waiting on the
     # native idle reminder or the TTL.
+    #
+    # Deliberately NOT gated on how the pane looks or on how long it has held
+    # still. Codex draws no working row at all while it streams an answer (the
+    # row is replaced by the growing text, not scrolled off — measured at 13 of
+    # 19 seconds on a live turn), and a stall inside that phase looks exactly
+    # like a turn that ended. Refusing the hint there would leave a genuine
+    # queued successor with no indicator and a stale completion badge for its
+    # whole run: unbounded, and pointing the wrong way (idle while working),
+    # against a bounded few-second badge delay for the false-hint case.
     local prev_running now_epoch
     now_epoch="$(date +%s)"
     prev_running=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
@@ -3026,7 +3071,7 @@ tmux_resume_poll_schedule() {
     [[ -n "$TMUX_BADGE_LIB_PATH" ]] && [[ -f "$TMUX_BADGE_LIB_PATH" ]] || return 0
     local pending tmux_bin socket_path token q_lib q_tmux q_socket q_env q_poll q_ttl q_token inner
     local q_running q_spinner q_badge q_icon q_rttl
-    local q_agent_poll q_settle q_idle q_idle_agents q_notifier
+    local q_agent_poll q_settle q_preserve q_idle q_idle_agents q_notifier
     local q_dialog_secs q_dialog_agents q_cancel_agents
     local q_int_secs q_int_agents q_int_markers q_int_quiet q_busy_markers
     pending=$(tmux show-options -gqv @code_notify_resume_poll_scheduled 2>/dev/null)
@@ -3054,6 +3099,7 @@ tmux_resume_poll_schedule() {
     q_rttl=$(tmux_focus_shell_quote "$TMUX_RUNNING_TTL")
     q_agent_poll=$(tmux_focus_shell_quote "$TMUX_AGENT_EXIT_POLL_SECONDS")
     q_settle=$(tmux_focus_shell_quote "$TMUX_SETTLE_SECONDS")
+    q_preserve=$(tmux_focus_shell_quote "$TMUX_PRESERVE_SETTLE_SECONDS")
     q_idle=$(tmux_focus_shell_quote "$TMUX_IDLE_SECONDS")
     q_idle_agents=$(tmux_focus_shell_quote "$TMUX_IDLE_AGENTS")
     q_notifier=$(tmux_focus_shell_quote "${CODE_NOTIFY_NOTIFIER_PATH:-}")
@@ -3079,6 +3125,7 @@ tmux_resume_poll_schedule() {
     inner+="CODE_NOTIFY_TMUX_RUNNING_TTL=$q_rttl CODE_NOTIFY_TMUX_DIALOG_OPTIONS=$q_options "
     inner+="CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS=$q_agent_poll "
     inner+="CODE_NOTIFY_TMUX_SETTLE_SECONDS=$q_settle "
+    inner+="CODE_NOTIFY_TMUX_PRESERVE_SETTLE_SECONDS=$q_preserve "
     inner+="CODE_NOTIFY_TMUX_IDLE_SECONDS=$q_idle CODE_NOTIFY_TMUX_IDLE_AGENTS=$q_idle_agents "
     inner+="CODE_NOTIFY_NOTIFIER_PATH=$q_notifier "
     inner+="CODE_NOTIFY_TMUX_DIALOG_NOTIFY_SECONDS=$q_dialog_secs "

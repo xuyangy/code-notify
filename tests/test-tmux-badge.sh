@@ -3242,6 +3242,87 @@ done
 rm -f "$state_dir/%3.pane_content" "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
 pass "a falsely-preserved queued-prompt marker self-heals once the pane idles"
 
+# --- a badge-only preserve reconciles on the short stillness window ---
+# The reported symptom: the preserving Stop had already spoken "Codex
+# completed" while the window kept spinning with no completion badge for
+# another 15-25s. A badge-only watch now reconciles on
+# TMUX_PRESERVE_SETTLE_SECONDS, because it only has to see that no successor
+# turn is repainting — a live Codex turn repaints in every phase it has. That
+# still takes two ticks, and deliberately so: the agent repaints once more as
+# the Stop hook returns (Codex drops the "Running Stop hook: …" row it drew
+# for the hook's lifetime), so a baseline captured by the arm itself would
+# never match, and the first tick is the earliest one that can record a
+# comparable pane. A watch that is NOT badge-only keeps the full window: it
+# decides a turn's end from stillness alone, and a wrong call there invents a
+# completion.
+for opt_name in @code_notify_running @code_notify_queued_prompt \
+    @code_notify_settle_pane @code_notify_settle_ctx @code_notify_settle_fp \
+    @code_notify_settle_since @code_notify_settle_badge_only \
+    @code_notify_idle_watch @code_notify_clear_mode @code_notify_orig_name \
+    @code_notify_badged_name @code_notify_autorename @code_notify_agent_pid; do
+    rm -f "$state_dir/@2.$opt_name"
+done
+printf '%s' "zsh" > "$state_dir/@2.window_name"
+printf '%s' "codex working" > "$state_dir/%3.pane_content"
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit \
+    || fail "codex prompt-submit for the quick-reconcile flow should succeed"
+CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit \
+    || fail "second codex prompt-submit (queued) should succeed"
+CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_running_stop consume-queued-prompt \
+    || fail "preserving stop should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "precondition: the preserve keeps the marker"
+[[ "$(cat "$state_dir/@2.@code_notify_settle_badge_only" 2>/dev/null)" == "1" ]] \
+    || fail "precondition: the preserve arms a badge-only watch"
+printf '%s' "$$" > "$state_dir/@2.@code_notify_agent_pid"
+# The repaint that lands as the Stop hook returns, then the tick that can
+# finally baseline against it.
+printf '%s' "idle at the prompt" > "$state_dir/%3.pane_content"
+: > "$settle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" tmux_agent_exit_sweep \
+    || fail "baseline tick after a preserve should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "the baseline tick has nothing to compare against and must hold the marker"
+[[ ! -s "$settle_notify_log" ]] \
+    || fail "the baseline tick must not reconcile"
+# One poll interval later, with the pane untouched — the shared 5s tick.
+printf '%s' "$(( $(date +%s) - 5 ))" > "$state_dir/@2.@code_notify_settle_since"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" tmux_agent_exit_sweep \
+    || fail "the tick after the baseline should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a badge-only preserve should reconcile on the short window"
+[[ "$(cat "$settle_notify_log")" == "%3|stop|codex|"*"|1" ]] \
+    || fail "the quick reconcile must still be badge-only (got: $(cat "$settle_notify_log"))"
+# A plain settle watch at the same age keeps its full window.
+printf '%s' "idle again" > "$state_dir/%3.pane_content"
+CODE_NOTIFY_TMUX_AGENT_NAME=codex tmux_prompt_submit \
+    || fail "codex prompt-submit for the plain-watch case should succeed"
+tmux_agent_exit_sweep || fail "plain-watch baseline tick should succeed"
+printf '%s' "$(( $(date +%s) - 5 ))" > "$state_dir/@2.@code_notify_settle_since"
+: > "$settle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" tmux_agent_exit_sweep \
+    || fail "short-stillness tick on a plain watch should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a plain settle watch must hold the marker for the full settle window"
+[[ ! -s "$settle_notify_log" ]] \
+    || fail "a plain settle watch must not synthesize at five seconds of stillness"
+# An explicit preserve window at or above the settle window falls back to it.
+printf '1' > "$state_dir/@2.@code_notify_settle_badge_only"
+printf '%s' "$(( $(date +%s) - 5 ))" > "$state_dir/@2.@code_notify_settle_since"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" \
+    TMUX_PRESERVE_SETTLE_SECONDS=99 tmux_agent_exit_sweep \
+    || fail "override tick should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a preserve window at or above the settle window must not shorten it"
+tmux_running_stop || fail "quick-reconcile cleanup should succeed"
+for opt_name in @code_notify_agent_pid @code_notify_settle_badge_only window_name; do
+    rm -f "$state_dir/@2.$opt_name"
+done
+rm -f "$state_dir/%3.pane_content" "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+printf '%s' "zsh" > "$state_dir/@2.window_name"
+pass "a badge-only preserve reconciles on the short stillness window"
+
 # --- REGRESSION: raced duplicate sweep chains collapse instead of persisting ---
 # Two hook processes can both read an empty pending flag and both register a
 # sweep timer. Each timer used to clear the flag unconditionally at fire time

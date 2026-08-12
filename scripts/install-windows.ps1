@@ -2786,9 +2786,15 @@ param(
 )
 
 # opencode compatibility plugins (e.g. oh-my-openagent) replay the Claude Code
-# hooks from settings.json inside opencode's own process; opencode is not a
-# supported agent, so its replayed hooks must not notify. opencode exports
-# OPENCODE=1 and OPENCODE_PID into every process it spawns (and nothing else).
+# hooks from settings.json inside opencode's own process; those replayed hooks
+# describe a lifecycle opencode does not have, so they must not notify.
+# opencode exports OPENCODE=1 and OPENCODE_PID into every process it spawns
+# (and nothing else).
+#
+# Unconditional here, unlike the bash notifier, which exempts the opencode
+# plugin `cn on opencode` installs. That install is bash-only — as are the
+# Antigravity, pi and omp integrations — so on Windows there is nothing
+# legitimate for this guard to let through.
 if ($env:OPENCODE -or $env:OPENCODE_PID) {
     exit 0
 }

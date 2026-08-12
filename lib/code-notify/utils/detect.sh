@@ -165,6 +165,19 @@ detect_omp() {
     return 1
 }
 
+# Detect opencode installation
+detect_opencode() {
+    # The command is the marker: unlike the containerized agents, opencode
+    # runs on the host, and its config directory may not exist yet on a fresh
+    # install (the plugin install creates it).
+    if command -v opencode &> /dev/null; then
+        local config_dir="${CODE_NOTIFY_OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}"
+        echo "$config_dir"
+        return 0
+    fi
+    return 1
+}
+
 # Get list of all installed AI coding tools
 get_installed_tools() {
     local tools=()
@@ -193,6 +206,10 @@ get_installed_tools() {
         tools+=("omp")
     fi
 
+    if detect_opencode &> /dev/null; then
+        tools+=("opencode")
+    fi
+
     # Return space-separated list
     echo "${tools[*]}"
 }
@@ -219,6 +236,9 @@ is_tool_installed() {
             ;;
         "omp")
             detect_omp &> /dev/null
+            ;;
+        "opencode")
+            detect_opencode &> /dev/null
             ;;
         *)
             return 1

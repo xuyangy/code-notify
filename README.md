@@ -67,7 +67,7 @@ This first CalVer release collects the fork-specific work since upstream
 
 ## Features
 
-- **Multi-tool support** - Claude Code, OpenAI Codex, Google Gemini CLI, Google Antigravity CLI (`agy`), pi and omp (oh-my-pi)
+- **Multi-tool support** - Claude Code, OpenAI Codex, Google Gemini CLI, Google Antigravity CLI (`agy`), opencode, pi and omp (oh-my-pi)
 - **Agents in containers** - pi and omp run inside Docker (via pi-less-yolo), where nothing can reach the host's notifier. An extension in the bind-mounted state directory spools each lifecycle event, and a host-side relay in the originating tmux pane turns them into ordinary notifications — approval alerts included
 - **Works everywhere** - Terminal, VSCode, Cursor, or any editor
 - **Cross-platform** - macOS, Linux, Windows
@@ -183,6 +183,7 @@ See [docs/installation.md](docs/installation.md) for more details.
 | `cn on codex`        | Enable Codex hooks and suppress duplicate Codex TUI toasts |
 | `cn on gemini`       | Enable for Gemini CLI only                   |
 | `cn on antigravity`  | Enable for Antigravity CLI (`agy`); `cn on agy` also works |
+| `cn on opencode`     | Enable for opencode (installs a plugin in its config directory) |
 | `cn on pi`           | Enable for pi (containerized via pi-less-yolo) |
 | `cn on omp`          | Enable for omp (oh-my-pi); `cn on oh-my-pi` also works |
 | `cn off`             | Disable notifications                        |
@@ -346,6 +347,7 @@ Code-Notify uses the hook systems built into AI coding tools:
 - **Codex**: `~/.codex/hooks.json`
 - **Gemini CLI**: `~/.gemini/settings.json`
 - **Antigravity CLI (`agy`)**: imported plugin at `~/.claude/notifications/agy-plugin/` (registered with `agy plugin install`)
+- **opencode**: plugin at `~/.config/opencode/plugin/code-notify.ts`
 - **pi**: extension at `~/.pi/agent/extensions/code-notify.ts`
 - **omp (oh-my-pi)**: extension at `~/.omp/agent/extensions/code-notify.ts`
 
@@ -360,6 +362,59 @@ For Antigravity CLI, Code-Notify builds a small plugin and registers it with `ag
 - **Idle reminder** — inside tmux, a completion also arms the tmux-derived idle watch: if the pane then holds still for `CODE_NOTIFY_TMUX_IDLE_SECONDS` (default 60) without you engaging the window, one synthetic `idle_prompt` nudge fires (see the feature list above).
 
 Disable everything with `cn off antigravity`, which runs `agy plugin uninstall code-notify`.
+
+### opencode
+
+`cn on opencode` writes one plugin into opencode's config directory, which
+auto-loads every `plugin/*.ts` it finds there. Nothing else is touched — in
+particular not `opencode.jsonc`, which is JSONC (comments and trailing commas
+are legal in it) and would lose its comments to any JSON rewriter.
+
+The plugin runs inside opencode, so it invokes the notifier directly — no
+relay, and badges, the running indicator, click-to-focus, snooze, sounds and
+voice work as they do for a Claude or Codex hook. What each opencode event
+maps to:
+
+- **Input needed** — `permission.asked` fires only when opencode will actually
+  stop and wait for you, so approvals that its permission rules auto-run never
+  notify. `question.asked` (the question tool) is treated the same way, as an
+  `elicitation_dialog`. Answering either resumes the running indicator. Both
+  are gated by their alert types and gated separately, so `cn alerts add
+  permission_prompt` leaves questions silent until you add
+  `elicitation_dialog` too — `cn status` reports each on its own line. The
+  versioned spellings opencode also emits (`permission.v2.asked` and friends)
+  map to the same handlers, and one request announced under both is announced
+  once.
+- **Working indicator** — a user prompt lights it; opencode reporting the
+  session busy keeps it lit for a turn that began before the plugin loaded.
+- **Task complete** — `session.status` reaching idle, which is opencode's
+  canonical turn end; `session.idle` is deprecated upstream and kept as the
+  compatibility path for older versions. Both are emitted today, so the plugin
+  tracks whether a turn is in flight and announces exactly one completion
+  either way.
+- **Errors** — `session.error` raises a failure alert carrying the error class
+  and takes the running indicator down.
+- **Interrupts** — an aborted turn (`MessageAbortedError`) takes the indicator
+  down **silently**: you pressed Escape, so there is nothing to announce.
+- **Subagents** — a subagent's turn end is not your turn end, and neither is
+  its failure or its interruption: none of them are announced, and none touch
+  your turn's running indicator. Its approval and question prompts are
+  announced, because they still stop and wait for you.
+
+One limitation: plugins run inside the opencode **server**, so the tmux pane
+they see is the one the server was started in. Launching `opencode` in a pane
+(the normal case) is correct; attaching a TUI to a pre-existing server (`opencode
+serve`, or a fixed `server.port` in the config) means tmux badges and
+click-to-focus target the server's window instead. Desktop, voice and channel
+delivery are unaffected.
+
+Disable with `cn off opencode`, which removes the plugin file.
+
+Note that opencode compatibility plugins such as `oh-my-openagent` replay
+Claude Code's hooks from `settings.json` inside opencode. Those replayed hooks
+describe a lifecycle opencode does not have, so the notifier ignores them
+(it recognises opencode by the `OPENCODE` variables opencode exports) and acts
+only on this plugin's own events.
 
 ### pi and omp, which run in a container
 

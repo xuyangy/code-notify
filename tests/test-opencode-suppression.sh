@@ -1,12 +1,19 @@
 #!/bin/bash
 #
 # opencode compatibility plugins (oh-my-openagent) replay Claude Code hooks
-# from settings.json inside opencode's process. opencode is not a supported
-# agent: its replayed UserPromptSubmit would start the tmux spinner that no
-# compatible turn-end ever clears. opencode exports OPENCODE=1/OPENCODE_PID
-# into every process it spawns, so the notifier must exit before touching any
-# badge, spinner, or notification state when either is present — while a
-# hook process without them (Claude Code in a sibling window) keeps working.
+# from settings.json inside opencode's process. Those replayed hooks describe
+# a lifecycle opencode does not have: the UserPromptSubmit among them would
+# start the tmux spinner that no compatible turn-end ever clears. opencode
+# exports OPENCODE=1/OPENCODE_PID into every process it spawns, so the
+# notifier must exit before touching any badge, spinner, or notification state
+# when either is present — while a hook process without them (Claude Code in a
+# sibling window) keeps working.
+#
+# opencode itself IS supported, via the plugin `cn on opencode` installs. That
+# plugin marks its own notifier runs with CODE_NOTIFY_OPENCODE_HOOK, which is
+# the only thing this guard lets through; test-opencode-plugin.sh covers that
+# side. Nothing here may set that marker, or these cases would stop testing
+# the guard at all.
 
 set -e
 

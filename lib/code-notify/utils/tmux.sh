@@ -932,7 +932,7 @@ tmux_running_enabled() {
 # (for example /exit, Ctrl-C, or a terminal close).
 tmux_agent_exit_resolve_pid() {
     local agent="$1" pid="$2" info parent executable command hops=0
-    [[ "$agent" =~ ^(claude|codex|gemini|antigravity|agy)$ ]] || return 1
+    [[ "$agent" =~ ^(claude|codex|gemini|antigravity|agy|opencode)$ ]] || return 1
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     while [[ "$pid" =~ ^[0-9]+$ ]] && (( hops < 12 )); do
         # ppid+comm come from one call (a space-embedding comm — an app
@@ -953,6 +953,10 @@ tmux_agent_exit_resolve_pid() {
             codex) [[ "$command" == *codex* || "$command" == *Codex* ]] && { printf '%s' "$pid"; return 0; } ;;
             gemini) [[ "$command" == *gemini* || "$command" == *Gemini* ]] && { printf '%s' "$pid"; return 0; } ;;
             antigravity|agy) [[ "$command" == *antigravity* || "$command" == *Antigravity* || "$command" == *agy* ]] && { printf '%s' "$pid"; return 0; } ;;
+            # The notifier is spawned by the plugin, which runs inside the
+            # opencode process itself, so the walk finds it on the first hop
+            # in the usual single-process case.
+            opencode) [[ "$command" == *opencode* || "$command" == *OpenCode* ]] && { printf '%s' "$pid"; return 0; } ;;
         esac
         [[ "$parent" =~ ^[0-9]+$ ]] && [[ "$parent" != "$pid" ]] || return 1
         pid="$parent"

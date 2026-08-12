@@ -465,6 +465,22 @@ else
     test_fail "container hook spool naming failed"
 fi
 
+# Test 31: opencode plugin install/removal and notifier entry points
+test_start "opencode plugin"
+if run_test_script tests/test-opencode-plugin.sh; then
+    test_pass
+else
+    test_fail "opencode plugin failed"
+fi
+
+# Test 32: opencode plugin event mapping (runs the plugin under bun)
+test_start "opencode event mapping"
+if run_test_script tests/test-opencode-events.sh; then
+    test_pass
+else
+    test_fail "opencode event mapping failed"
+fi
+
 # Summary
 echo ""
 echo "Test Summary:"

@@ -98,6 +98,19 @@ OMP_HOOKS_FILE="$OMP_STATE_DIR/extensions/code-notify.ts"
 # Source of both, shipped with this install.
 CONTAINER_HOOK_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../hooks" 2>/dev/null && pwd)"
 
+# opencode. Its config directory auto-loads every plugin/*.ts, which is the
+# install: one file, no edit to opencode.jsonc — deliberately, because that
+# file is JSONC (comments and trailing commas are legal in it) and every
+# JSON tool code-notify has would rewrite it as plain JSON, silently
+# discarding the user's comments.
+#
+# Unlike the container agents' hooks, this one is rendered rather than copied:
+# it has to name this install's notifier.sh, and only the shell knows where
+# that is (see get_notify_script).
+OPENCODE_CONFIG_DIR="${CODE_NOTIFY_OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}"
+OPENCODE_HOOKS_FILE="$OPENCODE_CONFIG_DIR/plugin/code-notify.ts"
+OPENCODE_HOOK_SOURCE="$CONTAINER_HOOK_SOURCE_DIR/opencode/code-notify.ts"
+
 # Ensure config directory exists
 ensure_config_dir() {
     mkdir -p "$CONFIG_DIR" "$BACKUP_DIR"
@@ -3288,6 +3301,98 @@ is_container_hooks_present() {
 }
 
 # ============================================
+# opencode
+# ============================================
+
+# Render the shipped plugin with this install's notifier path substituted, to
+# stdout. Keeping rendering in one function is what lets the enabled check
+# below compare byte-for-byte against what `cn on opencode` would write now —
+# so a code-notify upgrade that changes either the plugin or the notifier
+# location reads as "needs re-enabling" rather than quietly running a stale
+# bridge (the same contract as is_container_hooks_enabled).
+render_opencode_plugin() {
+    local notifier
+    notifier="$(get_notify_script)"
+    [[ -f "$OPENCODE_HOOK_SOURCE" ]] || return 1
+
+    # The path is substituted into a TypeScript double-quoted string, so a
+    # backslash or a double quote in it would escape out of that string and
+    # break the plugin (opencode then refuses to load the file at all). Both
+    # are legal in a POSIX path, so escape rather than assume.
+    notifier="${notifier//\\/\\\\}"
+    notifier="${notifier//\"/\\\"}"
+
+    # Every obvious way to substitute a PATH gives some character that is legal
+    # in one a second meaning in the replacement text, and each failure is
+    # silent: the rendered plugin still passes cmp (both sides equally wrong)
+    # and still looks rendered, so `cn status` says ENABLED while every
+    # notification, approvals included, goes nowhere.
+    #
+    #   - sed: `&` is the matched text, and the path's own slashes collide
+    #     with the delimiter;
+    #   - awk gsub: `&` is the matched text again;
+    #   - awk -v: expands C escapes in the assignment, undoing the escaping
+    #     above before gsub even runs;
+    #   - bash ${x//y/z}: version-dependent. Bash 5.2 gave `&` and `\` meaning
+    #     in the replacement; 3.2 (what macOS ships, and what runs this) did
+    #     not — so the same install renders differently per machine.
+    #
+    # ENVIRON is read verbatim, and index/substr does a literal splice.
+    CODE_NOTIFY_RENDER_REPL="$notifier" awk '
+        BEGIN {
+            repl = ENVIRON["CODE_NOTIFY_RENDER_REPL"]
+            token = "@@CODE_NOTIFY_NOTIFIER@@"
+            token_len = length(token)
+        }
+        {
+            out = ""
+            line = $0
+            while ((at = index(line, token)) > 0) {
+                out = out substr(line, 1, at - 1) repl
+                line = substr(line, at + token_len)
+            }
+            print out line
+        }
+    ' "$OPENCODE_HOOK_SOURCE"
+}
+
+enable_opencode_hooks() {
+    local dir tmp
+    dir="$(dirname "$OPENCODE_HOOKS_FILE")"
+
+    mkdir -p "$dir" || return 1
+
+    # Render to a temp file in the target directory and rename over the
+    # destination: opencode globs this directory at startup, so a half-written
+    # file could otherwise be loaded and rejected as a broken plugin.
+    tmp="$OPENCODE_HOOKS_FILE.tmp.$$"
+    if ! render_opencode_plugin > "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        echo "Error: opencode plugin source missing at $OPENCODE_HOOK_SOURCE" >&2
+        return 1
+    fi
+    mv -f "$tmp" "$OPENCODE_HOOKS_FILE" || { rm -f "$tmp"; return 1; }
+    return 0
+}
+
+disable_opencode_hooks() {
+    [[ -e "$OPENCODE_HOOKS_FILE" ]] || return 0
+    rm -f "$OPENCODE_HOOKS_FILE" || return 1
+    return 0
+}
+
+is_opencode_enabled() {
+    [[ -f "$OPENCODE_HOOKS_FILE" ]] || return 1
+    render_opencode_plugin 2>/dev/null | cmp -s - "$OPENCODE_HOOKS_FILE"
+}
+
+# `cn off` must still remove a plugin from an older code-notify, or one edited
+# by hand — neither of which matches the rendered source.
+is_opencode_plugin_present() {
+    [[ -f "$OPENCODE_HOOKS_FILE" ]]
+}
+
+# ============================================
 # Multi-tool helpers
 # ============================================
 
@@ -3310,6 +3415,9 @@ enable_tool() {
             ;;
         "pi"|"omp")
             enable_container_hooks "$tool"
+            ;;
+        "opencode")
+            enable_opencode_hooks
             ;;
         *)
             return 1
@@ -3337,6 +3445,9 @@ disable_tool() {
         "pi"|"omp")
             disable_container_hooks "$tool"
             ;;
+        "opencode")
+            disable_opencode_hooks
+            ;;
         *)
             return 1
             ;;
@@ -3363,6 +3474,9 @@ is_tool_enabled() {
         "pi"|"omp")
             is_container_hooks_enabled "$tool"
             ;;
+        "opencode")
+            is_opencode_enabled
+            ;;
         *)
             return 1
             ;;
@@ -3385,6 +3499,11 @@ is_tool_disable_needed() {
             # shipped source, so it reads as disabled — but it is still on disk
             # and still spooling, and `cn off` must remove it.
             is_container_hooks_present "$tool"
+            ;;
+        "opencode")
+            # Same reasoning as pi/omp: a plugin from an older code-notify
+            # reads as disabled but still fires, so it must still be removed.
+            is_opencode_plugin_present
             ;;
         "claude")
             # is_tool_enabled requires the exact current hook set, which an

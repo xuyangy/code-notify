@@ -22,7 +22,7 @@ ${BOLD}USAGE:${RESET}
 ${BOLD}COMMANDS:${RESET}
     ${GREEN}on${RESET}              Enable notifications (all detected tools)
     ${GREEN}on${RESET} all          Enable notifications (explicit alias for all detected tools)
-    ${GREEN}on${RESET} <tool>       Enable for specific tool (claude/codex/gemini/antigravity)
+    ${GREEN}on${RESET} <tool>       Enable for specific tool (claude/codex/gemini/antigravity/opencode)
     ${GREEN}off${RESET}             Disable notifications (all tools)
     ${GREEN}off${RESET} all         Disable notifications (explicit alias for all tools)
     ${GREEN}off${RESET} <tool>      Disable for specific tool
@@ -56,6 +56,7 @@ ${BOLD}TOOL NAMES:${RESET}
     ${CYAN}codex${RESET}           OpenAI Codex CLI
     ${CYAN}gemini${RESET}          Google Gemini CLI
     ${CYAN}antigravity${RESET}     Google Antigravity CLI (alias: ${CYAN}agy${RESET})
+    ${CYAN}opencode${RESET}        opencode
 
 ${BOLD}PROJECT COMMANDS:${RESET}
     ${GREEN}project on${RESET}      Enable for current project
@@ -159,6 +160,7 @@ ${BOLD}EXAMPLES:${RESET}
     cn on all               # Same as cn on
     cn on claude            # Enable for Claude Code only
     cn on antigravity       # Enable for Antigravity CLI (or: cn on agy)
+    cn on opencode          # Enable for opencode
     cn off                  # Disable all
     cn off all              # Same as cn off
     cn status               # Show status for all tools

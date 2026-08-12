@@ -15,13 +15,23 @@ RAW_ARG3="${3:-}"
 
 # opencode compatibility plugins (e.g. oh-my-openagent) replay the Claude Code
 # hooks from settings.json inside opencode's own process, so this notifier can
-# fire for an agent it does not support: UserPromptSubmit starts the tmux
-# spinner, but opencode never delivers a compatible turn-end, so the spinner
-# never clears — and notifications fire for turns code-notify cannot track.
-# opencode exports OPENCODE=1 and OPENCODE_PID into every process it spawns
-# (and into nothing else — an agent in a sibling window is unaffected); bail
-# out before touching any badge, spinner, or notification state.
-if [[ -n "${OPENCODE:-}" ]] || [[ -n "${OPENCODE_PID:-}" ]]; then
+# fire for an agent whose lifecycle those hooks do not describe:
+# UserPromptSubmit starts the tmux spinner, but a replayed Claude hook set
+# never delivers a compatible turn-end, so the spinner never clears — and
+# notifications fire for turns code-notify cannot track. opencode exports
+# OPENCODE=1 and OPENCODE_PID into every process it spawns (and into nothing
+# else — an agent in a sibling window is unaffected); bail out before touching
+# any badge, spinner, or notification state.
+#
+# Code-Notify's own opencode plugin runs inside that same process, so it is
+# exempt — and the marker it sets is the ONLY thing that exempts a run. The
+# plugin sets it on every notifier it spawns, so the detached runs the tmux
+# watches fork from those processes inherit it and are exempt too, whatever
+# argv they carry. Keying on the tool name in argv instead would hand the same
+# exemption to anything that passes "opencode", which is exactly the replayed
+# hooks this guard exists to stop.
+if [[ -z "${CODE_NOTIFY_OPENCODE_HOOK:-}" ]] &&
+    { [[ -n "${OPENCODE:-}" ]] || [[ -n "${OPENCODE_PID:-}" ]]; }; then
     exit 0
 fi
 
@@ -74,6 +84,20 @@ if [[ "$RAW_ARG1" != agy:* ]] && {
     source "$NOTIFIER_DIR/../utils/tmux.sh"
     CODE_NOTIFY_TMUX_AGENT_NAME="${RAW_ARG2:-}"
     tmux_running_resume_after_input 2>/dev/null || true
+    exit 0
+fi
+
+# A turn can end without finishing: the user interrupts it, or the agent exits
+# mid-turn. There is no completion to announce, but a running indicator left
+# spinning would outlive the turn — so this is a teardown with no notification
+# of any kind, the in-process equivalent of what the container relay does for
+# pi and omp (container_relay_teardown). Kept on the cheap pre-sourcing path
+# for the same reason the hooks above are: it only needs tmux.sh.
+if [[ "$RAW_ARG1" == "SessionEnd" ]]; then
+    [[ -n "${TMUX:-}" ]] || exit 0
+    source "$NOTIFIER_DIR/../utils/tmux.sh"
+    CODE_NOTIFY_TMUX_AGENT_NAME="${RAW_ARG2:-}"
+    tmux_running_stop 2>/dev/null || true
     exit 0
 fi
 
@@ -1111,6 +1135,11 @@ case "$TOOL_NAME" in
         # events or none — there is no partial install to gate on.
         BADGE_CLEAR_MODE="engage"
         ;;
+    "opencode")
+        # Same: the plugin turns every user submission into UserPromptSubmit,
+        # and it too is one file with no partial install to gate on.
+        BADGE_CLEAR_MODE="engage"
+        ;;
 esac
 
 badge_glance_clear_enabled() {
@@ -1127,6 +1156,7 @@ get_tool_display_name() {
         "antigravity") echo "Antigravity" ;;
         "pi") echo "pi" ;;
         "omp") echo "omp" ;;
+        "opencode") echo "opencode" ;;
         *) echo "AI" ;;
     esac
 }
@@ -1138,6 +1168,9 @@ get_tool_voice_name() {
     local tool="$1"
     case "$tool" in
         "omp") echo "oh-my-pi" ;;
+        # Said as one word a TTS voice tends to stress it "OP-en-code"; the
+        # space restores the two words the name is made of.
+        "opencode") echo "open code" ;;
         *) get_tool_display_name "$tool" ;;
     esac
 }
@@ -1398,6 +1431,15 @@ claude_event_alert_enabled() {
     local current="idle_prompt"
     [[ -f "$types_file" ]] && current="$(cat "$types_file" 2>/dev/null)"
     [[ "|$current|" == *"|$1|"* ]]
+}
+
+# Whether a notification alert type is enabled, for agents whose hooks are
+# installed all-or-nothing and so cannot be gated at install time the way
+# Claude's and Codex's permission hooks are. Reads the same normalized,
+# pipe-separated file config.sh writes; an absent file means the default
+# (idle_prompt only), matching config.sh's DEFAULT_NOTIFY_TYPE.
+notify_alert_type_enabled() {
+    claude_event_alert_enabled "$1"
 }
 
 # Reconcile Stop against its task-registry snapshot, then answer whether this
@@ -1712,8 +1754,11 @@ should_suppress_notification() {
         fi
     fi
 
-    # Check for auto-accept indicator
-    if [[ "${CLAUDE_AUTO_ACCEPT:-}" == "true" ]]; then
+    # Check for auto-accept indicator. Scoped to Claude: the variable is a
+    # Claude Code convention, and a user who exports it in their shell would
+    # otherwise silence a real approval dialog from every other agent —
+    # including opencode, whose plugin runs inside a process that inherits it.
+    if [[ "$TOOL_NAME" == "claude" ]] && [[ "${CLAUDE_AUTO_ACCEPT:-}" == "true" ]]; then
         return 0
     fi
 
@@ -1755,6 +1800,19 @@ if [[ "$HOOK_TYPE" == "notification" ]]; then
     else
         NOTIFICATION_SUBTYPE=$(get_notification_subtype)
     fi
+fi
+
+# opencode's plugin is one file that reports every event, so there is no
+# install-time gate on it the way Claude and Codex only register their
+# permission hooks while the alert type is on. Enforce the alert types here
+# instead — the same runtime gating Antigravity's approval banner uses, and
+# what lets `cn alerts add/remove` take effect with no reinstall.
+if [[ "$TOOL_NAME" == "opencode" ]] && [[ "$HOOK_TYPE" == "notification" ]]; then
+    case "$NOTIFICATION_SUBTYPE" in
+        "permission_prompt" | "elicitation_dialog")
+            notify_alert_type_enabled "$NOTIFICATION_SUBTYPE" || exit 0
+            ;;
+    esac
 fi
 
 # StopFailure fires when a turn ends on an API error instead of a Stop event

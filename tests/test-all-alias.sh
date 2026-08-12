@@ -70,8 +70,9 @@ run_disable_all_alias_test() {
         local disabled_tools
         disabled_tools="$(sort "$HOME/disabled-tools" | tr '\n' ' ')"
         # Every tool the disable-all loop knows about, sorted. pi and omp are
-        # containerized agents whose teardown is just removing the hook file.
-        [[ "$disabled_tools" == "antigravity claude codex gemini omp pi " ]] || fail "cn off all did not disable every enabled tool"
+        # containerized agents whose teardown is just removing the hook file;
+        # opencode's is removing its plugin.
+        [[ "$disabled_tools" == "antigravity claude codex gemini omp opencode pi " ]] || fail "cn off all did not disable every enabled tool"
     )
 
     rm -rf "$test_dir"

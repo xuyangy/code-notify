@@ -360,7 +360,7 @@ enable_notifications_global() {
 
     if [[ -z "$installed_tools" ]]; then
         warning "No supported AI tools detected"
-        info "Supported tools: Claude Code, Codex, Gemini CLI, Antigravity CLI, pi, omp"
+        info "Supported tools: Claude Code, Codex, Gemini CLI, Antigravity CLI, opencode, pi, omp"
         return 1
     fi
 
@@ -432,6 +432,7 @@ enable_single_tool() {
         "antigravity") config_file="$ANTIGRAVITY_HOOKS_FILE" ;;
         "pi") config_file="$PI_HOOKS_FILE" ;;
         "omp") config_file="$OMP_HOOKS_FILE" ;;
+        "opencode") config_file="$OPENCODE_HOOKS_FILE" ;;
     esac
 
     success "$tool: ENABLED"
@@ -462,7 +463,7 @@ disable_notifications_global() {
     # No tool specified - disable all enabled tools
     local disabled_count=0
 
-    for t in claude codex gemini antigravity pi omp; do
+    for t in claude codex gemini antigravity opencode pi omp; do
         if is_tool_disable_needed "$t"; then
             if disable_single_tool "$t" "quiet"; then
                 ((disabled_count++))
@@ -669,6 +670,40 @@ show_status() {
         echo "  ${DIM}- Antigravity CLI: not installed${RESET}"
     fi
 
+    # opencode
+    if is_tool_installed "opencode"; then
+        if is_tool_enabled "opencode"; then
+            echo "  ${CHECK_MARK} opencode: ${GREEN}ENABLED${RESET}"
+            echo "     Plugin: $OPENCODE_HOOKS_FILE (auto-loaded from the plugin directory)"
+            echo "     Task complete: native session.status turn end (session.idle on older opencode)"
+            echo "     Errors: failure alert on session.error; an interrupted turn ends silently"
+            echo "     Running indicator: user prompt submit; resumes after an approval or answer"
+            # Both prompt kinds are gated at runtime and gated SEPARATELY, so
+            # report them separately: with only permission_prompt enabled a
+            # question still passes unannounced, and a single combined line
+            # claiming "approval and question prompts" would say otherwise.
+            if is_notify_type_enabled "permission_prompt"; then
+                echo "     Approval alerts: ENABLED via permission.asked"
+            else
+                echo "     Approval alerts: disabled (run 'cn alerts add permission_prompt')"
+            fi
+            if is_notify_type_enabled "elicitation_dialog"; then
+                echo "     Question alerts: ENABLED via question.asked"
+            else
+                echo "     Question alerts: disabled (run 'cn alerts add elicitation_dialog')"
+            fi
+            echo "     Subagent turns and errors are not announced; their approval and question prompts are"
+        elif is_opencode_plugin_present; then
+            echo "  ${WARNING} opencode: ${YELLOW}REPAIR NEEDED${RESET}"
+            echo "     Plugin: $OPENCODE_HOOKS_FILE is from a different code-notify version"
+            echo "     Run: ${CYAN}cn on opencode${RESET}"
+        else
+            echo "  ${MUTE} opencode: ${DIM}DISABLED${RESET}"
+        fi
+    else
+        echo "  ${DIM}- opencode: not installed${RESET}"
+    fi
+
     # pi and omp (containerized via pi-less-yolo)
     show_container_agent_status "pi" "pi" "$PI_HOOKS_FILE"
     show_container_agent_status "omp" "omp (oh-my-pi)" "$OMP_HOOKS_FILE"
@@ -840,6 +875,9 @@ run_setup_wizard() {
     fi
     if is_tool_installed "antigravity"; then
         success "Antigravity CLI (agy) detected"
+    fi
+    if is_tool_installed "opencode"; then
+        success "opencode detected"
     fi
 
     # Check notification system
@@ -1186,13 +1224,14 @@ show_voice_status() {
     fi
 
     # Per-tool voice
-    for tool in claude codex gemini antigravity pi omp; do
+    for tool in claude codex gemini antigravity opencode pi omp; do
         local tool_display
         case "$tool" in
             "claude") tool_display="Claude" ;;
             "codex") tool_display="Codex" ;;
             "gemini") tool_display="Gemini" ;;
             "antigravity") tool_display="Antigravity" ;;
+            "opencode") tool_display="opencode" ;;
             "pi") tool_display="pi" ;;
             "omp") tool_display="omp" ;;
         esac

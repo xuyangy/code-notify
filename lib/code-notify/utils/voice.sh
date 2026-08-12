@@ -67,12 +67,18 @@ disable_voice() {
             fi
             ;;
         "all")
-            # Disable all voice settings
+            # Disable all voice settings. One entry per supported tool, and it
+            # has to stay that way: these files live in a directory full of
+            # other notification state, so a voice-* glob would be reaching
+            # past what this command owns.
             rm -f "$GLOBAL_VOICE_FILE"
             rm -f "$VOICE_DIR/voice-claude"
             rm -f "$VOICE_DIR/voice-codex"
             rm -f "$VOICE_DIR/voice-gemini"
             rm -f "$VOICE_DIR/voice-antigravity"
+            rm -f "$VOICE_DIR/voice-opencode"
+            rm -f "$VOICE_DIR/voice-pi"
+            rm -f "$VOICE_DIR/voice-omp"
             ;;
         "global"|*)
             rm -f "$GLOBAL_VOICE_FILE"

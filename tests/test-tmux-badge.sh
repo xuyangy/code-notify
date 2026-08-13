@@ -714,6 +714,94 @@ tmux_badge_set "👋" || fail "badge after suffix-colliding rename should succee
 export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
 pass "suffix-colliding rename becomes the new original"
 
+# --- a manual rename that kept the icon does not stack a second one ---
+# tmux's rename prompt prefills the badged name, so an edit usually carries the
+# icon along: "🟢 zsh" -> "🟢 zsh work". Adopting that verbatim would bake the
+# icon into the original and show "🟢 🟢 zsh work" on the next badge.
+tmux_badge_clear "@2"                          # reset state from the previous case
+tmux_badge_set "🟢" || fail "badge before icon-carrying rename should succeed"
+export FAKE_TMUX_BADGE_INFO='@2|off|0|🟢 zsh work'   # user edited the prefilled name
+tmux_badge_set "🟢" || fail "badge after icon-carrying rename should succeed"
+[[ "$(window_name)" == "🟢 zsh work" ]] || fail "badge must not stack a second icon (got: $(window_name))"
+[[ "$(orig_option)" == "zsh work" ]] || fail "adopted original should drop the carried icon (got: $(orig_option))"
+export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+pass "icon-carrying rename does not stack icons"
+
+# --- the everyday flow: rename the badged window, keep the prefilled icon ---
+# "🟢 deploy" -> "🟢 code deploy": the user edits only the text and leaves the
+# badge alone. The icon stays a badge, so it must not stack on the next event
+# and must not survive the clear as part of their name.
+tmux_badge_clear "@2"
+export FAKE_TMUX_BADGE_INFO='@2|off|0|deploy'
+tmux_badge_set "🟢" || fail "badge before the everyday rename should succeed"
+[[ "$(window_name)" == "🟢 deploy" ]] || fail "badge should read 🟢 deploy (got: $(window_name))"
+export FAKE_TMUX_BADGE_INFO='@2|off|0|🟢 code deploy'      # user edits the text only
+printf '%s' "🟢 code deploy" > "$state_dir/@2.window_name"
+tmux_badge_set "🟢" || fail "badge after the everyday rename should succeed"
+[[ "$(window_name)" == "🟢 code deploy" ]] || fail "badge must stay single (got: $(window_name))"
+[[ "$(orig_option)" == "code deploy" ]] || fail "saved original should be the text alone (got: $(orig_option))"
+tmux_badge_clear "@2"
+[[ "$(window_name)" == "code deploy" ]] || fail "clear should leave the user's text (got: $(window_name))"
+export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+pass "everyday rename keeping the prefilled icon stays single"
+
+# --- the same, over a name that already carries the user's own marker ---
+# "🟢 ❋ deploy" -> "🟢 ❋ code deploy": only the badge icon (the first token of
+# the saved badged name) is ours; the ❋ belongs to the user and rides through
+# the rename, the next badge and the clear untouched.
+tmux_badge_clear "@2"
+export FAKE_TMUX_BADGE_INFO='@2|off|0|❋ deploy'
+tmux_badge_set "🟢" || fail "badge over a user marker should succeed"
+[[ "$(window_name)" == "🟢 ❋ deploy" ]] || fail "badge should read 🟢 ❋ deploy (got: $(window_name))"
+export FAKE_TMUX_BADGE_INFO='@2|off|0|🟢 ❋ code deploy'    # user edits the text only
+printf '%s' "🟢 ❋ code deploy" > "$state_dir/@2.window_name"
+tmux_badge_set "🟢" || fail "badge after renaming a marked window should succeed"
+[[ "$(window_name)" == "🟢 ❋ code deploy" ]] || fail "badge must stay single over the marker (got: $(window_name))"
+[[ "$(orig_option)" == "❋ code deploy" ]] || fail "saved original should keep the user marker (got: $(orig_option))"
+# A later event with a different icon swaps it in place — the adopted name is
+# already recognised as ours, so nothing is re-adopted and nothing stacks.
+tmux_badge_set "💬" || fail "swapping the icon on the renamed window should succeed"
+[[ "$(window_name)" == "💬 ❋ code deploy" ]] || fail "new icon should replace the old one (got: $(window_name))"
+[[ "$(orig_option)" == "❋ code deploy" ]] || fail "icon swap must not touch the saved original (got: $(orig_option))"
+printf '%s' "💬 ❋ code deploy" > "$state_dir/@2.window_name"
+tmux_badge_clear "@2"
+[[ "$(window_name)" == "❋ code deploy" ]] || fail "clear should leave marker and text (got: $(window_name))"
+export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+pass "user marker survives the everyday rename and clear"
+
+# --- the same, with a different icon on the new badge ---
+tmux_badge_clear "@2"
+tmux_badge_set "💬" || fail "badge before mixed-icon rename should succeed"
+export FAKE_TMUX_BADGE_INFO='@2|off|0|💬 zsh work'
+tmux_badge_set "🟢" || fail "badge after mixed-icon rename should succeed"
+[[ "$(window_name)" == "🟢 zsh work" ]] || fail "badge must replace the carried icon (got: $(window_name))"
+[[ "$(orig_option)" == "zsh work" ]] || fail "adopted original should drop the carried icon (got: $(orig_option))"
+export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+pass "mixed-icon rename does not stack icons"
+
+# --- an unrelated leading emoji is left alone ---
+tmux_badge_clear "@2"
+export FAKE_TMUX_BADGE_INFO='@2|off|0|🚀 deploy'
+tmux_badge_set "🟢" || fail "badge on an emoji-named window should succeed"
+[[ "$(window_name)" == "🟢 🚀 deploy" ]] || fail "badge must keep the user's own emoji (got: $(window_name))"
+[[ "$(orig_option)" == "🚀 deploy" ]] || fail "user's emoji must survive in the original (got: $(orig_option))"
+export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+pass "unrelated leading emoji survives badging"
+
+# --- a user name starting with a badge icon we never wrote is not stripped ---
+# There is no @code_notify_badged_name here, so nothing proves the 🟢 came from
+# us: it is the user's own character and must survive badging and clearing,
+# even though the badge about to land uses the same icon.
+tmux_badge_clear "@2"
+export FAKE_TMUX_BADGE_INFO='@2|off|0|🟢 deploy'
+tmux_badge_set "🟢" || fail "badge on a 🟢-named window should succeed"
+[[ "$(orig_option)" == "🟢 deploy" ]] || fail "unproven icon must survive in the original (got: $(orig_option))"
+export FAKE_TMUX_BADGE_INFO='@2|on|0|zsh'
+printf '%s' "🟢 🟢 deploy" > "$state_dir/@2.window_name"
+tmux_badge_clear "@2"
+[[ "$(window_name)" == "🟢 deploy" ]] || fail "clear must restore the user's own icon (got: $(window_name))"
+pass "a user name starting with a badge icon is never stripped"
+
 # --- clear keeps a manual rename ---
 tmux_badge_clear "@2"                          # reset state from the previous case
 tmux_badge_set "🟢" || fail "badge for manual-rename clear test should succeed"
@@ -733,6 +821,16 @@ tmux_badge_clear "@2"
 [[ "$(window_name)" == "api zsh" ]] || fail "clear must not clobber a rename ending in the original name (got: $(window_name))"
 [[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "clear should still drop the badge state after a suffix-colliding rename"
 pass "clear keeps suffix-colliding manual rename"
+
+# --- clear keeps a manual rename but drops the icon it carried ---
+tmux_badge_set "🟢" || fail "badge for icon-carrying clear test should succeed"
+printf '%s' "🟢 zsh work" > "$state_dir/@2.window_name"   # user kept the prefilled icon
+: > "$log_file"
+tmux_badge_clear "@2"
+[[ "$(window_name)" == "zsh work" ]] || fail "clear should drop the carried badge icon (got: $(window_name))"
+grep -q "automatic-rename on" "$log_file" && fail "clear after a manual rename must not re-enable automatic-rename"
+[[ ! -f "$state_dir/@2.@code_notify_orig_name" ]] || fail "clear should still drop the badge state"
+pass "clear drops an icon carried into a manual rename"
 
 # --- legacy badge (no badged-name option) still clears via suffix match ---
 printf '%s' "zsh" > "$state_dir/@2.@code_notify_orig_name"

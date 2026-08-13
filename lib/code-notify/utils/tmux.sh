@@ -150,6 +150,21 @@ tmux_focus_build_command() {
 # like "zsh" -> "api zsh" for a badged form of "zsh". Badges written by older
 # versions lack the option, so a "<something> <original>" suffix match remains
 # as the fallback for them only.
+#
+# The adopted name is stripped of our own icon prefix first: tmux's rename
+# prompt prefills the live (badged) name, so an edit usually carries the icon
+# along ("🟢 zsh" -> "🟢 zsh work"). Adopting that verbatim would bake the icon
+# into the original and stack a second one on the next badge
+# ("🟢 🟢 zsh work"). Clear strips it for the same reason — a kept manual
+# rename must not leave a badge icon behind for the next badge to build on.
+#
+# Stripping happens only where @code_notify_badged_name proves we wrote that
+# exact prefix onto this window; a name we have no such record for is the
+# user's, icon or not, and is adopted verbatim. The one accepted false
+# positive is a user who types our current icon into their own rename while
+# the badge is live — indistinguishable from the prefill, and it costs a
+# leading emoji on the next clear. The reverse mistake is worse: a badge icon
+# baked into the saved original stacks on every later badge.
 
 TMUX_BADGE_DISABLED_FILE="$HOME/.claude/notifications/tmux-badge-disabled"
 TMUX_BADGE_VISIBLE_ENABLED_FILE="$HOME/.claude/notifications/tmux-badge-visible-enabled"
@@ -240,6 +255,39 @@ tmux_badge_name_is_badged() {
     fi
 }
 
+# Drop leading "<icon> " runs from a name the user renamed by hand. Callers
+# must pass only icons this window is *known to have carried*, i.e. the one
+# saved in @code_notify_badged_name — proof that this exact prefix was written
+# onto this exact window by us, and that a rename prompt opened since would
+# have prefilled it. A leading emoji with no such proof is the user's own name
+# and must never be passed here. Repeats of the proven prefix are stripped so
+# an already-stacked name heals instead of growing.
+tmux_badge_strip_icons() {
+    local name="$1"
+    shift
+    local icon
+    local -a prefixes=()
+    for icon in "$@"; do
+        [[ -n "$icon" ]] && prefixes+=("$icon ")
+    done
+    if [[ "${#prefixes[@]}" -gt 0 ]]; then
+        local stripped=1 prefix rest
+        while [[ "$stripped" == 1 ]]; do
+            stripped=0
+            for prefix in "${prefixes[@]}"; do
+                [[ "$name" == "$prefix"* ]] || continue
+                rest="${name#"$prefix"}"
+                # Never strip down to nothing: a window named just "🟢" is the
+                # user's name, not a bare badge.
+                [[ -n "$rest" ]] || continue
+                name="$rest"
+                stripped=1
+            done
+        done
+    fi
+    printf '%s' "$name"
+}
+
 # Prepend an icon to the originating window's name. Idempotent: a repeat
 # notification swaps the icon instead of stacking a second one. Windows the
 # user is currently looking at (active window of an attached session) are
@@ -278,6 +326,13 @@ tmux_badge_apply() {
         fi
     fi
     if [[ -z "$orig_name" ]]; then
+        # No badge state: nothing on this window is known to be ours, so the
+        # name is taken verbatim even when it opens with an icon we also use.
+        # A window the user named "🟢 deploy" keeps that name — restoring
+        # "deploy" on the next clear would silently eat a character they
+        # typed. The cost is that a stack left by a pre-fix version keeps its
+        # extra icon (it stays at that width rather than growing, since the
+        # badged-name comparison recognises the result from here on).
         orig_name="$name"
         tmux set-option -w -t "$window_id" @code_notify_orig_name "$orig_name" 2>/dev/null || return 1
         tmux set-option -w -t "$window_id" @code_notify_autorename "${autorename:-off}" 2>/dev/null
@@ -285,10 +340,13 @@ tmux_badge_apply() {
         ! tmux_badge_name_is_badged "$name" "$orig_name" "$badged_name"; then
         # Badged, but the current name is neither the saved original nor the
         # badged form of it: the user renamed the window while it was badged.
-        # Their name becomes the new original, and automatic-rename is pinned
-        # off — restoring the pre-badge "on" would rename right past their
-        # choice.
-        orig_name="$name"
+        # Their name becomes the new original — minus the icon prefix this
+        # window is known to have been carrying, which the rename prompt
+        # prefilled into their edit — and automatic-rename is pinned off,
+        # since restoring the pre-badge "on" would rename right past their
+        # choice. Only the badged icon is stripped: it is the one we
+        # demonstrably wrote here, unlike the icon merely being applied now.
+        orig_name=$(tmux_badge_strip_icons "$name" "${badged_name%% *}")
         tmux set-option -w -t "$window_id" @code_notify_orig_name "$orig_name" 2>/dev/null || return 1
         tmux set-option -w -t "$window_id" @code_notify_autorename off 2>/dev/null
     fi
@@ -455,6 +513,16 @@ tmux_badge_clear_locked() {
         tmux rename-window -t "$window_id" "$orig_name" 2>/dev/null
         if [[ "$autorename" == "on" ]]; then
             tmux set-option -w -t "$window_id" automatic-rename on 2>/dev/null
+        fi
+    else
+        # A manual rename the user keeps — but the rename prompt prefills the
+        # badged name, so it usually still carries our icon. Leaving it there
+        # would make the icon part of their name forever, with the next badge
+        # stacking a second one on top.
+        local kept
+        kept=$(tmux_badge_strip_icons "$current" "${badged_name%% *}")
+        if [[ "$kept" != "$current" ]]; then
+            tmux rename-window -t "$window_id" "$kept" 2>/dev/null
         fi
     fi
     tmux set-option -wu -t "$window_id" @code_notify_orig_name 2>/dev/null

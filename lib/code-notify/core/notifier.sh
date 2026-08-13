@@ -1156,7 +1156,7 @@ get_tool_display_name() {
         "antigravity") echo "Antigravity" ;;
         "pi") echo "pi" ;;
         "omp") echo "omp" ;;
-        "opencode") echo "opencode" ;;
+        "opencode") echo "OpenCode" ;;
         *) echo "AI" ;;
     esac
 }

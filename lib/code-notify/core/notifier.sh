@@ -2165,12 +2165,24 @@ case "$HOOK_TYPE" in
             "$TOOL_DISPLAY finished the task" \
             "$TOOL_DISPLAY is done" \
             "$TOOL_DISPLAY wrapped up" \
+            "$TOOL_DISPLAY is all set" \
+            "$TOOL_DISPLAY finished up" \
+            "$TOOL_DISPLAY handled your request" \
             -- \
             "All done! $TOOL_DISPLAY completed your task" \
             "Task complete! $TOOL_DISPLAY finished working on your request" \
             "Over to you! $TOOL_DISPLAY completed your task and is standing by" \
             "Good news! $TOOL_DISPLAY is done and ready for you" \
-            "Finished! $TOOL_DISPLAY wrapped up your request"
+            "Finished! $TOOL_DISPLAY wrapped up your request" \
+            "Mission accomplished! $TOOL_DISPLAY finished your task" \
+            "Wrapped it up! $TOOL_DISPLAY handled everything you asked for" \
+            "All set! $TOOL_DISPLAY finished, so take a look at the results" \
+            "Done and dusted! $TOOL_DISPLAY handled your request" \
+            "Success! $TOOL_DISPLAY completed the task without a hitch" \
+            "That is a wrap! $TOOL_DISPLAY finished smoothly" \
+            "Ready when you are! $TOOL_DISPLAY finished all the work" \
+            "Complete! $TOOL_DISPLAY finished, so take a look whenever it suits you" \
+            "All wrapped up! $TOOL_DISPLAY finished, so let me know what you think"
         SOUND="Glass"
         ;;
     "notification")
@@ -2190,12 +2202,19 @@ case "$HOOK_TYPE" in
                     "$TOOL_DISPLAY is waiting" \
                     "$TOOL_DISPLAY is ready for you" \
                     "$TOOL_DISPLAY can take more work now" \
+                    "$TOOL_DISPLAY is standing by" \
+                    "$TOOL_DISPLAY has been idle for a bit" \
                     -- \
                     "Hey, are you still there? $TOOL_DISPLAY is waiting for you" \
                     "Just a gentle reminder - $TOOL_DISPLAY finished a while ago" \
                     "Hello? $TOOL_DISPLAY is idle and ready for more work" \
                     "Still waiting for you! $TOOL_DISPLAY can take more work now" \
-                    "Knock knock! $TOOL_DISPLAY is patiently waiting for you"
+                    "Knock knock! $TOOL_DISPLAY is patiently waiting for you" \
+                    "Psst! $TOOL_DISPLAY is still waiting for a look" \
+                    "Friendly nudge! $TOOL_DISPLAY is ready whenever you are" \
+                    "Just checking in! $TOOL_DISPLAY has been idle for a bit" \
+                    "Still here! $TOOL_DISPLAY is waiting on your next move" \
+                    "Gentle poke! $TOOL_DISPLAY would love your attention"
                 ;;
             "permission_prompt")
                 set_event_messages \
@@ -2203,12 +2222,19 @@ case "$HOOK_TYPE" in
                     "$TOOL_DISPLAY is waiting for approval" \
                     "$TOOL_DISPLAY needs permission to continue" \
                     "$TOOL_DISPLAY has an approval request" \
+                    "$TOOL_DISPLAY needs your okay" \
+                    "$TOOL_DISPLAY is paused for approval" \
                     -- \
                     "Attention please! $TOOL_DISPLAY needs your permission to continue" \
                     "Hey! $TOOL_DISPLAY needs a quick approval to proceed" \
                     "Heads up! $TOOL_DISPLAY has a permission request waiting for you" \
                     "Excuse me! $TOOL_DISPLAY needs your authorization to continue" \
-                    "Permission required! $TOOL_DISPLAY is waiting for your approval"
+                    "Permission required! $TOOL_DISPLAY is waiting for your approval" \
+                    "One moment! $TOOL_DISPLAY needs your go-ahead to keep going" \
+                    "Waiting on you! Please approve so $TOOL_DISPLAY can continue" \
+                    "Knock knock! A permission request in $TOOL_DISPLAY needs your okay" \
+                    "Pause here! $TOOL_DISPLAY needs your approval before moving on" \
+                    "Your call! Grant permission so $TOOL_DISPLAY can proceed"
                 ;;
             "elicitation_dialog")
                 set_event_messages \
@@ -2240,7 +2266,9 @@ case "$HOOK_TYPE" in
                     "Hey! $TOOL_DISPLAY needs your input to continue" \
                     "Attention! $TOOL_DISPLAY is waiting for you" \
                     "Quick check! $TOOL_DISPLAY has something for you" \
-                    "$TOOL_DISPLAY needs a response to proceed"
+                    "$TOOL_DISPLAY needs a response to proceed" \
+                    "Got a moment? $TOOL_DISPLAY has something for you" \
+                    "Waiting on you! $TOOL_DISPLAY needs a response to keep going"
                 ;;
         esac
         # Subtypes without their own spoken form fall back to the banner text.
@@ -2328,12 +2356,21 @@ case "$HOOK_TYPE" in
         TITLE="$TOOL_DISPLAY 🧨"
         BADGE_ICON="🧨"
         SUBTITLE="Error"
-        MESSAGE=$(choose_random_message \
+        set_event_messages \
             "An error occurred in $TOOL_DISPLAY" \
             "$TOOL_DISPLAY hit an error" \
             "$TOOL_DISPLAY ran into a problem" \
-            "$TOOL_DISPLAY reported a failure")
-        VOICE_MESSAGE="$MESSAGE"
+            "$TOOL_DISPLAY reported a failure" \
+            -- \
+            "Oops! Something went wrong in $TOOL_DISPLAY" \
+            "Alert! $TOOL_DISPLAY hit an error and needs your attention" \
+            "Error detected! Please review the problem in $TOOL_DISPLAY" \
+            "Heads up! $TOOL_DISPLAY ran into an error that needs a look" \
+            "Uh oh! An error popped up in $TOOL_DISPLAY" \
+            "Something broke! Please check the error in $TOOL_DISPLAY" \
+            "Snag detected! $TOOL_DISPLAY reported a failure" \
+            "Hold up! An error occurred while $TOOL_DISPLAY was working" \
+            "Trouble ahead! Please check the error $TOOL_DISPLAY just hit"
         SOUND="Basso"
         ;;
     "test")
@@ -2397,9 +2434,16 @@ except Exception:
                 MESSAGE="${MESSAGE}..."
             fi
             if [[ "$VOICE_WORDING" == "long" ]]; then
-                VOICE_MESSAGE="Hey! $TOOL_DISPLAY has a question for you"
+                VOICE_MESSAGE=$(choose_random_message \
+                    "Hey! $TOOL_DISPLAY has a question for you" \
+                    "Got a moment? $TOOL_DISPLAY has something to ask you" \
+                    "Quick question! $TOOL_DISPLAY needs your input" \
+                    "Question time! $TOOL_DISPLAY is waiting for your answer")
             else
-                VOICE_MESSAGE="$TOOL_DISPLAY is asking a question"
+                VOICE_MESSAGE=$(choose_random_message \
+                    "$TOOL_DISPLAY is asking a question" \
+                    "$TOOL_DISPLAY has a question" \
+                    "$TOOL_DISPLAY needs your answer")
             fi
         else
             set_event_messages \
@@ -2407,12 +2451,19 @@ except Exception:
                 "$TOOL_DISPLAY has a question" \
                 "$TOOL_DISPLAY needs an answer" \
                 "$TOOL_DISPLAY is waiting on a question" \
+                "$TOOL_DISPLAY needs your guidance" \
+                "$TOOL_DISPLAY is waiting for your answer" \
                 -- \
                 "Hey! $TOOL_DISPLAY has a question for you" \
                 "Attention! $TOOL_DISPLAY needs your answer to continue" \
                 "Quick question! $TOOL_DISPLAY needs your input" \
                 "$TOOL_DISPLAY needs some clarification from you" \
-                "Question time! $TOOL_DISPLAY is waiting for your answer"
+                "Question time! $TOOL_DISPLAY is waiting for your answer" \
+                "Got a moment? $TOOL_DISPLAY has something to ask you" \
+                "Your thoughts needed! $TOOL_DISPLAY has a question on screen" \
+                "Quick check-in! $TOOL_DISPLAY needs a bit of guidance from you" \
+                "Hey there! Could you help $TOOL_DISPLAY with a quick question?" \
+                "Curious minds! $TOOL_DISPLAY needs your answer to keep going"
         fi
         SOUND="Ping"
         ;;

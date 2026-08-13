@@ -3560,14 +3560,26 @@ switch ($HookType.ToLower()) {
             "$ToolDisplay completed the task in $ProjectName",
             "$ToolDisplay finished the task in $ProjectName",
             "$ToolDisplay is done in $ProjectName",
-            "$ToolDisplay wrapped up in $ProjectName"
+            "$ToolDisplay wrapped up in $ProjectName",
+            "$ToolDisplay is all set in $ProjectName",
+            "$ToolDisplay finished up in $ProjectName",
+            "$ToolDisplay handled your request in $ProjectName"
         )
         $longPool = @(
             "All done! $ToolDisplay completed your task in $ProjectName",
             "Task complete! $ToolDisplay finished working on your request in $ProjectName",
             "Over to you! $ToolDisplay completed your task and is standing by in $ProjectName",
             "Good news! $ToolDisplay is done in $ProjectName",
-            "Finished! $ToolDisplay wrapped up your request in $ProjectName"
+            "Finished! $ToolDisplay wrapped up your request in $ProjectName",
+            "Mission accomplished! $ToolDisplay finished your task in $ProjectName",
+            "Wrapped it up! $ToolDisplay handled everything you asked for in $ProjectName",
+            "All set! $ToolDisplay finished in $ProjectName, so take a look at the results",
+            "Done and dusted! $ToolDisplay handled your request in $ProjectName",
+            "Success! $ToolDisplay completed the task without a hitch in $ProjectName",
+            "That is a wrap! $ToolDisplay finished smoothly in $ProjectName",
+            "Ready when you are! $ToolDisplay finished all the work in $ProjectName",
+            "Complete! $ToolDisplay finished in $ProjectName, so take a look whenever it suits you",
+            "All wrapped up! $ToolDisplay finished in $ProjectName, so let me know what you think"
         )
         $Message = Select-WordedMessage -Short $shortPool -Long $longPool -Style $BannerWording
         $VoiceMessage = Select-WordedMessage -Short $shortPool -Long $longPool -Style $VoiceWording
@@ -3581,14 +3593,21 @@ switch ($HookType.ToLower()) {
                     "$ToolDisplay is idle in $ProjectName",
                     "$ToolDisplay is waiting in $ProjectName",
                     "$ToolDisplay is ready for you in $ProjectName",
-                    "$ToolDisplay can take more work now in $ProjectName"
+                    "$ToolDisplay can take more work now in $ProjectName",
+                    "$ToolDisplay is standing by in $ProjectName",
+                    "$ToolDisplay has been idle for a bit in $ProjectName"
                 )
                 $longPool = @(
                     "Hey, are you still there? $ToolDisplay is waiting in $ProjectName",
                     "Just a gentle reminder - $ToolDisplay finished a while ago in $ProjectName",
                     "Hello? $ToolDisplay is idle and ready for more work in $ProjectName",
                     "Still waiting for you! $ToolDisplay can take more work now in $ProjectName",
-                    "Knock knock! $ToolDisplay is patiently waiting in $ProjectName"
+                    "Knock knock! $ToolDisplay is patiently waiting in $ProjectName",
+                    "Psst! $ToolDisplay is still waiting for a look in $ProjectName",
+                    "Friendly nudge! $ToolDisplay is ready whenever you are in $ProjectName",
+                    "Just checking in! $ToolDisplay has been idle for a bit in $ProjectName",
+                    "Still here! $ToolDisplay is waiting on your next move in $ProjectName",
+                    "Gentle poke! $ToolDisplay would love your attention in $ProjectName"
                 )
             }
             "permission_prompt" {
@@ -3596,14 +3615,21 @@ switch ($HookType.ToLower()) {
                     "$ToolDisplay needs your approval in $ProjectName",
                     "$ToolDisplay is waiting for approval in $ProjectName",
                     "$ToolDisplay needs permission to continue in $ProjectName",
-                    "$ToolDisplay has an approval request in $ProjectName"
+                    "$ToolDisplay has an approval request in $ProjectName",
+                    "$ToolDisplay needs your okay in $ProjectName",
+                    "$ToolDisplay is paused for approval in $ProjectName"
                 )
                 $longPool = @(
                     "Attention please! $ToolDisplay needs your permission in $ProjectName",
                     "Hey! $ToolDisplay needs a quick approval in $ProjectName",
                     "Heads up! $ToolDisplay has a permission request in $ProjectName",
                     "Excuse me! $ToolDisplay needs your authorization in $ProjectName",
-                    "Permission required! $ToolDisplay is waiting for your approval in $ProjectName"
+                    "Permission required! $ToolDisplay is waiting for your approval in $ProjectName",
+                    "One moment! $ToolDisplay needs your go-ahead to keep going in $ProjectName",
+                    "Waiting on you! Please approve so $ToolDisplay can continue in $ProjectName",
+                    "Knock knock! A $ToolDisplay permission request needs your okay in $ProjectName",
+                    "Pause here! $ToolDisplay needs your approval before moving on in $ProjectName",
+                    "Your call! Grant permission so $ToolDisplay can proceed in $ProjectName"
                 )
             }
             "elicitation_dialog" {
@@ -3640,7 +3666,9 @@ switch ($HookType.ToLower()) {
                     "Hey! $ToolDisplay needs your input in $ProjectName",
                     "Attention! $ToolDisplay is waiting for you in $ProjectName",
                     "Quick check! $ToolDisplay has something for you in $ProjectName",
-                    "$ToolDisplay needs a response to proceed in $ProjectName"
+                    "$ToolDisplay needs a response to proceed in $ProjectName",
+                    "Got a moment? $ToolDisplay has something for you in $ProjectName",
+                    "Waiting on you! $ToolDisplay needs a response to keep going in $ProjectName"
                 )
             }
         }
@@ -3655,13 +3683,18 @@ switch ($HookType.ToLower()) {
             "$ToolDisplay wants to run a command in $ProjectName",
             "$ToolDisplay is asking to run a command in $ProjectName",
             "$ToolDisplay needs command approval in $ProjectName",
-            "$ToolDisplay has a command approval request in $ProjectName"
+            "$ToolDisplay has a command approval request in $ProjectName",
+            "$ToolDisplay needs your okay to run a command in $ProjectName"
         )
         $longPool = @(
             "Attention please! $ToolDisplay wants to run a command in $ProjectName",
             "Hey! $ToolDisplay is asking to run a command in $ProjectName",
             "Heads up! $ToolDisplay needs command approval in $ProjectName",
-            "Permission required! $ToolDisplay has a command approval request in $ProjectName"
+            "Permission required! $ToolDisplay has a command approval request in $ProjectName",
+            "One moment! $ToolDisplay needs your go-ahead to run a command in $ProjectName",
+            "Waiting on you! Approve the command so $ToolDisplay can continue in $ProjectName",
+            "Pause here! $ToolDisplay needs command approval before moving on in $ProjectName",
+            "Your call! Grant approval so $ToolDisplay can run the command in $ProjectName"
         )
         $Message = Select-WordedMessage -Short $shortPool -Long $longPool -Style $BannerWording
         $VoiceMessage = Select-WordedMessage -Short $shortPool -Long $longPool -Style $VoiceWording
@@ -3732,12 +3765,25 @@ switch ($HookType.ToLower()) {
     }
     { $_ -in "error", "failed" } {
         $Title = "$ToolDisplay - Error"
-        $Message = Select-RandomMessage `
-            "An error occurred in $ProjectName" `
-            "$ToolDisplay hit an error in $ProjectName" `
-            "$ToolDisplay ran into a problem in $ProjectName" `
+        $shortPool = @(
+            "An error occurred in $ProjectName",
+            "$ToolDisplay hit an error in $ProjectName",
+            "$ToolDisplay ran into a problem in $ProjectName",
             "$ToolDisplay reported a failure in $ProjectName"
-        $VoiceMessage = $Message
+        )
+        $longPool = @(
+            "Oops! Something went wrong while $ToolDisplay was working in $ProjectName",
+            "Alert! $ToolDisplay hit an error in $ProjectName and needs your attention",
+            "Error detected! Please review the problem $ToolDisplay hit in $ProjectName",
+            "Heads up! $ToolDisplay ran into an error in $ProjectName that needs a look",
+            "Uh oh! An error popped up while $ToolDisplay worked in $ProjectName",
+            "Something broke! Please check the error $ToolDisplay hit in $ProjectName",
+            "Snag detected! $ToolDisplay reported a failure in $ProjectName",
+            "Hold up! An error occurred while $ToolDisplay was working in $ProjectName",
+            "Trouble ahead! Please check the error $ToolDisplay just hit in $ProjectName"
+        )
+        $Message = Select-WordedMessage -Short $shortPool -Long $longPool -Style $BannerWording
+        $VoiceMessage = Select-WordedMessage -Short $shortPool -Long $longPool -Style $VoiceWording
     }
     "test" {
         $Title = "Code-Notify Test"

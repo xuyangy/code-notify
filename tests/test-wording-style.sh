@@ -65,8 +65,8 @@ printf 'TestVoice\n' > "$HOME/.claude/notifications/voice-claude"
 # exclamation openers. Keep one alternative per pool entry — a phrase the
 # regex misses turns these assertions flaky, since the pool is picked from
 # at random.
-short_re='Claude (completed the task|finished the task|is done|wrapped up)'
-long_re='(All done!|Task complete!|Over to you!|Good news!|Finished!)'
+short_re='Claude (completed the task|finished the task|is done|wrapped up|is all set|finished up|handled your request)'
+long_re='(All done!|Task complete!|Over to you!|Good news!|Finished!|Mission accomplished!|Wrapped it up!|All set!|Done and dusted!|Success!|That is a wrap!|Ready when you are!|Complete!|All wrapped up!)'
 
 # Speech runs in a detached background process, so every notifier invocation
 # must wait for its say output to land before the next run truncates the log;

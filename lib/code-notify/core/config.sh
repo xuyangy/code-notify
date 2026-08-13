@@ -3392,6 +3392,55 @@ is_opencode_plugin_present() {
     [[ -f "$OPENCODE_HOOKS_FILE" ]]
 }
 
+# oh-my-openagent (formerly oh-my-opencode) ships a notifier of its own: a
+# session-notification hook that toasts at every turn end. It does stand down
+# when it detects another notification plugin, but it looks only at the `plugin`
+# array of opencode's config, and only for a short list of known package names.
+# This integration is neither — it is a drop-in file in plugin/, which opencode
+# auto-loads without the config ever naming it. So that detection cannot see us,
+# both notifiers stay on, and every completion arrives twice.
+#
+# Echoes the config file to edit when that is the situation and returns 0;
+# returns 1 when there is nothing to say. Only ever reports — the file belongs to
+# another tool, and is JSONC as often as JSON, so code-notify does not touch it.
+opencode_omo_conflict_config() {
+    local plugin_config omo_config candidate installed=""
+
+    # Strips whole-line `//` comments before matching. opencode's config is
+    # JSONC, so a commented-out plugin entry is a real thing to find in one, and
+    # matching it would nag about a plugin that is not loaded. Subtler spellings
+    # (block comments, a comment trailing a live entry) are left alone
+    # deliberately: over-matching costs one hint nobody needed, while a cleverer
+    # strip could cut into a real entry and lose the hint entirely.
+    for plugin_config in "$OPENCODE_CONFIG_DIR/opencode.jsonc" "$OPENCODE_CONFIG_DIR/opencode.json"; do
+        [[ -f "$plugin_config" ]] || continue
+        if sed 's|^[[:space:]]*//.*$||' "$plugin_config" 2>/dev/null |
+            grep -qE 'oh-my-openagent|oh-my-opencode'; then
+            installed="yes"
+            break
+        fi
+    done
+    [[ -n "$installed" ]] || return 1
+
+    # Already told to stand down? Then say nothing. This searches for the hook
+    # name rather than parsing `disabled_hooks`, because the only cost of
+    # matching too much is staying quiet for someone who has plainly already met
+    # this problem — and a JSONC parser would be a lot of machinery to buy that.
+    for omo_config in \
+        "$OPENCODE_CONFIG_DIR/oh-my-openagent.jsonc" \
+        "$OPENCODE_CONFIG_DIR/oh-my-openagent.json" \
+        "$OPENCODE_CONFIG_DIR/oh-my-opencode.jsonc" \
+        "$OPENCODE_CONFIG_DIR/oh-my-opencode.json"; do
+        [[ -f "$omo_config" ]] || continue
+        grep -q 'session-notification' "$omo_config" 2>/dev/null && return 1
+        [[ -n "$candidate" ]] || candidate="$omo_config"
+    done
+
+    # Prefer a config it already has over the one it would have to create.
+    printf '%s\n' "${candidate:-$OPENCODE_CONFIG_DIR/oh-my-openagent.json}"
+    return 0
+}
+
 # ============================================
 # Multi-tool helpers
 # ============================================

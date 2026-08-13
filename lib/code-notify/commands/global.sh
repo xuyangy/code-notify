@@ -382,6 +382,35 @@ enable_notifications_global() {
     fi
 }
 
+# Deliberately not gated by the `quiet` argument. That flag suppresses the
+# routine chatter of a bulk `cn on` ("Enabling ...", "Config: ..."), not its
+# problems — plain `cn on` is the documented way to install, so gating this
+# behind a targeted `cn on opencode` would hide it from almost everyone who
+# needs it. Only opencode is affected, so at most one of these ever prints.
+warn_if_opencode_omo_conflict() {
+    local omo_config
+    omo_config="$(opencode_omo_conflict_config)" || return 0
+
+    echo ""
+    warning "oh-my-openagent is also installed, and notifies on every turn end too"
+    info "It cannot see this plugin — opencode auto-loads it without naming it in the config — so completions arrive twice"
+
+    # A bare property is the right instruction for a file that already holds an
+    # object, and invalid JSON as a whole file. Someone told to "add" it to a
+    # config that does not exist yet creates exactly that, oh-my-openagent fails
+    # to read disabled_hooks, and the toasts they came here to stop keep coming —
+    # so the no-config case is handed a complete object instead.
+    if [[ -f "$omo_config" ]]; then
+        info "Turn its notifier off by adding this to ${CYAN}$omo_config${RESET}:"
+        echo "  ${CYAN}\"disabled_hooks\": [\"session-notification\"]${RESET}"
+    else
+        info "Turn its notifier off by creating ${CYAN}$omo_config${RESET} with:"
+        echo "  ${CYAN}{ \"disabled_hooks\": [\"session-notification\"] }${RESET}"
+    fi
+
+    info "Then restart opencode. That file is oh-my-openagent's, so code-notify does not edit it"
+}
+
 # Enable a single tool
 enable_single_tool() {
     local tool="$1"
@@ -407,6 +436,10 @@ enable_single_tool() {
         if [[ "$quiet" != "quiet" ]]; then
             warning "$tool notifications already enabled"
         fi
+        # Re-running against an install that is already in place is exactly how
+        # someone chasing duplicate toasts arrives here, so this path reports the
+        # conflict too.
+        [[ "$tool" == "opencode" ]] && warn_if_opencode_omo_conflict
         return 0
     fi
 
@@ -439,6 +472,8 @@ enable_single_tool() {
     if [[ "$quiet" != "quiet" ]]; then
         info "Config: $config_file"
     fi
+
+    [[ "$tool" == "opencode" ]] && warn_if_opencode_omo_conflict
 
     return 0
 }

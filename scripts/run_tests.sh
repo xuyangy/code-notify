@@ -481,6 +481,14 @@ else
     test_fail "opencode event mapping failed"
 fi
 
+# Test 33: the oh-my-openagent duplicate-notification hint
+test_start "opencode oh-my-openagent conflict hint"
+if run_test_script tests/test-opencode-omo-conflict.sh; then
+    test_pass
+else
+    test_fail "opencode oh-my-openagent conflict hint failed"
+fi
+
 # Summary
 echo ""
 echo "Test Summary:"

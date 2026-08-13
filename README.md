@@ -426,6 +426,26 @@ describe a lifecycle opencode does not have, so the notifier ignores them
 (it recognises opencode by the `OPENCODE` variables opencode exports) and acts
 only on this plugin's own events.
 
+`oh-my-openagent` also ships a notifier of its own — a `session-notification`
+hook that toasts "Agent is ready for input" at every turn end. It does try to
+stand down when another notification plugin is present, but it looks only at the
+`plugin` array of `opencode.json`/`opencode.jsonc`, and only for a short list of
+known package names. code-notify is neither: it is a drop-in file in `plugin/`,
+which opencode auto-loads without the config ever naming it. So that detection
+cannot see it, both notifiers stay on, and every completion arrives twice. Turn
+the other one off with:
+
+```json
+{
+  "disabled_hooks": ["session-notification"]
+}
+```
+
+in `~/.config/opencode/oh-my-openagent.json` (`.jsonc` works too, as does the
+legacy `oh-my-opencode` basename), then restart opencode — those hooks are wired
+when the plugin loads. `cn on opencode` prints this hint when it finds the plugin
+in your opencode config; it never edits that file, which belongs to another tool.
+
 ### pi and omp, which run in a container
 
 [pi](https://github.com/earendil-works/pi/tree/main/packages/coding-agent) and [omp (oh-my-pi)](https://github.com/can1357/oh-my-pi) are normally launched through [pi-less-yolo](https://github.com/cjermain/pi-less-yolo), which runs them inside a Docker container. Nothing in there can deliver a notification: the container has no `$TMUX`, no access to the host tmux socket, and no notification binary. So the bridge is split in two.

@@ -693,8 +693,8 @@ TMUX_SETTLE_SECONDS="${CODE_NOTIFY_TMUX_SETTLE_SECONDS:-15}"
 TMUX_PRESERVE_SETTLE_SECONDS="${CODE_NOTIFY_TMUX_PRESERVE_SETTLE_SECONDS:-4}"
 # Agents with no native idle reminder (pipe-separated). Claude nudges by
 # itself once it has been waiting for input for a while (its idle_prompt
-# notification); Codex and Antigravity never do, so their windows can sit in
-# "complete" state indefinitely with no follow-up. For agents listed here a
+# notification); Codex, Antigravity and opencode never do, so their windows can
+# sit in "complete" state indefinitely with no follow-up. For agents listed here a
 # turn end arms an idle watch: once the pane's rendered content has held
 # still for TMUX_IDLE_SECONDS after the completion — the user never came
 # back — one synthetic idle_prompt notification fires through the notifier.
@@ -703,7 +703,7 @@ TMUX_PRESERVE_SETTLE_SECONDS="${CODE_NOTIFY_TMUX_PRESERVE_SETTLE_SECONDS:-4}"
 # later repaint disarms the watch. Outside tmux nothing is watched at all. The
 # watch rides the agent-exit sweep, so
 # CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS=0 disables it as well.
-TMUX_IDLE_AGENTS="${CODE_NOTIFY_TMUX_IDLE_AGENTS:-codex|antigravity}"
+TMUX_IDLE_AGENTS="${CODE_NOTIFY_TMUX_IDLE_AGENTS:-codex|antigravity|opencode}"
 # Seconds of post-completion stillness before the nudge. 0 disables.
 TMUX_IDLE_SECONDS="${CODE_NOTIFY_TMUX_IDLE_SECONDS:-60}"
 # Agents whose running marker additionally gets an approval-dialog watch

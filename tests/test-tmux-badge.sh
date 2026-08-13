@@ -2687,7 +2687,7 @@ settle_handoff_round() {
     env -u TMUX_PANE /bin/sh -c "$payload"
 }
 settle_handoff_round "" || fail "default-allowlist handoff round should run cleanly"
-[[ "$(cat "$settle_notify_log")" == *"|codex|antigravity|zsh|0|1|" ]] \
+[[ "$(cat "$settle_notify_log")" == *"|codex|antigravity|opencode|zsh|0|1|" ]] \
     || fail "scheduled completion should inherit the default idle allowlist (got: $(cat "$settle_notify_log"))"
 rm -f "$state_dir/%3.pane_content" \
     "$state_dir/.@code_notify_agent_exit_sweep_scheduled"

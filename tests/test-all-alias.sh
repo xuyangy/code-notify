@@ -122,11 +122,11 @@ run_codex_idle_messaging_test() {
         source "$SCRIPT_DIR/../lib/code-notify/commands/global.sh"
 
         is_tool_installed() {
-            [[ "$1" == "codex" ]] && return 0
+            [[ "$1" == "codex" || "$1" == "opencode" ]] && return 0
             return 1
         }
         is_tool_enabled() {
-            [[ "$1" == "codex" ]] && return 0
+            [[ "$1" == "codex" || "$1" == "opencode" ]] && return 0
             return 1
         }
         is_tool_disable_needed() { return 1; }
@@ -144,13 +144,16 @@ run_codex_idle_messaging_test() {
         alerts_output="$(show_alerts_status 2>&1)"
         help_output="$(show_help 2>&1)"
 
-        [[ "$status_output" == *"Idle reminder: tmux-only post-completion watch when idle_prompt is enabled"* ]] \
-            || fail "status output did not describe Codex idle reminders correctly"
-        [[ "$alerts_output" == *"tmux-only idle reminder for Codex/Antigravity"* ]] \
+        # Both agents lack a native idle reminder, so both status blocks must
+        # carry the line; counting catches a block that silently lost it.
+        [[ "$(grep -c "Idle reminder: tmux-only post-completion watch when idle_prompt is enabled" \
+            <<< "$status_output")" == "2" ]] \
+            || fail "status output did not describe Codex and opencode idle reminders correctly"
+        [[ "$alerts_output" == *"tmux-only idle reminder for Codex/Antigravity/opencode"* ]] \
             || fail "alerts status did not describe idle_prompt correctly"
         [[ "$alerts_output" == *"idle_prompt only gates the tmux-derived post-completion reminder"* ]] \
             || fail "alerts guidance still claimed idle_prompt does not apply to Codex"
-        [[ "$help_output" == *"Codex has no native"* ]] \
+        [[ "$help_output" == *"Codex has no native idle_prompt hook,"* ]] \
             || fail "help output did not explain the Codex idle_prompt limitation"
     )
 

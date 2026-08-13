@@ -418,6 +418,16 @@ serve`, or a fixed `server.port` in the config) means tmux badges and
 click-to-focus target the server's window instead. Desktop, voice and channel
 delivery are unaffected.
 
+A **fixed port** is the same trap wearing a different hat, and it is easy to
+reach by accident: `opencode --hostname <host>` selects the default port 4096
+even when you pass no `--port`. Open a second tmux window that way and its TUI
+attaches to the first window's server, so the second window goes quiet — no
+badge, no spinner — while its notifications land on the first. Give each window
+its own port instead. If you also use `oh-my-openagent`, export `OPENCODE_PORT`
+to the same value: it reaches the server on
+`http://localhost:${OPENCODE_PORT:-4096}` to spawn subagent panes, and silently
+skips them when nothing answers there.
+
 Disable with `cn off opencode`, which removes the plugin file.
 
 Note that opencode compatibility plugins such as `oh-my-openagent` replay

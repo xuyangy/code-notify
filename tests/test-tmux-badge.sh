@@ -126,6 +126,14 @@ case "$cmd" in
                     printf '%s\n' "$FAKE_TMUX_BADGE_INFO"
                 fi
                 ;;
+            '#{pane_in_mode}')
+                # Copy-mode is per-pane state, so it lives in the same
+                # $FAKE_TMUX_STATE/<pane>.<key> namespace as pane_content.
+                # A missing file means the pane is on the live screen, which
+                # real tmux reports as 0.
+                mode=$(cat "$FAKE_TMUX_STATE/${target}.pane_in_mode" 2>/dev/null)
+                printf '%s\n' "${mode:-0}"
+                ;;
             '#{window_name}')
                 if [[ "${FAKE_TMUX_PAUSE_BADGE_CLEAR:-}" == "1" ]]; then
                     : > "$FAKE_TMUX_BADGE_CLEAR_SIGNAL"
@@ -2292,6 +2300,63 @@ CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" tmux_agent_exit_sweep
     || fail "a quiet teardown must not notify (got: $(cat "$settle_notify_log"))"
 pass "textless cancel retires running state silently"
 
+# --- scrolling back to read must not retire a live turn's marker ---
+# Verified on tmux 3.7b: while a pane is in copy-mode, `capture-pane -p`
+# returns the SCROLLED-BACK viewport, not the live screen. So a user who
+# scrolls up to re-read output hands the interrupt watch a frozen screen with
+# no working line on it — exactly the shape the quiet path retires on, and it
+# needs no interrupt text at all, only stillness. Before the pane_in_mode
+# guard, twenty seconds of reading blanked a running turn's spinner silently,
+# with nothing to re-light it until the next prompt. The pane content below is
+# deliberately the same quiet transcript the section above retires on, so the
+# ONLY difference between "retire" and "hold" is the mode flag.
+CODE_NOTIFY_TMUX_AGENT_NAME=claude tmux_prompt_submit \
+    || fail "claude prompt-submit for the copy-mode read should succeed"
+[[ "$(window_name)" == "🌕 zsh" ]] || fail "precondition: running icon should be up"
+printf '1' > "$state_dir/%3.pane_in_mode"
+tmux_agent_exit_sweep || fail "first copy-mode tick should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a copy-mode tick must not retire the marker"
+# Well past TMUX_INTERRUPT_QUIET_SECONDS: without the guard this tick is the
+# one that tore the spinner down.
+: > "$settle_notify_log"
+printf '%s' "$(( $(date +%s) - 60 ))" > "$state_dir/@2.@code_notify_interrupt_since"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" tmux_agent_exit_sweep \
+    || fail "aged copy-mode tick should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a scrolled-back pane must keep the running marker past the quiet window"
+[[ "$(window_name)" == "🌕 zsh" ]] \
+    || fail "a scrolled-back pane must keep the running icon (got: $(window_name))"
+[[ ! -s "$settle_notify_log" ]] \
+    || fail "a copy-mode tick must not notify (got: $(cat "$settle_notify_log"))"
+# The guard re-baselines rather than banking the stillness: the aged
+# countdown is discarded, so leaving copy-mode restarts the window instead of
+# firing on the very next tick.
+[[ ! -f "$state_dir/@2.@code_notify_interrupt_since" ]] \
+    || fail "a copy-mode tick should clear the stillness baseline (got: $(cat "$state_dir/@2.@code_notify_interrupt_since"))"
+pass "a scrolled-back pane keeps its running marker"
+
+# --- leaving copy-mode resumes the watch, it does not disable it ---
+# Same pane, same content, mode flag gone: the guard must only defer. The
+# first live tick re-baselines (the guard threw the old countdown away), and
+# an aged one after it retires the marker exactly as the unscrolled section
+# above does.
+rm -f "$state_dir/%3.pane_in_mode"
+tmux_agent_exit_sweep || fail "first live tick after copy-mode should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "the first live tick only re-baselines; it must not retire the marker"
+: > "$settle_notify_log"
+printf '%s' "$(( $(date +%s) - 60 ))" > "$state_dir/@2.@code_notify_interrupt_since"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" tmux_agent_exit_sweep \
+    || fail "settled tick after leaving copy-mode should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "leaving copy-mode should restore the quiet teardown"
+[[ "$(window_name)" == "zsh" ]] \
+    || fail "the teardown after copy-mode should restore the window name (got: $(window_name))"
+[[ ! -s "$settle_notify_log" ]] \
+    || fail "a quiet teardown must not notify (got: $(cat "$settle_notify_log"))"
+pass "leaving copy-mode resumes the interrupt watch"
+
 # --- a frozen working line vetoes the quiet path ---
 # Stillness is not proof the turn ended: Claude Code's working line has been
 # seen to stop repainting mid-turn, at which point a fingerprint cannot tell a
@@ -2937,6 +3002,33 @@ CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_agent_exit_sweep \
 sleep 0.3
 [[ ! -s "$idle_notify_log" ]] || fail "a vanished pane must not notify"
 pass "vanished pane disarms the idle watch silently"
+
+# A pane broken out to another window disarms even while it sits in copy-mode.
+# The copy-mode hold rewrites the watch with a fresh countdown and keeps the
+# sweep chain alive, so ordering it AHEAD of the ownership check would let a
+# moved pane refresh its former window's watch on every tick for as long as it
+# stayed scrolled — an unobservable countdown pinning the chain. The owning
+# window is therefore resolved once, before either branch. FAKE_TMUX_PANE_WINDOW
+# moves only what display-message reports; the sweep's window enumeration is
+# synthesized from the state files, so @2 is still visited and must still lose
+# its watch.
+printf '%s' "turn finished, waiting" > "$state_dir/%3.pane_content"
+tmux_idle_watch_arm_current codex projX || fail "re-arm for the moved-pane test should succeed"
+printf '%s' "%3 1000 $idle_fp stable codex projX" > "$state_dir/@2.@code_notify_idle_watch"
+printf '1' > "$state_dir/%3.pane_in_mode"
+rm -f "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
+: > "$log_file"
+: > "$idle_notify_log"
+FAKE_TMUX_PANE_WINDOW='@99' CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" \
+    tmux_agent_exit_sweep || fail "sweep with a moved idle pane should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_idle_watch" ]] \
+    || fail "a moved pane in copy-mode must not keep the former window's idle watch"
+sleep 0.3
+[[ ! -s "$idle_notify_log" ]] || fail "a moved pane must not notify"
+grep -q "^run-shell -b -d 5 " "$log_file" \
+    && fail "a disarmed idle watch must not keep the sweep chain alive"
+rm -f "$state_dir/%3.pane_in_mode"
+pass "moved pane in copy-mode disarms the former window's idle watch"
 
 # --- approval-dialog watch: arm gating (agent list, alert type) ---
 # Antigravity's hooks announce no pause for file-write or subagent approvals,

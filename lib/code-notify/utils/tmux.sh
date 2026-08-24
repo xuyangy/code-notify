@@ -1642,7 +1642,7 @@ tmux_agent_exit_sweep() {
     local now window_id pid since gen settle_pane idle_watch resume orig live=0
     local fp_now fp_prev settle_since settle_ctx settle_badge_only settle_needed mode transition_lock transition_token
     local current_pid current_since current_settle_since current_badge_only current_gen
-    local ipane isince ifp1 ifp2 istate iagent iproject
+    local ipane isince ifp1 ifp2 istate iagent iproject iwin
     local dialog_ctx dialog_since dialog_grace dialog_active dialog_run dialog_gen
     local dialog_guard_grace dialog_expiry current_dialog_grace
     local dpane dagent dproject dialog_content
@@ -1720,9 +1720,45 @@ tmux_agent_exit_sweep() {
                 iagent="$istate"
                 istate="stable"
             fi
+            # Owning window resolved once, ahead of both branches, because the
+            # copy-mode hold below must not outrank it. This watch is the only
+            # one whose fallthrough DISARMS on a mismatch (the dialog watch does
+            # nothing there, the interrupt watch only declines to tear down), so
+            # a hold that skipped the check would let a pane broken out to
+            # another window keep refreshing its former window's watch for as
+            # long as it stayed scrolled — a countdown that can no longer be
+            # observed, pinning the sweep alive. Reading it once rather than
+            # repeating the old inline check in both branches also keeps the
+            # tick at its previous cost: one display-message, not two.
+            iwin=""
+            if [[ "$ipane" =~ ^%[0-9]+$ ]]; then
+                # `|| iwin=""` so a vanished pane's non-zero exit cannot trip a
+                # caller running under `set -e`; empty simply fails the equality
+                # below, which is the disarm this watch already documents.
+                iwin=$(tmux display-message -p -t "$ipane" '#{window_id}' 2>/dev/null) || iwin=""
+            fi
             if [[ "$ipane" =~ ^%[0-9]+$ ]] && [[ "$isince" =~ ^[0-9]+$ ]] &&
                 [[ "${TMUX_IDLE_SECONDS:-0}" =~ ^[0-9]+$ ]] && (( TMUX_IDLE_SECONDS > 0 )) &&
-                [[ "$(tmux display-message -p -t "$ipane" '#{window_id}' 2>/dev/null)" == "$window_id" ]] &&
+                [[ "$iwin" == "$window_id" ]] &&
+                tmux_pane_in_copy_mode "$ipane"; then
+                # Copy-mode hands back the scrolled view, not the live screen
+                # (see tmux_pane_in_copy_mode), so neither answer this watch
+                # reads from a capture means anything here: a frozen scrollback
+                # matures the countdown and nudges a user who is demonstrably
+                # sitting at the pane, while an actively scrolling one reads as
+                # "content changed" and DISARMS a reminder that never comes
+                # back. Hold instead — keep the recorded fingerprint and push
+                # the countdown's clock forward, so the idle window restarts
+                # from the moment the user returns to the live screen. A bare
+                # skip would not do: isince is compared against wall-clock now,
+                # so the countdown would mature unobserved and fire on the
+                # first tick after the excursion.
+                tmux set-option -w -t "$window_id" @code_notify_idle_watch \
+                    "$ipane $now $ifp1 $ifp2 $istate $iagent $iproject" 2>/dev/null
+                live=1
+            elif [[ "$ipane" =~ ^%[0-9]+$ ]] && [[ "$isince" =~ ^[0-9]+$ ]] &&
+                [[ "${TMUX_IDLE_SECONDS:-0}" =~ ^[0-9]+$ ]] && (( TMUX_IDLE_SECONDS > 0 )) &&
+                [[ "$iwin" == "$window_id" ]] &&
                 fp_now=$(tmux_resume_poll_fingerprint "$ipane"); then
                 if [[ "$istate" == "settling" ]]; then
                     if [[ "$fp_now" == "$ifp1 $ifp2" ]]; then
@@ -1786,7 +1822,26 @@ tmux_agent_exit_sweep() {
             read -r dpane dagent dproject <<< "$dialog_ctx"
             if [[ "$dpane" =~ ^%[0-9]+$ ]]; then
                 live=1
-                if [[ "$(tmux display-message -p -t "$dpane" '#{window_id}' 2>/dev/null)" == "$window_id" ]] &&
+                if tmux_pane_in_copy_mode "$dpane"; then
+                    # The capture would be the scrolled view (see
+                    # tmux_pane_in_copy_mode), and BOTH branches below would
+                    # then act on fiction: an already-answered dialog scrolled
+                    # in from history toasts a fake approval request, and — far
+                    # worse — a real dialog scrolled out of view reads as
+                    # "absent" and the else-branch throws away the countdown
+                    # toward a genuine permission_prompt. Missing a
+                    # notification that needs the user is this project's most
+                    # serious failure, so take neither branch.
+                    #
+                    # This is the one guarded site that PRESERVES rather than
+                    # re-baselines: unlike the interrupt/settle countdowns,
+                    # which count toward a teardown, @code_notify_dialog_since
+                    # counts toward a notification, so discarding it is itself
+                    # the losing move. Nothing can be answered from copy-mode
+                    # either, so a dialog that was up before the excursion is
+                    # still up after it and its accumulated wait is still true.
+                    :
+                elif [[ "$(tmux display-message -p -t "$dpane" '#{window_id}' 2>/dev/null)" == "$window_id" ]] &&
                     dialog_content=$(tmux capture-pane -p -t "$dpane" 2>/dev/null); then
                     if [[ "$(tmux_resume_poll_dialog_flag "$dialog_content")" == "1" ]]; then
                         if [[ ! "$dialog_since" =~ ^[0-9]+$ ]]; then
@@ -1855,7 +1910,32 @@ tmux_agent_exit_sweep() {
             [[ "${TMUX_INTERRUPT_QUIET_SECONDS:-0}" =~ ^[0-9]+$ ]] &&
             (( TMUX_INTERRUPT_SECONDS > 0 )); then
             live=1
-            if [[ "$(tmux display-message -p -t "$interrupt_pane" '#{window_id}' 2>/dev/null)" == "$window_id" ]] &&
+            if tmux_pane_in_copy_mode "$interrupt_pane"; then
+                # The confirmed bug this guard exists for. A scrolled capture
+                # (see tmux_pane_in_copy_mode) poisons both thresholds at once:
+                # scrollback nearly always carries an old "Interrupted"/"Esc to
+                # interrupt" row, which arms the 5s marker path, and the live
+                # working line the TMUX_BUSY_MARKERS veto depends on has
+                # scrolled away with it — so the veto, this watch's entire
+                # safety net, evaluates against the wrong pixels. The quiet
+                # path is worse still: it needs no scrolled-in text at all,
+                # only stillness, and a frozen viewport is still BY
+                # CONSTRUCTION. Any 20-second read of the scrollback would
+                # therefore retire a live turn's spinner and badge silently,
+                # with nothing to re-light them mid-turn.
+                #
+                # Re-baseline rather than preserve, the inverse of the dialog
+                # watch above and the same shape the "nothing to count" branch
+                # below already uses: what is being discarded is progress
+                # toward a TEARDOWN, so throwing it away costs at most a
+                # spinner retired a few seconds late — bounded and
+                # self-correcting, since a genuine Escape re-qualifies on the
+                # first live capture after the user leaves the mode.
+                if [[ -n "$interrupt_since$interrupt_fp" ]]; then
+                    tmux set-option -wu -t "$window_id" @code_notify_interrupt_fp 2>/dev/null
+                    tmux set-option -wu -t "$window_id" @code_notify_interrupt_since 2>/dev/null
+                fi
+            elif [[ "$(tmux display-message -p -t "$interrupt_pane" '#{window_id}' 2>/dev/null)" == "$window_id" ]] &&
                 interrupt_content=$(tmux capture-pane -p -t "$interrupt_pane" 2>/dev/null); then
                 # How long this capture has to hold still before the marker
                 # comes down. The agent's own interrupt line is proof the turn
@@ -1999,6 +2079,24 @@ tmux_agent_exit_sweep() {
         (( now - since < TMUX_RUNNING_TTL )) || continue
         live=1
         [[ "$(tmux display-message -p -t "$settle_pane" '#{window_id}' 2>/dev/null)" == "$window_id" ]] || continue
+        if tmux_pane_in_copy_mode "$settle_pane"; then
+            # A pane parked in a mode is frozen by definition (see
+            # tmux_pane_in_copy_mode), and this watch has no busy veto of its
+            # own — it fires on stillness alone. So a scrollback read lasting a
+            # settle window would declare a running turn finished: fake "agent
+            # is done" toast, false completion badge, spinner down, idle watch
+            # armed over a turn still in flight.
+            #
+            # Push the countdown's start to now rather than just skipping the
+            # tick: the capture-failure path a line below deliberately leaves
+            # settle_since alone, so stillness keeps accruing across ticks it
+            # could not observe, and a bare `continue` here would inherit that
+            # and let the window mature during the excursion — firing on the
+            # first tick after it. The pane's stillness only becomes evidence
+            # again once the viewport is live, so the full window restarts then.
+            tmux set-option -w -t "$window_id" @code_notify_settle_since "$now" 2>/dev/null
+            continue
+        fi
         fp_now=$(tmux_resume_poll_fingerprint "$settle_pane") || fp_now=""
         [[ -n "$fp_now" ]] || continue
         fp_prev=$(tmux show-options -wqv -t "$window_id" @code_notify_settle_fp 2>/dev/null)
@@ -3222,6 +3320,49 @@ tmux_resume_poll_schedule() {
     return 0
 }
 
+# True when the pane is displaying a MODE (copy-mode, the view-mode that
+# run-shell/`?` open, choose-tree) instead of the live screen. Every watch in
+# this file decides "the turn ended" from a capture, and verified on tmux
+# 3.7b, `tmux capture-pane -p` returns the SCROLLED-BACK viewport while the
+# pane is in copy-mode — not what the agent is painting right now. So a user
+# scrolling up to re-read output hands the watches a frozen screen with no
+# working line on it, which is exactly the shape of "this turn is over": the
+# quiet interrupt path retires a LIVE turn's spinner after 20s of reading, an
+# old "Interrupted" row scrolled into view retires it after 5s, and the settle
+# watch synthesizes a completion for a turn still in flight.
+#
+# The guard is deliberately coarse: #{pane_in_mode} is 1 for any mode, even
+# copy-mode parked at scroll position 0 where the capture does happen to match
+# the live screen. Refining it with #{scroll_position} would buy nothing — a
+# pane sitting in a mode is not repainting the viewport either way, so its
+# stillness is untrustworthy at any offset. The trade is the one the rest of
+# this file is built on: a spinner held up a few seconds too long is bounded,
+# visible and self-correcting (the next capture after the user leaves the mode
+# settles it), whereas a silently retired spinner, a fake completion or a
+# swallowed approval prompt is none of those.
+#
+# Fails SAFE, in the same direction as everything else here: a tmux error, a
+# vanished pane, or any answer other than a literal 1 reads as "not in a
+# mode", so the watches behave exactly as they do today whenever the question
+# cannot be answered. The inverse default would let one failed display-message
+# freeze a watch — and a frozen watch is the dangerous error.
+#
+# Only the watch TICKS ask this question, never the hook paths: they already
+# pay for a capture, so one more display-message is noise beside it, whereas
+# tmux_idle_watch_arm's arm-time fingerprint runs on every completion and has
+# no round-trip to piggyback on. Arming from a scrolled view was considered
+# and deliberately left unguarded — its whole cost is one idle reminder lost
+# to a user who was demonstrably at the keyboard, which does not buy a
+# per-turn tmux call. The retained-history scan
+# (tmux_resume_poll_cancel_history_count) needs no guard either: `capture-pane
+# -S -` serialises the scrollback, which copy-mode does not move.
+tmux_pane_in_copy_mode() {
+    local pane_id="$1" in_mode
+    in_mode=$(tmux display-message -p -t "$pane_id" '#{pane_in_mode}' 2>/dev/null) || return 1
+    [[ "$in_mode" == "1" ]] || return 1
+    return 0
+}
+
 # Checksum of a pane's visible content, used to tell an answered dialog from
 # a merely re-rendered one. cksum is POSIX and lives in /usr/bin, so it
 # resolves even under run-shell's minimal PATH; its "sum size" output is
@@ -3339,6 +3480,22 @@ tmux_resume_poll_sweep() {
                 waiting=1
                 continue
             fi
+            # Defer the baseline while the pane is in a mode: a fingerprint
+            # taken from the scrolled view (see tmux_pane_in_copy_mode)
+            # describes a screen the pane will never paint again, so the first
+            # live tick after the excursion would read as "changed" and the one
+            # after it would resume the spinner spuriously. It also skips the
+            # early-cancel just below, whose "no dialog on screen" gate is read
+            # from that same untrustworthy capture while the decline count it
+            # guards comes from scroll-immune retained history — the pairing
+            # that could consume a pause whose approval prompt is merely
+            # scrolled out of view. Deferring costs nothing: the pause is
+            # already waiting and the baseline is simply taken on the next tick
+            # that finds the pane live.
+            if tmux_pane_in_copy_mode "$pane"; then
+                waiting=1
+                continue
+            fi
             if tmux_resume_poll_capture "$pane" "$cancel_enabled"; then
                 content="$TMUX_RESUME_POLL_CONTENT"
                 marker_now=$(tmux_resume_poll_dialog_flag "$content")
@@ -3392,6 +3549,22 @@ tmux_resume_poll_sweep() {
         pane_window=$(tmux display-message -p -t "$pane" \
             '#{window_id}' 2>/dev/null)
         if [[ "$pane_window" != "$window_id" ]]; then
+            waiting=1
+            continue
+        fi
+        # Same reason as the deferred baseline above, plus the branch that
+        # makes this the highest-stakes poll site: "declines in retained
+        # history grew AND no dialog marker is visible" consumes the pause and
+        # strips its badge, yet the count is scroll-immune while the marker
+        # comes from the visible capture. Scroll a live approval prompt out of
+        # view with a sibling ask's decline sitting in history and the poll
+        # concludes THIS request was rejected — a silently dropped approval
+        # signal. Skipping the whole tick is also the one guard here that is
+        # net cheaper than today: no capture and no history scan. The saved
+        # @code_notify_pause_fp is left untouched on purpose — it is a trusted
+        # pre-excursion baseline, and a copy-mode tick has nothing trustworthy
+        # to replace it with.
+        if tmux_pane_in_copy_mode "$pane"; then
             waiting=1
             continue
         fi

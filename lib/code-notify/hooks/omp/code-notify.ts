@@ -134,12 +134,60 @@ export default function (pi: any) {
 		}
 	};
 
+	// A slash input that has started nothing yet, waiting for before_agent_start
+	// to say whether it became real work. omp fires `input` before it dispatches
+	// slash commands, and most of them (/settings, /help, /plan ...) are handled
+	// entirely in the TUI: no agent turn follows, so a running indicator started
+	// at `input` would stay up until some later turn ended. A slash input
+	// therefore starts nothing and arms this instead; before_agent_start spends
+	// it, and that event fires only when a prompt really does reach the agent
+	// loop — exactly the subset of slash commands that produce work (/skill:x,
+	// /loop, a custom command, anything the builtin registry declines).
+	let slashPromptPending = false;
+
+	// Whether a turn is up as far as the relay is concerned: set by every
+	// prompt_submit this hook emits, cleared when the turn settles. It exists
+	// only to say when the flag above may be spent — see before_agent_start.
+	// Deliberately not a gate on emitting from `input`: an ordinary prompt typed
+	// into a running turn is a real queued successor and the relay handles it.
+	let turnRunning = false;
+
+	const startTurn = (ctx: any): void => {
+		if (!isPrimary(ctx)) return;
+		turnRunning = true;
+		emit("prompt_submit");
+	};
+
 	// The user handed this window work: starts the running indicator and
 	// clears any badge left by the previous turn.
 	pi.on("input", async (event: any, ctx: any) => {
 		if (event?.source === "extension") return undefined;
-		if (isPrimary(ctx)) emit("prompt_submit");
+		const text = typeof event?.text === "string" ? event.text : "";
+		// Assigned, not merely set: a slash command that never reached the agent
+		// leaves the flag armed, and the next ordinary prompt has to disarm it, or
+		// that prompt's own before_agent_start would announce it a second time.
+		slashPromptPending = text.trimStart().startsWith("/");
+		if (slashPromptPending) return undefined;
+		startTurn(ctx);
 		return undefined; // never alter the input
+	});
+
+	// A prompt entering the agent loop. Consulted only for the slash-command
+	// case above: every other prompt already announced itself at `input`.
+	//
+	// Spent only from an idle pane, because omp fires this for its own
+	// continuations too (a TTSR retry, a /loop or autoresearch follow-up). One of
+	// those firing mid-turn must not spend a slash typed into that same turn: the
+	// emit would land over a live indicator, where the relay reads it as a queued
+	// successor and the turn's completion then withholds its badge. Leaving the
+	// flag armed there is what keeps a genuinely queued slash command — omp holds
+	// /skill:x and /loop until the stream ends — announcing itself when it finally
+	// reaches the agent, one event after that turn's `stop`.
+	pi.on("before_agent_start", async (_event: any, ctx: any) => {
+		if (!slashPromptPending || turnRunning) return undefined;
+		slashPromptPending = false;
+		startTurn(ctx);
+		return undefined;
 	});
 
 	// The events that must never be missed: omp is waiting on the user. Not
@@ -174,6 +222,9 @@ export default function (pi: any) {
 	pi.on("agent_end", async (event: any, ctx: any) => {
 		if (event?.willContinue) return undefined;
 		if (!isPrimary(ctx)) return undefined;
+		// The pane is idle again, which is what lets a queued slash command spend
+		// its armed flag at the before_agent_start that follows this settle.
+		turnRunning = false;
 		switch (settleOutcome(event)) {
 			case "aborted":
 				emit("session_end");
@@ -191,6 +242,8 @@ export default function (pi: any) {
 	// parent-exit sweep when omp exits mid-turn (/exit, Ctrl-C). The same
 	// silent teardown serves an interrupted turn (see agent_end above).
 	pi.on("session_shutdown", async (_event: any, ctx: any) => {
+		turnRunning = false;
+		slashPromptPending = false;
 		if (isPrimary(ctx)) emit("session_end");
 		return undefined;
 	});

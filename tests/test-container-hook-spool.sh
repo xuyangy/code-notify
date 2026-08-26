@@ -163,4 +163,84 @@ run_outcome "an abort that will continue emits nothing" "" \
 # is the failure this bridge exists to prevent.
 run_outcome "an unrecognised settle still completes" "stop" '{}'
 
+# A slash command must not start the running indicator by itself: omp fires
+# `input` before it dispatches them, and most (/settings, /help, /plan) are
+# handled in the TUI with no agent turn behind them — the indicator would then
+# stay up until some later turn ended. before_agent_start is what tells the two
+# apart, because only a prompt that reaches the agent loop fires it.
+SLASH="$TEST_ROOT/slash.mjs"
+cat > "$SLASH" <<'SLASH_EOF'
+// One session, a scripted sequence of "<event>:<text>" steps, then the event
+// names actually spooled.
+import { readdirSync, readFileSync } from "node:fs";
+
+const [hookPath, spool, script] = process.argv.slice(2);
+
+const mod = await import(hookPath);
+const handlers = new Map();
+mod.default({ on: (event, handler) => handlers.set(event, handler) });
+
+const ctx = { sessionManager: { getSessionId: () => "session-a" } };
+for (const step of script.split(",")) {
+    const [event, text] = step.split(":");
+    const handler = handlers.get(event);
+    if (!handler) throw new Error(`no handler registered for ${event}`);
+    await handler({ source: "interactive", text: text ?? "" }, ctx);
+}
+
+const names = readdirSync(spool)
+    .filter(name => name.endsWith(".ev"))
+    .sort()
+    .map(name => readFileSync(`${spool}/${name}`, "utf8").split("\t")[0]);
+console.log(names.join(","));
+SLASH_EOF
+
+run_slash() {
+    local label="$1" expected="$2" script="$3"
+    local spool emitted
+    spool="$TEST_ROOT/slash-$(printf '%s' "$label" | tr -c '[:alnum:]' '-')"
+    mkdir -p "$spool"
+
+    emitted="$(CODE_NOTIFY_SPOOL="$spool" "$RUNNER" "${RUNNER_ARGS[@]}" "$SLASH" \
+        "$HOOKS_DIR/omp/code-notify.ts" "$spool" "$script")" \
+        || fail "$label — harness failed to run"
+
+    [[ "$emitted" == "$expected" ]] \
+        || fail "$label — expected '$expected', got '$emitted'"
+    pass "$label"
+}
+
+run_slash "an ordinary prompt still starts the indicator" "prompt_submit" \
+    "input:fix the bug"
+run_slash "a TUI-only slash command starts nothing" "" \
+    "input:/settings"
+run_slash "a slash command that becomes a prompt starts the indicator" "prompt_submit" \
+    "input:/skill:review,before_agent_start:"
+run_slash "an ordinary prompt is announced once, not twice" "prompt_submit" \
+    "input:fix the bug,before_agent_start:"
+# The armed flag must not survive an ordinary prompt: /settings followed by a
+# normal turn would otherwise announce that turn twice, and the relay reads the
+# second announcement as a queued successor and withholds the badge.
+run_slash "a stale slash command does not double-announce the next turn" "prompt_submit" \
+    "input:/settings,input:fix the bug,before_agent_start:"
+
+# The same hazard from the other direction, and the one that actually bites: a
+# slash command typed while a turn is running must arm nothing at all. omp fires
+# before_agent_start for its own continuations too (a TTSR retry, a /loop or
+# autoresearch follow-up), and one of those would otherwise spend the armed flag
+# and announce a second prompt_submit over a live indicator.
+run_slash "a slash typed mid-turn is not spent by a continuation" "prompt_submit" \
+    "input:fix the bug,input:/settings,before_agent_start:"
+# ...but the flag stays armed through that turn, because omp holds a slash
+# command that DOES produce work (/skill:x, /loop) until the stream ends. It is
+# announced when it finally reaches the agent, one event after that turn's stop
+# — a turn with no running indicator is the failure this whole bridge prevents.
+run_slash "a slash queued mid-turn is announced when it reaches the agent" \
+    "prompt_submit,stop,prompt_submit" \
+    "input:fix the bug,input:/skill:review,agent_end:,before_agent_start:"
+# ...and once that turn settles, the pane is idle again, so the next slash
+# command that becomes real work still gets its indicator.
+run_slash "a settled turn re-arms the next slash command" "prompt_submit,stop,prompt_submit" \
+    "input:fix the bug,agent_end:,input:/skill:review,before_agent_start:"
+
 echo "All container hook spool tests passed"

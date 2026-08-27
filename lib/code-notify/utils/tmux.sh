@@ -958,8 +958,13 @@ TMUX_INTERRUPT_QUIET_SECONDS="${CODE_NOTIFY_TMUX_INTERRUPT_QUIET_SECONDS:-20}"
 # alone matches "Showing the full transcript below", and dropping the separator
 # structure matches "Showing the menu; use ctrl+o to toggle details". Both are
 # sentences an agent might write about its own output, and both would freeze the
-# indicator for as long as they stayed on screen. "I cannot see it" must veto
-# exactly like "I can see it" — the
+# indicator for as long as they stayed on screen. The one prefix allowed ahead
+# of the opener is Claude Code's own "dialog waiting · ", which it prepends to
+# this row while an approval prompt is pending. That is the single element the
+# TUI can put there, it is a fixed literal, and it is exactly the case that must
+# not be missed: a permission prompt raised while the user reads the transcript
+# would otherwise fail the anchor and retire a live turn's indicator on the
+# quiet path. "I cannot see it" must veto exactly like "I can see it" — the
 # alternative is retiring a working agent's spinner because the user happened to
 # be reading the transcript. A cancelled turn parked in that view keeps its
 # indicator until the view is closed or the next prompt lands, which is the
@@ -987,7 +992,7 @@ TMUX_INTERRUPT_QUIET_SECONDS="${CODE_NOTIFY_TMUX_INTERRUPT_QUIET_SECONDS:-20}"
 #
 # The `-` (not `:-`) expansion makes an explicit empty value stick, which drops
 # the veto.
-TMUX_BUSY_MARKERS="${CODE_NOTIFY_TMUX_BUSY_MARKERS-^[[:space:]]*(✻|✽|✶|✳|✢|∗|·|\*)[[:space:]]+[A-Za-z].*(…|\.\.\.)|^[[:space:]]*⎿.*…[[:space:]]*\([0-9]+[hms]|^[[:space:]]*•[[:space:]]+[A-Za-z].*\([0-9]+[hms][^)]*[Ee]sc to interrupt[^)]*\)[[:space:]]*$|^[[:space:]]*Showing .*transcript[[:space:]]+·[[:space:]]+ctrl\+o to toggle([[:space:]]+·.*)?$}"
+TMUX_BUSY_MARKERS="${CODE_NOTIFY_TMUX_BUSY_MARKERS-^[[:space:]]*(✻|✽|✶|✳|✢|∗|·|\*)[[:space:]]+[A-Za-z].*(…|\.\.\.)|^[[:space:]]*⎿.*…[[:space:]]*\([0-9]+[hms]|^[[:space:]]*•[[:space:]]+[A-Za-z].*\([0-9]+[hms][^)]*[Ee]sc to interrupt[^)]*\)[[:space:]]*$|^[[:space:]]*(dialog waiting[[:space:]]+·[[:space:]]+)?Showing .*transcript[[:space:]]+·[[:space:]]+ctrl\+o to toggle([[:space:]]+·.*)?$}"
 
 tmux_running_enabled() {
     [[ "${CODE_NOTIFY_TMUX_RUNNING:-}" != "false" ]] && tmux_badge_enabled

@@ -2384,6 +2384,13 @@ done
     || fail "the transcript footer should read as busy"
 [[ "$(tmux_busy_flag "  Showing detailed transcript · ctrl+o to toggle")" == "1" ]] \
     || fail "a footer with no trailing hints should read as busy"
+# Claude Code prepends "dialog waiting · " to the same row while an approval
+# prompt is pending. Missing it is the worst direction available: the turn is
+# both live and blocked on the user.
+[[ "$(tmux_busy_flag "  dialog waiting · Showing detailed transcript · ctrl+o to toggle · ↑↓ scroll")" == "1" ]] \
+    || fail "the transcript footer behind a waiting dialog should read as busy"
+[[ "$(tmux_busy_flag "  dialog waiting · Showing detailed transcript · ctrl+o to toggle")" == "1" ]] \
+    || fail "a dialog-waiting footer with no trailing hints should read as busy"
 # Deliberately NOT matched. The bullet above is a guess — no capture of a
 # non-Claude working row exists — so these near-misses record the choice to keep
 # the anchor strict rather than widen it speculatively: a wrong guess that never
@@ -2413,6 +2420,7 @@ for line in \
     "  Showing the transcript, and ctrl+o is unrelated" \
     "  Showing the menu; use ctrl+o to toggle details" \
     "  Showing detailed transcript and ctrl+o to toggle it" \
+    "  The dialog waiting · Showing the transcript is unrelated" \
     "  ⎿  Read paste_buffer.sh (182 lines)" \
     "  ⎿  Interrupted · What should Claude do instead?"; do
     [[ "$(tmux_busy_flag "$line")" == "0" ]] \

@@ -619,6 +619,7 @@ When notifications are triggered, Code-Notify prepends an emoji icon to the term
 | `SubagentStop` | - | `🍂` | Subagent completed |
 | `TeammateIdle` | - | `💤` | Teammate is waiting for input |
 | `TaskCreated` | - | `📙` | Agent-team task was created |
+| `StopFailure` | `rate_limit` | `⏳` | Usage / session limit reached mid-task |
 | `error` / `failed` | - | `🧨` | Task or tool execution failed |
 | `test` | - | `🧪` | Test notification |
 | other events | - | `📢` | General status update / fallback |

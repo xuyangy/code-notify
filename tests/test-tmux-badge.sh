@@ -2391,6 +2391,22 @@ done
     || fail "the transcript footer behind a waiting dialog should read as busy"
 [[ "$(tmux_busy_flag "  dialog waiting · Showing detailed transcript · ctrl+o to toggle")" == "1" ]] \
     || fail "a dialog-waiting footer with no trailing hints should read as busy"
+# Scrolling the transcript up inside Claude Code hides the working line the same
+# way the Ctrl+O view does, but the pane stays live (not tmux copy-mode), so
+# only this row stands between a reading user and a retired spinner.
+[[ "$(tmux_busy_flag "                    Jump to bottom (ctrl+↓) ↓")" == "1" ]] \
+    || fail "the scrolled-view hint row should read as busy"
+[[ "$(tmux_busy_flag "  Jump to bottom (ctrl+↓)")" == "1" ]] \
+    || fail "the scrolled-view hint row with no trailing glyph should read as busy"
+[[ "$(LC_ALL=C tmux_busy_flag "  Jump to bottom (ctrl+↓) ↓")" == "1" ]] \
+    || fail "the scrolled-view hint row should read as busy under a C locale"
+for line in \
+    "  Jump to bottom (ctrl+↓) when you are done reading" \
+    "  Press Jump to bottom (ctrl+↓) to return" \
+    "  Jump to the bottom (ctrl+↓)"; do
+    [[ "$(tmux_busy_flag "$line")" == "0" ]] \
+        || fail "prose around the scrolled-view hint must not veto (got 1 for: $line)"
+done
 # Deliberately NOT matched. The bullet above is a guess — no capture of a
 # non-Claude working row exists — so these near-misses record the choice to keep
 # the anchor strict rather than widen it speculatively: a wrong guess that never

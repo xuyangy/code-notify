@@ -970,6 +970,21 @@ TMUX_INTERRUPT_QUIET_SECONDS="${CODE_NOTIFY_TMUX_INTERRUPT_QUIET_SECONDS:-20}"
 # indicator until the view is closed or the next prompt lands, which is the
 # pre-watch behaviour and the safe side of the trade.
 #
+# The same "I cannot see it" case arrives a second way: scrolling the
+# transcript up INSIDE Claude Code. That is not tmux copy-mode — the pane is
+# live and #{pane_in_mode} is 0, so tmux_pane_in_copy_mode does not guard it —
+# yet the working line is scrolled off the bottom exactly as in the Ctrl+O
+# view, and a still, scrolled pane then reads as an ended turn and loses a live
+# turn's spinner on the quiet path. What the TUI puts on screen instead is its
+# own floating hint row, "Jump to bottom (ctrl+↓)", drawn only while the view
+# is scrolled away from the tail. Anchored on that whole literal opener, with
+# only non-letter chrome allowed after the closing paren (the row carries a
+# trailing ↓ glyph and padding), so it cannot land inside prose; the wording is
+# a fixed TUI literal, not a random verb, and a repaint takes the row back the
+# moment the user returns to the bottom. Same trade as the transcript footer:
+# a cancelled turn parked in a scrolled view keeps its indicator until the view
+# comes back or the next prompt lands.
+#
 # The completion line deliberately matches none of them, whatever verb it drew —
 # it has no ellipsis — so a finished turn does not veto its own teardown.
 #
@@ -992,7 +1007,7 @@ TMUX_INTERRUPT_QUIET_SECONDS="${CODE_NOTIFY_TMUX_INTERRUPT_QUIET_SECONDS:-20}"
 #
 # The `-` (not `:-`) expansion makes an explicit empty value stick, which drops
 # the veto.
-TMUX_BUSY_MARKERS="${CODE_NOTIFY_TMUX_BUSY_MARKERS-^[[:space:]]*(✻|✽|✶|✳|✢|∗|·|\*)[[:space:]]+[A-Za-z].*(…|\.\.\.)|^[[:space:]]*⎿.*…[[:space:]]*\([0-9]+[hms]|^[[:space:]]*•[[:space:]]+[A-Za-z].*\([0-9]+[hms][^)]*[Ee]sc to interrupt[^)]*\)[[:space:]]*$|^[[:space:]]*(dialog waiting[[:space:]]+·[[:space:]]+)?Showing .*transcript[[:space:]]+·[[:space:]]+ctrl\+o to toggle([[:space:]]+·.*)?$}"
+TMUX_BUSY_MARKERS="${CODE_NOTIFY_TMUX_BUSY_MARKERS-^[[:space:]]*(✻|✽|✶|✳|✢|∗|·|\*)[[:space:]]+[A-Za-z].*(…|\.\.\.)|^[[:space:]]*⎿.*…[[:space:]]*\([0-9]+[hms]|^[[:space:]]*•[[:space:]]+[A-Za-z].*\([0-9]+[hms][^)]*[Ee]sc to interrupt[^)]*\)[[:space:]]*$|^[[:space:]]*(dialog waiting[[:space:]]+·[[:space:]]+)?Showing .*transcript[[:space:]]+·[[:space:]]+ctrl\+o to toggle([[:space:]]+·.*)?$|^[[:space:]]*Jump to bottom[[:space:]]*\(ctrl\+↓\)[^A-Za-z]*$}"
 
 tmux_running_enabled() {
     [[ "${CODE_NOTIFY_TMUX_RUNNING:-}" != "false" ]] && tmux_badge_enabled

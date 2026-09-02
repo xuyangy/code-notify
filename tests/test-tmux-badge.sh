@@ -2400,10 +2400,21 @@ done
     || fail "the scrolled-view hint row with no trailing glyph should read as busy"
 [[ "$(LC_ALL=C tmux_busy_flag "  Jump to bottom (ctrl+↓) ↓")" == "1" ]] \
     || fail "the scrolled-view hint row should read as busy under a C locale"
+# The same slot carries a second text once rows land below the viewport, which
+# is what a scrolled-away LIVE turn actually renders.
+[[ "$(tmux_busy_flag "                    3 new messages (click) ↓")" == "1" ]] \
+    || fail "the new-messages hint row should read as busy"
+[[ "$(tmux_busy_flag "  1 new message (click)")" == "1" ]] \
+    || fail "the singular new-message hint row should read as busy"
+[[ "$(LC_ALL=C tmux_busy_flag "  12 new messages (click) ↓")" == "1" ]] \
+    || fail "the new-messages hint row should read as busy under a C locale"
 for line in \
     "  Jump to bottom (ctrl+↓) when you are done reading" \
     "  Press Jump to bottom (ctrl+↓) to return" \
-    "  Jump to the bottom (ctrl+↓)"; do
+    "  Jump to the bottom (ctrl+↓)" \
+    "  I see 3 new messages (click) below" \
+    "  3 new messages (click) arrived while I read" \
+    "  new messages (click)"; do
     [[ "$(tmux_busy_flag "$line")" == "0" ]] \
         || fail "prose around the scrolled-view hint must not veto (got 1 for: $line)"
 done

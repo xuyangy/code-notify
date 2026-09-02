@@ -977,7 +977,10 @@ TMUX_INTERRUPT_QUIET_SECONDS="${CODE_NOTIFY_TMUX_INTERRUPT_QUIET_SECONDS:-20}"
 # view, and a still, scrolled pane then reads as an ended turn and loses a live
 # turn's spinner on the quiet path. What the TUI puts on screen instead is its
 # own floating hint row, "Jump to bottom (ctrl+↓)", drawn only while the view
-# is scrolled away from the tail. Anchored on that whole literal opener, with
+# is scrolled away from the tail. The TUI draws one of two texts in that slot:
+# the plain hint above, and "3 new messages (click) ↓" once rows have landed
+# below the viewport — which is the shape a scrolled-away LIVE turn actually
+# renders, so both are needed. Anchored on the whole literal opener, with
 # only non-letter chrome allowed after the closing paren (the row carries a
 # trailing ↓ glyph and padding), so it cannot land inside prose; the wording is
 # a fixed TUI literal, not a random verb, and a repaint takes the row back the
@@ -1007,7 +1010,7 @@ TMUX_INTERRUPT_QUIET_SECONDS="${CODE_NOTIFY_TMUX_INTERRUPT_QUIET_SECONDS:-20}"
 #
 # The `-` (not `:-`) expansion makes an explicit empty value stick, which drops
 # the veto.
-TMUX_BUSY_MARKERS="${CODE_NOTIFY_TMUX_BUSY_MARKERS-^[[:space:]]*(✻|✽|✶|✳|✢|∗|·|\*)[[:space:]]+[A-Za-z].*(…|\.\.\.)|^[[:space:]]*⎿.*…[[:space:]]*\([0-9]+[hms]|^[[:space:]]*•[[:space:]]+[A-Za-z].*\([0-9]+[hms][^)]*[Ee]sc to interrupt[^)]*\)[[:space:]]*$|^[[:space:]]*(dialog waiting[[:space:]]+·[[:space:]]+)?Showing .*transcript[[:space:]]+·[[:space:]]+ctrl\+o to toggle([[:space:]]+·.*)?$|^[[:space:]]*Jump to bottom[[:space:]]*\(ctrl\+↓\)[^A-Za-z]*$}"
+TMUX_BUSY_MARKERS="${CODE_NOTIFY_TMUX_BUSY_MARKERS-^[[:space:]]*(✻|✽|✶|✳|✢|∗|·|\*)[[:space:]]+[A-Za-z].*(…|\.\.\.)|^[[:space:]]*⎿.*…[[:space:]]*\([0-9]+[hms]|^[[:space:]]*•[[:space:]]+[A-Za-z].*\([0-9]+[hms][^)]*[Ee]sc to interrupt[^)]*\)[[:space:]]*$|^[[:space:]]*(dialog waiting[[:space:]]+·[[:space:]]+)?Showing .*transcript[[:space:]]+·[[:space:]]+ctrl\+o to toggle([[:space:]]+·.*)?$|^[[:space:]]*Jump to bottom[[:space:]]*\(ctrl\+↓\)[^A-Za-z]*$|^[[:space:]]*[0-9]+ new messages?[[:space:]]*\(click\)[^A-Za-z]*$}"
 
 tmux_running_enabled() {
     [[ "${CODE_NOTIFY_TMUX_RUNNING:-}" != "false" ]] && tmux_badge_enabled

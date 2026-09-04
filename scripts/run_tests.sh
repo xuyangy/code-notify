@@ -402,6 +402,13 @@ else
     test_fail "Claude delegated-work completion deferral failed"
 fi
 
+test_start "Claude delegated-work parser parity"
+if run_test_script tests/test-claude-delegated-work-parity.sh; then
+    test_pass
+else
+    test_fail "Claude delegated-work parser parity failed"
+fi
+
 test_start "ask_user notification lifecycle"
 if run_test_script tests/test-ask-user-alert.sh; then
     test_pass

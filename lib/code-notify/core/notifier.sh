@@ -1301,21 +1301,28 @@ get_delegated_work_marker_file() {
 #   teammate-only - the only running delegates are teammates, whose registry
 #                   entry stays status=running even when parked idle; the
 #                   caller weighs this against the TeammateIdle tombstone
-#   clear         - the documented array is present with no running delegate
+#   clear         - the documented array is present with no running delegate.
+#                   Entries that are not objects with string type/status are
+#                   ignored rather than poisoning the scan; both backends must
+#                   agree here, so the classification is element-level in each.
 #   unknown       - the payload is malformed or the registry is unavailable
 get_claude_delegated_work_state() {
     local state="unknown"
 
     if has_jq; then
         state=$(printf '%s' "$HOOK_DATA" | jq -r '
+            def well_formed: (type == "object")
+                and ((.type | type) == "string")
+                and ((.status | type) == "string");
             def is_running: (.status == "running" or .status == "pending");
             if (has("background_tasks") and (.background_tasks | type == "array")) then
                 if any(.background_tasks[]?;
-                    ((.type == "subagent" or .type == "workflow" or
-                      .type == "cloud session" or
-                      .type == "remote_agent") and is_running))
+                    well_formed and is_running and
+                    (.type == "subagent" or .type == "workflow" or
+                     .type == "cloud session" or .type == "remote_agent"))
                 then "running"
-                elif any(.background_tasks[]?; (.type == "teammate" and is_running))
+                elif any(.background_tasks[]?;
+                    well_formed and is_running and .type == "teammate")
                 then "teammate-only"
                 else "clear" end
             else
@@ -1334,6 +1341,8 @@ try:
         def running(kinds):
             return any(
                 isinstance(task, dict)
+                and isinstance(task.get("type"), str)
+                and isinstance(task.get("status"), str)
                 and task.get("type") in kinds
                 and task.get("status") in {"running", "pending"}
                 for task in tasks

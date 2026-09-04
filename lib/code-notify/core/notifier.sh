@@ -1268,11 +1268,12 @@ consume_recent_ask_user_pending() {
 }
 
 # Claude Code 2.1.145+ includes the session's in-flight task registry in Stop
-# payloads. A main turn can therefore end while delegated subagent or teammate
-# work is still running; treating that Stop as terminal would replace the
-# running badge with "Task Complete", followed later by a misleading idle
-# reminder. Persist a session-scoped marker from that authoritative snapshot
-# so both events can be suppressed without returning a blocking hook decision.
+# payloads. A main turn can therefore end while delegated subagent, workflow,
+# or teammate work is still running; treating that Stop as terminal would
+# replace the running badge with "Task Complete", followed later by a
+# misleading idle reminder. Persist a session-scoped marker from that
+# authoritative snapshot so both events can be suppressed without returning
+# a blocking hook decision.
 get_delegated_work_marker_file() {
     local session_id hook_scope
     session_id=$(json_extract_string "$HOOK_DATA" "session_id")
@@ -1284,9 +1285,19 @@ get_delegated_work_marker_file() {
 }
 
 # Print one of:
-#   running       - a running subagent/cloud session/remote agent is in
-#                   background_tasks (statuses there are trustworthy: they
-#                   transition to completed when the work ends)
+#   running       - a running subagent/workflow/cloud session/remote agent is
+#                   in background_tasks. Claude serializes only in-flight
+#                   (running/pending) work, so finished work drops out of the
+#                   snapshot rather than appearing with a terminal status.
+#                   A workflow fans out its own agents, so its Stop is a pause
+#                   for the same reason a delegated subagent's is, and it has
+#                   no parked/idle analogue: Claude's own delegated-work
+#                   predicate treats local_workflow exactly like local_agent,
+#                   excepting only an idle teammate and a long-running remote
+#                   agent. That last exception is not serialized here, so a
+#                   long-running cloud session can hold this state until the
+#                   marker TTL expires - pre-existing, and not something the
+#                   payload lets this script detect.
 #   teammate-only - the only running delegates are teammates, whose registry
 #                   entry stays status=running even when parked idle; the
 #                   caller weighs this against the TeammateIdle tombstone
@@ -1300,7 +1311,8 @@ get_claude_delegated_work_state() {
             def is_running: (.status == "running" or .status == "pending");
             if (has("background_tasks") and (.background_tasks | type == "array")) then
                 if any(.background_tasks[]?;
-                    ((.type == "subagent" or .type == "cloud session" or
+                    ((.type == "subagent" or .type == "workflow" or
+                      .type == "cloud session" or
                       .type == "remote_agent") and is_running))
                 then "running"
                 elif any(.background_tasks[]?; (.type == "teammate" and is_running))
@@ -1326,7 +1338,7 @@ try:
                 and task.get("status") in {"running", "pending"}
                 for task in tasks
             )
-        if running({"subagent", "cloud session", "remote_agent"}):
+        if running({"subagent", "workflow", "cloud session", "remote_agent"}):
             state = "running"
         elif running({"teammate"}):
             state = "teammate-only"

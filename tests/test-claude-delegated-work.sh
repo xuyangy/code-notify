@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Claude Stop payloads expose the current background-task registry. Running
-# subagent/teammate entries must defer both completion and the later native
-# idle reminder without blocking Claude's control loop.
+# subagent/workflow/teammate entries must defer both completion and the later
+# native idle reminder without blocking Claude's control loop.
 
 set -e
 
@@ -66,6 +66,14 @@ run_notifier() {
         CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
         CODE_NOTIFY_NOTIFICATION_RATE_LIMIT_SECONDS=0 \
         bash "$NOTIFIER" "$hook_type" claude test-project
+}
+
+tmux_call_lines() {
+    if [[ -f "$tmux_log" ]]; then
+        wc -l < "$tmux_log"
+    else
+        echo 0
+    fi
 }
 
 notification_lines() {
@@ -183,5 +191,44 @@ lines_before_expired_idle="$(notification_lines)"
 run_notifier notification '{"session_id":"sess1","notification_type":"idle_prompt"}'
 [[ "$(notification_lines)" -eq $((lines_before_expired_idle + 1)) ]] || fail "expired delegated-work state should not suppress idle"
 [[ ! -e "$marker_sess1" ]] || fail "expired delegated-work state should be pruned"
+
+# The Workflow tool registers a backgrounded workflow that fans out its own
+# agents, so its main-turn Stop is a pause exactly like a delegated subagent's.
+# A fresh session keeps these counts clear of the tombstone above.
+marker_sess3="$HOME/.claude/notifications/state/delegated_work_claude_test-project_sess3"
+lines_before_workflow="$(notification_lines)"
+
+# The badge assertion only means something with a tmux context present: without
+# TMUX/TMUX_PANE, tmux_running_stop returns before it shells out, so an
+# unsuppressed Stop would leave the call count unchanged too.
+tmux_calls_before_workflow="$(tmux_call_lines)"
+export TMUX="$test_dir/tmux-socket,1,0"
+export TMUX_PANE="%1"
+run_notifier stop '{"session_id":"sess3","stop_hook_active":false,"background_tasks":[{"id":"wf-1","type":"workflow","status":"running","name":"review-changes"}]}'
+unset TMUX TMUX_PANE
+[[ "$(notification_lines)" -eq "$lines_before_workflow" ]] || fail "running workflow Stop should not notify"
+[[ -f "$marker_sess3" ]] || fail "running workflow Stop should persist delegated-work state"
+[[ "$(tmux_call_lines)" -eq "$tmux_calls_before_workflow" ]] ||
+    fail "suppressed workflow Stop should not mutate tmux state"
+
+run_notifier notification '{"session_id":"sess3","notification_type":"idle_prompt"}'
+[[ "$(notification_lines)" -eq "$lines_before_workflow" ]] || fail "running workflow should suppress the idle reminder"
+
+run_notifier stop '{"session_id":"sess3","stop_hook_active":false,"background_tasks":[{"id":"wf-1","type":"workflow","status":"pending"}]}'
+[[ "$(notification_lines)" -eq "$lines_before_workflow" ]] || fail "pending workflow should defer agent completion"
+
+# The real terminal snapshot is an empty array: Claude serializes only in-flight
+# work, so a finished workflow drops out rather than appearing as completed.
+run_notifier stop '{"session_id":"sess3","stop_hook_active":false,"background_tasks":[]}'
+[[ "$(notification_lines)" -eq $((lines_before_workflow + 1)) ]] || fail "workflow drop-out should deliver completion"
+[[ ! -e "$marker_sess3" ]] || fail "workflow drop-out should clear delegated-work state"
+
+# Defensive only: Claude does not currently serialize a terminal workflow, but
+# if it ever did, a non-running status must not hold the completion back.
+run_notifier stop '{"session_id":"sess3","stop_hook_active":false,"background_tasks":[{"id":"wf-2","type":"workflow","status":"running"}]}'
+[[ -f "$marker_sess3" ]] || fail "second running workflow should re-arm delegated-work state"
+run_notifier stop '{"session_id":"sess3","stop_hook_active":false,"background_tasks":[{"id":"wf-2","type":"workflow","status":"completed"}]}'
+[[ "$(notification_lines)" -eq $((lines_before_workflow + 2)) ]] || fail "completed workflow entry should deliver completion"
+[[ ! -e "$marker_sess3" ]] || fail "completed workflow entry should clear delegated-work state"
 
 pass "Claude delegated work defers completion and idle without blocking"

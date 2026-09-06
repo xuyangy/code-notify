@@ -1941,8 +1941,12 @@ notification_is_persistent() {
 # check — a snoozed or rate-limited stop is still a stop, and leaving the
 # marker (or spinner) up would show an agent working when none is. Mid-run
 # events (SubagentStart/Stop, TaskCreated/Completed, TeammateIdle) don't stop
-# it: the main agent is still going.
+# it: the main agent is still going. Their optional event badges must also
+# yield to that running state, including when another delegate finishes.
 case "$HOOK_TYPE" in
+    "SubagentStart"|"SubagentStop"|"TeammateIdle"|"TaskCreated"|"TaskCompleted")
+        TMUX_BADGE_RUNNING_GUARD=1
+        ;;
     "notification")
         # Notifications represent a pause except auth_success, which reports a
         # completed authentication flow rather than a question the user must
@@ -2845,6 +2849,8 @@ if [[ -n "$BADGE_ICON" ]] && [[ "${TMUX_RUNNING_STOP_PRESERVED:-0}" != "1" ]]; t
     if tmux_badge_visible_enabled; then
         BADGE_VISIBLE_ACTION="apply"
     fi
+    # Lifecycle alerts also use this guard: finishing one delegate does not
+    # mean the parent session (or its other delegates) has finished.
     # Set by every event that retired this window's running marker above. Each
     # of those released the transition lock before delivery got here, so a
     # queued prompt can have re-lit the window in between — and this badge must

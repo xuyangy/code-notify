@@ -261,4 +261,52 @@ run_stop CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=600
     || fail "a rate-limited preserving stop must not badge over a live successor (got: $(window_name))"
 pass "a rate-limited stop leaves a preserved successor turn alone"
 
+# Delegated lifecycle alerts may toast, but must not cover a running session
+# with an individual task's badge. Exercise the real notifier and badge lock.
+printf '%s' 'stop|SubagentStart|SubagentStop|TeammateIdle|TaskCreated|TaskCompleted|permission_prompt' \
+    > "$HOME/.claude/notifications/notify-types"
+for event in SubagentStart SubagentStop TeammateIdle TaskCreated TaskCompleted; do
+    reset_window
+    date +%s > "$state_dir/@1.@code_notify_running"
+    printf '%s\n' '{"session_id":"sess1"}' | \
+        CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+        CODE_NOTIFY_NOTIFICATION_RATE_LIMIT_SECONDS=0 \
+        bash "$ROOT_DIR/lib/code-notify/core/notifier.sh" "$event" claude proj \
+        >/dev/null 2>&1 || fail "$event should exit cleanly"
+    [[ -s "$state_dir/@1.@code_notify_running" ]] \
+        || fail "$event must preserve the running epoch"
+    [[ "$(window_name)" == "proj" ]] \
+        || fail "$event must not cover the spinner with an event badge"
+    [[ -s "$deliver_log" ]] || fail "$event should still deliver its enabled alert"
+done
+pass "delegated lifecycle alerts preserve the spinner while still notifying"
+
+for delegate in subagent workflow; do
+    reset_window
+    date +%s > "$state_dir/@1.@code_notify_running"
+    run_stop --hook-data "{\"session_id\":\"sess1\",\"background_tasks\":[{\"type\":\"$delegate\",\"status\":\"running\"}]}" \
+        CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0
+    [[ -s "$state_dir/@1.@code_notify_running" ]] \
+        || fail "Stop with a running $delegate must preserve the spinner"
+    [[ "$(window_name)" == "proj" && ! -s "$deliver_log" ]] \
+        || fail "Stop with a running $delegate must not announce completion"
+    run_stop --hook-data '{"session_id":"sess1","background_tasks":[]}' \
+        CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0
+    [[ ! -s "$state_dir/@1.@code_notify_running" && "$(window_name)" == "🟢 proj" ]] \
+        || fail "Stop after $delegate completion must replace the spinner with completion"
+done
+pass "delegated Stop preserves the spinner until the registry is clear"
+
+reset_window
+date +%s > "$state_dir/@1.@code_notify_running"
+printf '%s\n' '{"session_id":"sess1","notification_type":"permission_prompt"}' | \
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+    bash "$ROOT_DIR/lib/code-notify/core/notifier.sh" notification claude proj \
+    >/dev/null 2>&1 || fail "permission prompt should exit cleanly"
+[[ ! -s "$state_dir/@1.@code_notify_running" ]] \
+    || fail "permission prompt must pause the spinner"
+[[ "$(window_name)" != "proj" && -s "$deliver_log" ]] \
+    || fail "permission prompt must still badge and notify"
+pass "approval requests still take priority over the spinner"
+
 echo "All stop rate-limit badge tests passed"

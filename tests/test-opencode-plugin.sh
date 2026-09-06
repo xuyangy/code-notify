@@ -229,12 +229,24 @@ pass "forked runs are exempt whatever argv they carry"
 # SessionEnd tears the running indicator down without notifying.
 # ---------------------------------------------------------------------------
 notify_log="$test_dir/notify-calls.log"
-cat > "$fake_bin/terminal-notifier" <<'EOF'
+case "$(uname -s)" in
+    Darwin)
+        notify_command="terminal-notifier"
+        ;;
+    Linux)
+        notify_command="notify-send"
+        ;;
+    *)
+        echo "SKIP: unsupported OS for opencode notification test"
+        exit 0
+        ;;
+esac
+cat > "$fake_bin/$notify_command" <<'EOF'
 #!/bin/bash
 echo "$*" >> "$FAKE_NOTIFY_LOG"
 exit 0
 EOF
-chmod +x "$fake_bin/terminal-notifier"
+chmod +x "$fake_bin/$notify_command"
 
 : > "$tmux_log"
 : > "$notify_log"

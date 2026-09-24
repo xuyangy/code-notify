@@ -3781,8 +3781,9 @@ get_claude_event_alert_types() {
     printf '%s\n' "$result"
 }
 
-# Retirement events are state signals even when their optional toasts are
-# disabled. The notifier gates delivery at runtime.
+# SubagentStop is a state signal even when its optional toast is disabled.
+# TeammateIdle carries no state but keeps its unconditional install so
+# existing settings stay current. The notifier gates delivery at runtime.
 get_claude_event_hook_types() {
     local result
     result="$(get_claude_event_alert_types)"

@@ -1024,11 +1024,13 @@ function Get-ClaudeStopFailureCommand {
     return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" StopFailure claude"
 }
 
-# Claude Code lifecycle event hooks (SubagentStop, TeammateIdle, ...). The
-# retirement events retire the delegated-work marker recorded by a Stop that
-# ran while subagent or teammate work was still in flight, so they install
-# unconditionally; the notifier gates their optional toasts at runtime via
-# notify-types. The remaining event types install only when enabled.
+# Claude Code lifecycle event hooks (SubagentStop, TeammateIdle, ...).
+# SubagentStop retires the delegated-work marker recorded by a Stop that ran
+# while subagent work was still in flight, so it installs unconditionally.
+# TeammateIdle carries no state but keeps its unconditional install so
+# existing settings stay current. The notifier gates both optional toasts at
+# runtime via notify-types. The remaining event types install only when
+# enabled.
 function Get-ClaudeEventTypes {
     return @("SubagentStart", "SubagentStop", "TeammateIdle", "TaskCreated", "TaskCompleted")
 }
@@ -3139,8 +3141,8 @@ function Update-RateLimit {
 }
 
 # Claude Code 2.1.145+ includes the session's in-flight task registry in Stop
-# payloads. A main turn can therefore end while delegated subagent or teammate
-# work is still running; treating that Stop as terminal would show completion
+# payloads. A main turn can therefore end while delegated subagent work is
+# still running; treating that Stop as terminal would show completion
 # and later idle notifications prematurely. Persist a per-session marker from
 # that authoritative snapshot and suppress those notifications without
 # returning a blocking hook decision.
@@ -3153,11 +3155,13 @@ function Get-DelegatedWorkMarkerPath {
     return Get-RateLimitPath ("delegated_work_{0}_{1}_{2}" -f $ToolName, $scope, $sessionId)
 }
 
-# Return running, teammate-only, clear, or unknown. Only documented delegate
-# entries count; shell jobs, monitors, workflows, and completed tasks must not
-# delay the agent's completion notification. Teammates are classed separately:
-# their registry entry stays status=running even when parked idle, so the
-# caller weighs teammate-only snapshots against the TeammateIdle tombstone.
+# Return running, clear, or unknown. Only documented delegate entries count;
+# shell jobs, monitors, workflows, and completed tasks must not delay the
+# agent's completion notification. Teammates never count: a parked teammate
+# serializes as status=running exactly like a working one, and an in-process
+# teammate outlives /clear, so a later session inherits its entry with no idle
+# signal of its own. Counting it would silence every completion for the rest
+# of the process; ignoring it costs at most an early completion.
 function Get-ClaudeDelegatedWorkState {
     if (-not $HookData) {
         return "unknown"
@@ -3174,7 +3178,6 @@ function Get-ClaudeDelegatedWorkState {
         return "unknown"
     }
 
-    $teammateRunning = $false
     foreach ($task in @($tasksProperty.Value)) {
         if ($null -eq $task) {
             continue
@@ -3186,13 +3189,6 @@ function Get-ClaudeDelegatedWorkState {
             $task.type -eq "remote_agent") {
             return "running"
         }
-        if ($task.type -eq "teammate") {
-            $teammateRunning = $true
-        }
-    }
-
-    if ($teammateRunning) {
-        return "teammate-only"
     }
 
     return "clear"
@@ -3204,8 +3200,9 @@ function Set-DelegatedWorkMarker {
         return
     }
 
-    # Preserve the first observation time. Claude serializes an idle teammate
-    # as status=running, so repeated Stops must not refresh the fail-open TTL.
+    # Preserve the first observation time: the fail-open TTL counts from the
+    # first sighting. An expired marker comes back only when a later Stop
+    # still reports running delegated work.
     if (Test-DelegatedWorkMarker) {
         return
     }
@@ -3231,64 +3228,6 @@ function Remove-DelegatedWorkMarker {
     if ($markerPath) {
         Remove-Item $markerPath -Force -ErrorAction SilentlyContinue
     }
-}
-
-# TeammateIdle is a one-shot signal, but the teammate it retires stays in
-# background_tasks as status=running while parked. The tombstone remembers
-# the retirement for the marker TTL so later Stops do not re-mark the
-# session from that stale entry and suppress every completion.
-function Get-TeammateIdleTombstonePath {
-    $sessionId = Get-JsonStringValue -Json $HookData -Key "session_id"
-    if (-not $sessionId) {
-        return $null
-    }
-    $scope = if ($ProjectName) { $ProjectName } else { "global" }
-    return Get-RateLimitPath ("teammate_idle_{0}_{1}_{2}" -f $ToolName, $scope, $sessionId)
-}
-
-function Set-TeammateIdleTombstone {
-    $tombstonePath = Get-TeammateIdleTombstonePath
-    if (-not $tombstonePath) {
-        return
-    }
-
-    $temporaryPath = $null
-    try {
-        if (-not (Test-Path $NotificationStateDir)) {
-            New-Item -ItemType Directory -Path $NotificationStateDir -Force -ErrorAction Stop | Out-Null
-        }
-        $temporaryPath = "{0}.tmp.{1}" -f $tombstonePath, $PID
-        [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() |
-            Set-Content $temporaryPath -Encoding ASCII -ErrorAction Stop
-        Move-Item $temporaryPath $tombstonePath -Force -ErrorAction Stop
-    } catch {
-        if ($temporaryPath) {
-            Remove-Item $temporaryPath -Force -ErrorAction SilentlyContinue
-        }
-    }
-}
-
-function Test-TeammateIdleTombstone {
-    $tombstonePath = Get-TeammateIdleTombstonePath
-    if (-not $tombstonePath -or -not (Test-Path $tombstonePath)) {
-        return $false
-    }
-
-    try {
-        $markedAt = [long]((Get-Content $tombstonePath -Raw -ErrorAction Stop).Trim())
-    } catch {
-        Remove-Item $tombstonePath -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-
-    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-    $age = $now - $markedAt
-    if ($age -lt 0 -or $age -ge $DelegatedWorkMarkerTtlSeconds) {
-        Remove-Item $tombstonePath -Force -ErrorAction SilentlyContinue
-        return $false
-    }
-
-    return $true
 }
 
 function Test-DelegatedWorkMarker {
@@ -3328,17 +3267,6 @@ function Test-ClaudeDelegatedWorkShouldSuppress {
             Set-DelegatedWorkMarker
             return $true
         }
-        if ($state -eq "teammate-only") {
-            # A parked teammate serializes exactly like a working one. Once
-            # TeammateIdle has been observed for this session, stale teammate
-            # entries must not re-mark it — no second retirement ever comes.
-            if (Test-TeammateIdleTombstone) {
-                Remove-DelegatedWorkMarker
-                return $false
-            }
-            Set-DelegatedWorkMarker
-            return $true
-        }
         if ($state -eq "clear") {
             Remove-DelegatedWorkMarker
             return $false
@@ -3372,10 +3300,11 @@ function Test-ClaudeEventAlertEnabled {
     return (($current -split '\|') -contains $Type)
 }
 
-# background_tasks omits the teammate's isIdle flag, so an idle teammate still
-# appears as status=running. TeammateIdle and SubagentStop are the retirement
-# signals for the persisted snapshot: they clear state first, then their
-# optional event toast proceeds only when the user enabled that alert type.
+# SubagentStop is the retirement signal for the persisted snapshot: it clears
+# state first, then its optional event toast proceeds only when the user
+# enabled that alert type. TeammateIdle carries no state, because teammates
+# never create the marker; clearing on it would drop a marker that a
+# still-running subagent owns.
 #
 # One retirement clears eagerly even if other delegates are still running:
 # the marker stores no per-delegate identity because event delivery is not
@@ -3385,11 +3314,8 @@ function Test-ClaudeEventAlertEnabled {
 # eager clearing is at most one early idle reminder in between.
 if ($ToolName -eq "claude" -and
     ($HookType -eq "TeammateIdle" -or $HookType -eq "SubagentStop")) {
-    Remove-DelegatedWorkMarker
-    if ($HookType -eq "TeammateIdle") {
-        # Durable record of the one-shot retirement: the parked teammate
-        # keeps its status=running registry entry (see the tombstone helpers).
-        Set-TeammateIdleTombstone
+    if ($HookType -eq "SubagentStop") {
+        Remove-DelegatedWorkMarker
     }
     if (-not (Test-ClaudeEventAlertEnabled -Type $HookType)) {
         exit 0
@@ -3457,7 +3383,7 @@ function Test-ShouldSuppressNotification {
 # Exit before rate limits, terminal-state side effects, logging, and delivery:
 # a main Stop with delegated work still in flight is a pause, not completion.
 # The persisted marker also hides Claude's later native idle reminder until a
-# subsequent Stop reports no running subagent or teammate and clears it.
+# subsequent Stop reports no running subagent and clears it.
 if (Test-ClaudeDelegatedWorkShouldSuppress) {
     exit 0
 }

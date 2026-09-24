@@ -69,13 +69,14 @@ check "pending subagent" \
     '{"background_tasks":[{"id":"a","type":"subagent","status":"pending"}]}' "running"
 check "running cloud session" \
     '{"background_tasks":[{"id":"c","type":"cloud session","status":"running"}]}' "running"
+# A teammate never counts: a parked one serializes as running, and it outlives
+# /clear into sessions that never see its idle signal.
 check "running teammate alone" \
-    '{"background_tasks":[{"id":"t","type":"teammate","status":"running"}]}' "teammate-only"
+    '{"background_tasks":[{"id":"t","type":"teammate","status":"running"}]}' "clear"
 check "running shell only" \
     '{"background_tasks":[{"id":"s","type":"shell","status":"running"}]}' "clear"
 check "empty registry" '{"background_tasks":[]}' "clear"
-# The authoritative types win over teammate, so the newly added workflow must
-# take precedence rather than reporting teammate-only.
+# A teammate beside a real delegate must not hide that delegate.
 check "running workflow beside a running teammate" \
     '{"background_tasks":[{"id":"w","type":"workflow","status":"running"},{"id":"t","type":"teammate","status":"running"}]}' \
     "running"
@@ -100,7 +101,7 @@ check "malformed entry beside a running workflow" \
     '{"background_tasks":["oops",{"id":"wf","type":"workflow","status":"running"}]}' "running"
 check "malformed entry beside a running teammate" \
     '{"background_tasks":[{"type":[],"status":"running"},{"id":"t","type":"teammate","status":"running"}]}' \
-    "teammate-only"
+    "clear"
 
 # Whole-payload corruption stays "unknown" so the caller preserves an existing
 # marker instead of guessing from an unverified snapshot.

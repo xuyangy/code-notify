@@ -1268,8 +1268,8 @@ consume_recent_ask_user_pending() {
 }
 
 # Claude Code 2.1.145+ includes the session's in-flight task registry in Stop
-# payloads. A main turn can therefore end while delegated subagent, workflow,
-# or teammate work is still running; treating that Stop as terminal would
+# payloads. A main turn can therefore end while delegated subagent or workflow
+# work is still running; treating that Stop as terminal would
 # replace the running badge with "Task Complete", followed later by a
 # misleading idle reminder. Persist a session-scoped marker from that
 # authoritative snapshot so both events can be suppressed without returning
@@ -1298,13 +1298,17 @@ get_delegated_work_marker_file() {
 #                   long-running cloud session can hold this state until the
 #                   marker TTL expires - pre-existing, and not something the
 #                   payload lets this script detect.
-#   teammate-only - the only running delegates are teammates, whose registry
-#                   entry stays status=running even when parked idle; the
-#                   caller weighs this against the TeammateIdle tombstone
 #   clear         - the documented array is present with no running delegate.
 #                   Entries that are not objects with string type/status are
 #                   ignored rather than poisoning the scan; both backends must
 #                   agree here, so the classification is element-level in each.
+#                   Teammates never count: a parked teammate serializes as
+#                   status=running exactly like a working one, and an
+#                   in-process teammate outlives /clear, so a later session
+#                   inherits its entry with no idle signal of its own. Counting
+#                   it would silence every completion for the rest of the
+#                   process; ignoring it costs at most an early completion
+#                   while a teammate genuinely works.
 #   unknown       - the payload is malformed or the registry is unavailable
 get_claude_delegated_work_state() {
     local state="unknown"
@@ -1321,9 +1325,6 @@ get_claude_delegated_work_state() {
                     (.type == "subagent" or .type == "workflow" or
                      .type == "cloud session" or .type == "remote_agent"))
                 then "running"
-                elif any(.background_tasks[]?;
-                    well_formed and is_running and .type == "teammate")
-                then "teammate-only"
                 else "clear" end
             else
                 "unknown"
@@ -1349,8 +1350,6 @@ try:
             )
         if running({"subagent", "workflow", "cloud session", "remote_agent"}):
             state = "running"
-        elif running({"teammate"}):
-            state = "teammate-only"
         else:
             state = "clear"
 except Exception:
@@ -1360,7 +1359,7 @@ print(state, end="")
     fi
 
     case "$state" in
-        "running"|"teammate-only"|"clear"|"unknown") printf '%s\n' "$state" ;;
+        "running"|"clear"|"unknown") printf '%s\n' "$state" ;;
         *) printf '%s\n' "unknown" ;;
     esac
 }
@@ -1368,9 +1367,9 @@ print(state, end="")
 mark_delegated_work_running() {
     local marker_file marker_tmp
     marker_file=$(get_delegated_work_marker_file) || return 0
-    # Preserve the original observation time. Claude serializes an idle
-    # teammate as status=running, so refreshing on every Stop would prevent
-    # the fail-open TTL below from ever expiring.
+    # Preserve the original observation time: the fail-open TTL counts from
+    # the first sighting. An expired marker comes back only when a later Stop
+    # still reports running delegated work.
     if delegated_work_marker_exists; then
         return 0
     fi
@@ -1384,49 +1383,6 @@ clear_delegated_work_marker() {
     local marker_file
     marker_file=$(get_delegated_work_marker_file) || return 0
     rm -f "$marker_file" 2>/dev/null || true
-}
-
-# TeammateIdle is a one-shot signal, but the teammate it retires stays in
-# background_tasks as status=running for as long as it sits parked. Without
-# a durable record of the retirement, the next Stop would re-mark the session
-# from that stale registry entry and suppress every later completion. The
-# tombstone remembers "this session's teammates were seen idle" for the
-# marker TTL; while fresh, teammate-only snapshots read as clear. A second
-# teammate that is genuinely working during that window loses its deferral —
-# a premature completion toast, the failure direction this feature prefers.
-get_teammate_idle_tombstone_file() {
-    local session_id hook_scope
-    session_id=$(json_extract_string "$HOOK_DATA" "session_id")
-    [[ -n "$session_id" ]] || return 1
-    hook_scope="${RAW_ARG3:-global}"
-    get_rate_limit_file "teammate_idle_${TOOL_NAME}_${hook_scope}_${session_id}"
-}
-
-mark_teammate_idle_tombstone() {
-    local tombstone_file tombstone_tmp
-    tombstone_file=$(get_teammate_idle_tombstone_file) || return 0
-    mkdir -p "$RATE_LIMIT_DIR"
-    tombstone_tmp="${tombstone_file}.tmp.$$"
-    date +%s > "$tombstone_tmp" || return 0
-    mv -f "$tombstone_tmp" "$tombstone_file" 2>/dev/null || rm -f "$tombstone_tmp"
-}
-
-teammate_idle_tombstone_fresh() {
-    local tombstone_file marked_at now age
-    tombstone_file=$(get_teammate_idle_tombstone_file) || return 1
-    [[ -f "$tombstone_file" ]] || return 1
-    marked_at=$(cat "$tombstone_file" 2>/dev/null || true)
-    [[ "$marked_at" =~ ^[0-9]+$ ]] || {
-        rm -f "$tombstone_file" 2>/dev/null || true
-        return 1
-    }
-    now=$(date +%s)
-    age=$((now - marked_at))
-    if (( age < 0 || age >= DELEGATED_WORK_MARKER_TTL_SECONDS )); then
-        rm -f "$tombstone_file" 2>/dev/null || true
-        return 1
-    fi
-    return 0
 }
 
 delegated_work_marker_exists() {
@@ -1475,19 +1431,6 @@ claude_delegated_work_should_suppress() {
         state=$(get_claude_delegated_work_state)
         case "$state" in
             "running")
-                mark_delegated_work_running
-                return 0
-                ;;
-            "teammate-only")
-                # A teammate parked idle serializes exactly like a working
-                # one. Once TeammateIdle has been observed for this session
-                # (fresh tombstone), stale teammate entries must not re-mark
-                # it — that would suppress every later completion with no
-                # second retirement signal ever coming.
-                if teammate_idle_tombstone_fresh; then
-                    clear_delegated_work_marker
-                    return 1
-                fi
                 mark_delegated_work_running
                 return 0
                 ;;
@@ -1867,10 +1810,10 @@ elif [[ "$TOOL_NAME" == "claude" ]] &&
     exit 0
 fi
 
-# background_tasks cannot distinguish a working teammate from one parked
-# idle: both serialize as type=teammate,status=running. The lifecycle events
-# are therefore the retirement signal for the persisted snapshot. They clear
-# state before their optional event toast proceeds normally.
+# SubagentStop is the retirement signal for the persisted snapshot: it clears
+# state before its optional event toast proceeds normally. TeammateIdle
+# carries no state, because teammates never create the marker; clearing on it
+# would drop a marker that a still-running subagent owns.
 #
 # One retirement clears eagerly even if other delegates are still running:
 # the marker stores no per-delegate identity because event delivery is not
@@ -1880,16 +1823,11 @@ fi
 # eager clearing is at most one early idle reminder in between.
 if [[ "$TOOL_NAME" == "claude" ]]; then
     case "$HOOK_TYPE" in
-        "TeammateIdle")
-            # The tombstone outlives this one-shot event: the parked teammate
-            # keeps its status=running registry entry, so later Stops need a
-            # durable record that it already retired.
-            clear_delegated_work_marker
-            mark_teammate_idle_tombstone
-            claude_event_alert_enabled "$HOOK_TYPE" || exit 0
-            ;;
         "SubagentStop")
             clear_delegated_work_marker
+            claude_event_alert_enabled "$HOOK_TYPE" || exit 0
+            ;;
+        "TeammateIdle")
             claude_event_alert_enabled "$HOOK_TYPE" || exit 0
             ;;
     esac
@@ -1899,7 +1837,7 @@ fi
 # before persistent-alert classification, running-state mutation, rate-limit
 # updates, logging, and notification delivery. The marker also suppresses the
 # native idle reminder until a later Stop snapshot reports no running
-# subagent/teammate and clears it.
+# subagent or workflow and clears it.
 if claude_delegated_work_should_suppress; then
     exit 0
 fi

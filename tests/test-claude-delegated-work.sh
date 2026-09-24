@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # Claude Stop payloads expose the current background-task registry. Running
-# subagent/workflow/teammate entries must defer both completion and the later
-# native idle reminder without blocking Claude's control loop.
+# subagent/workflow entries must defer both completion and the later native
+# idle reminder without blocking Claude's control loop. Teammate entries never
+# defer.
 
 set -e
 
@@ -86,15 +87,15 @@ notification_lines() {
 
 marker_sess1="$HOME/.claude/notifications/state/delegated_work_claude_test-project_sess1"
 
-# A running teammate makes the main Stop non-terminal and leaves a marker for
+# A running subagent makes the main Stop non-terminal and leaves a marker for
 # Claude's later idle_prompt event.
 export TMUX="$test_dir/tmux-socket,1,0"
 export TMUX_PANE="%1"
-run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"team-1","type":"teammate","status":"running","description":"reviewing"}]}'
+run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"agent-0","type":"subagent","status":"running","description":"reviewing"}]}'
 unset TMUX TMUX_PANE
-[[ "$(notification_lines)" -eq 0 ]] || fail "running teammate Stop should not notify"
-[[ -f "$marker_sess1" ]] || fail "running teammate Stop should persist delegated-work state"
-[[ ! -e "$tmux_log" ]] || fail "suppressed teammate Stop should not mutate tmux state"
+[[ "$(notification_lines)" -eq 0 ]] || fail "running subagent Stop should not notify"
+[[ -f "$marker_sess1" ]] || fail "running subagent Stop should persist delegated-work state"
+[[ ! -e "$tmux_log" ]] || fail "suppressed subagent Stop should not mutate tmux state"
 
 run_notifier notification '{"session_id":"sess1","notification_type":"idle_prompt"}'
 [[ "$(notification_lines)" -eq 0 ]] || fail "idle_prompt should stay hidden while delegated work is marked running"
@@ -132,8 +133,8 @@ run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_ta
 
 # Markers are session-scoped. A malformed/unavailable registry preserves known
 # state, while a different session remains unaffected.
-run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"team-2","type":"teammate","status":"running"}]}'
-[[ -f "$marker_sess1" ]] || fail "second running teammate should restore marker"
+run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"agent-6","type":"subagent","status":"running"}]}'
+[[ -f "$marker_sess1" ]] || fail "second running subagent should restore marker"
 
 run_notifier stop '{"session_id":"sess2","stop_hook_active":false,"background_tasks":[]}'
 [[ "$(notification_lines)" -eq 6 ]] || fail "another session should not inherit delegated-work state"
@@ -146,45 +147,57 @@ run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_ta
 [[ "$(notification_lines)" -eq 7 ]] || fail "authoritative clear after unknown snapshot should notify"
 [[ ! -e "$marker_sess1" ]] || fail "authoritative clear should remove preserved state"
 
-# Lifecycle retirement fixes the information lost by background_tasks:
-# TeammateIdle is the only payload that says a serialized-running teammate is
-# actually parked, and SubagentStop is the corresponding subagent signal.
-run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"team-3","type":"teammate","status":"running"}]}'
-run_notifier TeammateIdle '{"session_id":"sess1","teammate_name":"reviewer"}'
-[[ ! -e "$marker_sess1" ]] || fail "TeammateIdle should retire delegated-work state"
-lines_after_teammate_idle="$(notification_lines)"
-run_notifier notification '{"session_id":"sess1","notification_type":"idle_prompt"}'
-[[ "$(notification_lines)" -eq $((lines_after_teammate_idle + 1)) ]] || fail "idle reminder should resume after TeammateIdle"
-
+# SubagentStop retires delegated-work state even before the next Stop
+# snapshot confirms it.
 run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"agent-2","type":"subagent","status":"running"}]}'
 run_notifier SubagentStop '{"session_id":"sess1","agent_id":"agent-2","stop_hook_active":false}'
 [[ ! -e "$marker_sess1" ]] || fail "SubagentStop should retire delegated-work state"
 
-# TeammateIdle is one-shot, but the parked teammate keeps its status=running
-# registry entry. The retirement's tombstone must stop later Stops from
-# re-marking the session off that stale entry — otherwise every subsequent
-# completion would be suppressed with no second retirement ever coming.
-tombstone_sess1="$HOME/.claude/notifications/state/teammate_idle_claude_test-project_sess1"
-[[ -f "$tombstone_sess1" ]] || fail "TeammateIdle should leave a tombstone"
-lines_before_tombstoned_stop="$(notification_lines)"
+# A parked teammate serializes as status=running exactly like a working one,
+# so a teammate entry never defers completion — not before TeammateIdle, not
+# after, and not in a later session of the same Claude process (an in-process
+# teammate outlives /clear, and the new session never sees its idle signal).
+run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"agent-5","type":"subagent","status":"running"}]}'
+[[ -f "$marker_sess1" ]] || fail "running subagent should arm delegated-work state"
+lines_before_teammate_stop="$(notification_lines)"
 run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"team-3","type":"teammate","status":"running"}]}'
-[[ ! -e "$marker_sess1" ]] || fail "tombstoned teammate entry should not re-mark delegated work"
-[[ "$(notification_lines)" -eq $((lines_before_tombstoned_stop + 1)) ]] ||
-    fail "completion should deliver despite a parked teammate entry"
+[[ ! -e "$marker_sess1" ]] || fail "teammate-only Stop should clear delegated-work state"
+[[ "$(notification_lines)" -eq $((lines_before_teammate_stop + 1)) ]] ||
+    fail "teammate-only Stop should deliver completion"
 
-# A running subagent is authoritative and defers regardless of the tombstone.
+run_notifier TeammateIdle '{"session_id":"sess1","teammate_name":"reviewer"}'
+run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"team-3","type":"teammate","status":"running"}]}'
+[[ ! -e "$marker_sess1" ]] || fail "teammate after TeammateIdle should not mark delegated work"
+[[ "$(notification_lines)" -eq $((lines_before_teammate_stop + 2)) ]] ||
+    fail "completion should deliver after TeammateIdle despite the parked teammate"
+
+marker_sess4="$HOME/.claude/notifications/state/delegated_work_claude_test-project_sess4"
+run_notifier stop '{"session_id":"sess4","stop_hook_active":false,"background_tasks":[{"id":"team-3","type":"teammate","status":"running"}]}'
+[[ ! -e "$marker_sess4" ]] || fail "inherited teammate should not mark a new session"
+[[ "$(notification_lines)" -eq $((lines_before_teammate_stop + 3)) ]] ||
+    fail "new session should deliver completion despite an inherited teammate"
+lines_before_inherited_idle="$(notification_lines)"
+run_notifier notification '{"session_id":"sess4","notification_type":"idle_prompt"}'
+[[ "$(notification_lines)" -eq $((lines_before_inherited_idle + 1)) ]] ||
+    fail "inherited teammate should not suppress the idle reminder"
+
+# A teammate beside a running subagent does not hide the subagent.
 run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"agent-3","type":"subagent","status":"running"},{"id":"team-3","type":"teammate","status":"running"}]}'
-[[ -f "$marker_sess1" ]] || fail "running subagent should defer even with a fresh tombstone"
+[[ -f "$marker_sess1" ]] || fail "running subagent beside a teammate should defer"
+# TeammateIdle carries no state: the marker belongs to the still-running
+# subagent, so the idle reminder stays hidden.
+lines_before_mixed_idle="$(notification_lines)"
+run_notifier TeammateIdle '{"session_id":"sess1","teammate_name":"reviewer"}'
+[[ -f "$marker_sess1" ]] || fail "TeammateIdle should not retire a running subagent's marker"
+run_notifier notification '{"session_id":"sess1","notification_type":"idle_prompt"}'
+[[ "$(notification_lines)" -eq "$lines_before_mixed_idle" ]] ||
+    fail "idle reminder should stay hidden while the subagent runs"
 run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"team-3","type":"teammate","status":"running"}]}'
 [[ ! -e "$marker_sess1" ]] || fail "subagent completion should clear the marker despite the parked teammate"
 
-# An expired tombstone restores teammate deferral (fail-safe for a genuinely
-# working teammate long after the last idle observation).
-printf '%s' "$(( $(date +%s) - 7200 ))" > "$tombstone_sess1"
-
 # Repeated Stop snapshots do not refresh the marker timestamp. If a lifecycle
 # event is lost, the fail-open TTL restores the idle safety net.
-run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"team-4","type":"teammate","status":"running"}]}'
+run_notifier stop '{"session_id":"sess1","stop_hook_active":false,"background_tasks":[{"id":"agent-4","type":"subagent","status":"running"}]}'
 old_epoch=$(( $(date +%s) - 7200 ))
 printf '%s' "$old_epoch" > "$marker_sess1"
 lines_before_expired_idle="$(notification_lines)"
@@ -194,7 +207,6 @@ run_notifier notification '{"session_id":"sess1","notification_type":"idle_promp
 
 # The Workflow tool registers a backgrounded workflow that fans out its own
 # agents, so its main-turn Stop is a pause exactly like a delegated subagent's.
-# A fresh session keeps these counts clear of the tombstone above.
 marker_sess3="$HOME/.claude/notifications/state/delegated_work_claude_test-project_sess3"
 lines_before_workflow="$(notification_lines)"
 

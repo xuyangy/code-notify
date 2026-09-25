@@ -175,10 +175,11 @@ case "$cmd" in
                 ip=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_interrupt_pane" 2>/dev/null)
                 ifp=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_interrupt_fp" 2>/dev/null)
                 is=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_interrupt_since" 2>/dev/null)
+                delegated=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_delegated" 2>/dev/null)
                 bo=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_settle_badge_only" 2>/dev/null)
                 on=$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_orig_name" 2>/dev/null)
-                printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
-                    "$w" "$pid" "$run" "$gen" "$sp" "$iw" "$rp" "$dc" "$ds" "$dg" "$ip" "$ifp" "$is" "$bo" "$on"
+                printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+                    "$w" "$pid" "$run" "$gen" "$sp" "$iw" "$rp" "$dc" "$ds" "$dg" "$ip" "$ifp" "$is" "$delegated" "$bo" "$on"
             done
         elif [[ "$fmt" == *resume_pending* ]]; then
             # The resume poll pairs each pending epoch with the window's
@@ -2300,6 +2301,23 @@ CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" tmux_agent_exit_sweep
     || fail "a quiet teardown must not notify (got: $(cat "$settle_notify_log"))"
 pass "textless cancel retires running state silently"
 
+# A completed parent turn can leave a subagent working in an otherwise quiet
+# Claude pane. Stillness there is not evidence of an interrupted turn.
+CODE_NOTIFY_TMUX_AGENT_NAME=claude tmux_prompt_submit \
+    || fail "claude prompt-submit before delegated quiet watch should succeed"
+printf '1' > "$state_dir/@2.@code_notify_delegated"
+printf '%s' "$(( $(date +%s) - 60 ))" > "$state_dir/@2.@code_notify_interrupt_since"
+tmux_agent_exit_sweep || fail "delegated quiet tick should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "delegated work must keep the running marker despite a quiet pane"
+rm -f "$state_dir/@2.@code_notify_delegated"
+tmux_agent_exit_sweep || fail "quiet baseline after delegated work should succeed"
+printf '%s' "$(( $(date +%s) - 60 ))" > "$state_dir/@2.@code_notify_interrupt_since"
+tmux_agent_exit_sweep || fail "quiet tick after delegated work should succeed"
+[[ ! -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "clearing delegated work must restore the interrupt watch"
+pass "delegated work survives the quiet interrupt watch"
+
 # --- scrolling back to read must not retire a live turn's marker ---
 # Verified on tmux 3.7b: while a pane is in copy-mode, `capture-pane -p`
 # returns the SCROLLED-BACK viewport, not the live screen. So a user who
@@ -3768,6 +3786,8 @@ printf '%s' "10" > "$state_dir/.status-interval"
 tmux_spinner_arm || fail "spinner arm should succeed"
 snip="$(cat "$state_dir/.@code_notify_spinner_snip")"
 [[ "$snip" == *"🌑"* && "$snip" == *"🌘"* ]] || fail "spinner snippet should contain the moon frames"
+[[ "$snip" == *"🕛"* && "$snip" == *"🕚"* && "$snip" == *'@code_notify_delegated'* && "$snip" == *'@code_notify_delegated_spinner_disabled'* && "$snip" == *',12}'* ]] \
+    || fail "spinner snippet should select delegated-work frames"
 [[ "$snip" == *'#{T:@code_notify_clock}'* ]] || fail "spinner snippet should be wall-clock driven"
 [[ "$snip" == *'@code_notify_running'* ]] || fail "spinner snippet should gate on the running option"
 [[ "$snip" == *'#{?#{!=:#{@code_notify_orig_name},},,'* ]] \
@@ -3800,6 +3820,17 @@ tmux_spinner_disarm || fail "spinner disarm should succeed"
 [[ "$(cat "$state_dir/.status-interval")" == "10" ]] || fail "disarm should restore status-interval"
 [[ ! -f "$state_dir/.@code_notify_spinner_snip" ]] || fail "disarm should drop the saved snippet"
 pass "spinner arm/disarm round-trips the status-line state"
+
+mkdir -p "$HOME/.claude/notifications"
+touch "$HOME/.claude/notifications/tmux-delegated-spinner-disabled"
+tmux_spinner_sync_delegated_preference || fail "delegated spinner disable should sync"
+[[ "$(cat "$state_dir/.@code_notify_delegated_spinner_disabled" 2>/dev/null)" == "1" ]] \
+    || fail "disabled delegated spinner should set the global tmux option"
+rm -f "$HOME/.claude/notifications/tmux-delegated-spinner-disabled"
+tmux_spinner_sync_delegated_preference || fail "delegated spinner enable should sync"
+[[ ! -e "$state_dir/.@code_notify_delegated_spinner_disabled" ]] \
+    || fail "enabled delegated spinner should clear the global tmux option"
+pass "delegated spinner preference syncs to tmux"
 
 # --- spinner: #I themes render the moon after the window number ---
 printf '%s' "#[fg=grey] #I #{window_name} " > "$state_dir/.window-status-format"

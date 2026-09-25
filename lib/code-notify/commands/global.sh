@@ -1370,6 +1370,9 @@ handle_spinner_command() {
     local flag_file="$HOME/.claude/notifications/tmux-spinner-enabled"
 
     case "$action" in
+        "delegated")
+            handle_spinner_delegated_command "${2:-status}"
+            ;;
         "on")
             mkdir -p "$(dirname "$flag_file")"
             touch "$flag_file"
@@ -1407,7 +1410,46 @@ handle_spinner_command() {
             ;;
         *)
             error "Unknown spinner command: $action"
-            echo "Usage: cn spinner [on|off|status]"
+            echo "Usage: cn spinner [on|off|status|delegated on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+handle_spinner_delegated_command() {
+    local action="${1:-status}"
+    local flag_file="$HOME/.claude/notifications/tmux-delegated-spinner-disabled"
+    local state
+    case "$action" in
+        "on"|"off")
+            if [[ "$action" == "off" ]]; then
+                mkdir -p "$(dirname "$flag_file")"
+                touch "$flag_file"
+                state="disabled"
+            else
+                rm -f "$flag_file"
+                state="enabled"
+            fi
+            if [[ -n "${TMUX:-}" ]]; then
+                source "$LIB_DIR/utils/tmux.sh"
+                tmux_spinner_sync_delegated_preference 2>/dev/null || true
+                if [[ -n "$(tmux show-options -gqv @code_notify_spinner_snip 2>/dev/null)" ]]; then
+                    tmux_spinner_arm 2>/dev/null || true
+                fi
+                tmux refresh-client -S 2>/dev/null || true
+            fi
+            success "tmux delegated-work clock spinner $state"
+            ;;
+        "status")
+            if [[ -f "$flag_file" ]]; then
+                echo "tmux delegated-work clock spinner: ${DIM}disabled${RESET} (moon spinner while delegated work runs)"
+            else
+                echo "tmux delegated-work clock spinner: ${GREEN}enabled${RESET}"
+            fi
+            ;;
+        *)
+            error "Unknown delegated spinner command: $action"
+            echo "Usage: cn spinner delegated [on|off|status]"
             return 1
             ;;
     esac

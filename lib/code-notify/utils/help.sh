@@ -34,7 +34,7 @@ ${BOLD}COMMANDS:${RESET}
     ${GREEN}channels${RESET} <cmd>  Configure Slack/Discord/ntfy delivery
     ${GREEN}usage${RESET} <cmd>     Configure Codex/Claude usage alerts
     ${GREEN}snooze${RESET} <time>   Pause all notifications (30m, 2h, off, status)
-    ${GREEN}spinner${RESET} <cmd>   Animated tmux running indicator (on, off, status)
+    ${GREEN}spinner${RESET} <cmd>   Animated tmux running indicator (on, off, status, delegated)
     ${GREEN}badge-visible${RESET} <cmd>  Badge the focused tmux window too (on, off, status)
     ${GREEN}voice${RESET} <cmd>     Voice notification commands
     ${GREEN}wording${RESET} <cmd>   Banner/voice message wording (banner|voice short|long)

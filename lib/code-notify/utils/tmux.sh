@@ -654,6 +654,7 @@ tmux_badge_clear_current() {
 TMUX_RUNNING_TTL="${CODE_NOTIFY_TMUX_RUNNING_TTL:-14400}"
 TMUX_RUNNING_ICON="${CODE_NOTIFY_TMUX_RUNNING_ICON:-🌕}"
 TMUX_SPINNER_ENABLED_FILE="$HOME/.claude/notifications/tmux-spinner-enabled"
+TMUX_DELEGATED_SPINNER_DISABLED_FILE="$HOME/.claude/notifications/tmux-delegated-spinner-disabled"
 # Opt-in trace of window badge and running-marker transitions, for diagnosing
 # a window whose name and badge state disagree. Off unless the flag file
 # exists; when off it costs one stat per transition. Once the log passes
@@ -1726,16 +1727,16 @@ tmux_agent_exit_sweep() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
     local now window_id pid since gen settle_pane idle_watch resume orig live=0
     local fp_now fp_prev settle_since settle_ctx settle_badge_only settle_needed mode transition_lock transition_token
-    local current_pid current_since current_settle_since current_badge_only current_gen
+    local current_pid current_since current_settle_since current_badge_only current_delegated current_gen
     local ipane isince ifp1 ifp2 istate iagent iproject iwin
     local dialog_ctx dialog_since dialog_grace dialog_active dialog_run dialog_gen
     local dialog_guard_grace dialog_expiry current_dialog_grace
     local dpane dagent dproject dialog_content
-    local interrupt_pane interrupt_fp interrupt_since interrupt_content interrupt_needed interrupt_seen
+    local interrupt_pane interrupt_fp interrupt_since interrupt_content interrupt_needed interrupt_seen delegated
     now=$(date +%s)
     # orig (the badge marker) reads last: it is the only field that may embed
     # "|" (a window name), and read folds any remainder into the final var.
-    while IFS='|' read -r window_id pid since gen settle_pane idle_watch resume dialog_ctx dialog_since dialog_grace interrupt_pane interrupt_fp interrupt_since settle_badge_only orig; do
+    while IFS='|' read -r window_id pid since gen settle_pane idle_watch resume dialog_ctx dialog_since dialog_grace interrupt_pane interrupt_fp interrupt_since delegated settle_badge_only orig; do
         [[ "$window_id" =~ ^@[0-9]+$ ]] || continue
         # list-windows emits every window, with empty fields when the options
         # are unset. Windows that are neither PID-tracked nor settle-watched
@@ -1981,6 +1982,8 @@ tmux_agent_exit_sweep() {
         # re-read under the transition lock so a turn that started between the
         # snapshot and now keeps its indicator.
         #
+        # A delegated parent can leave a quiet pane while its subagent works;
+        # pane stillness does not end that session's running indicator.
         # A force-armed settle watch (the queued-prompt preserve, marked
         # badge-only) owns this marker instead: that Stop withheld a terminal
         # badge which only the settle reconcile applies, so a silent teardown
@@ -1989,6 +1992,7 @@ tmux_agent_exit_sweep() {
         # the flag is re-read under the lock, because a preserve landing after
         # the snapshot is invisible to the epoch check (see there).
         if [[ "$interrupt_pane" =~ ^%[0-9]+$ ]] && [[ "$since" =~ ^[0-9]+$ ]] &&
+            [[ -z "$delegated" ]] &&
             [[ -z "$settle_badge_only" ]] &&
             (( now - since < TMUX_RUNNING_TTL )) &&
             [[ "${TMUX_INTERRUPT_SECONDS:-0}" =~ ^[0-9]+$ ]] &&
@@ -2112,15 +2116,18 @@ tmux_agent_exit_sweep() {
                         transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
                         transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
                         current_since=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
+                        current_delegated=$(tmux show-options -wqv -t "$window_id" @code_notify_delegated 2>/dev/null)
                         # The epoch alone does not detect a preserve that
                         # landed after the snapshot: tmux_running_stop's
                         # queued-prompt path returns before touching
                         # @code_notify_running, so the epoch is deliberately
                         # unchanged and this check would pass. Re-read the
                         # badge-only flag under the lock, as the settle path
-                        # does, or the badge that Stop withheld is lost.
+                        # does, or the badge that Stop withheld is lost. The
+                        # delegated flag may also have arrived since the
+                        # snapshot, so it is re-read before teardown.
                         current_badge_only=$(tmux show-options -wqv -t "$window_id" @code_notify_settle_badge_only 2>/dev/null)
-                        if [[ "$current_since" == "$since" ]] && [[ -z "$current_badge_only" ]]; then
+                        if [[ "$current_since" == "$since" ]] && [[ -z "$current_badge_only$current_delegated" ]]; then
                             tmux set-option -wu -t "$window_id" @code_notify_running 2>/dev/null
                             tmux_running_gen_clear "$window_id"
                             tmux_running_settle_disarm "$window_id"
@@ -2254,7 +2261,7 @@ tmux_agent_exit_sweep() {
             tmux set-option -w -t "$window_id" @code_notify_agent_pid "$pid" 2>/dev/null
         fi
     done < <(tmux list-windows -a -F \
-        '#{window_id}|#{@code_notify_agent_pid}|#{@code_notify_running}|#{@code_notify_run_gen}|#{@code_notify_settle_pane}|#{@code_notify_idle_watch}|#{@code_notify_resume_pending}|#{@code_notify_dialog_ctx}|#{@code_notify_dialog_since}|#{@code_notify_dialog_grace}|#{@code_notify_interrupt_pane}|#{@code_notify_interrupt_fp}|#{@code_notify_interrupt_since}|#{@code_notify_settle_badge_only}|#{@code_notify_orig_name}' 2>/dev/null)
+        '#{window_id}|#{@code_notify_agent_pid}|#{@code_notify_running}|#{@code_notify_run_gen}|#{@code_notify_settle_pane}|#{@code_notify_idle_watch}|#{@code_notify_resume_pending}|#{@code_notify_dialog_ctx}|#{@code_notify_dialog_since}|#{@code_notify_dialog_grace}|#{@code_notify_interrupt_pane}|#{@code_notify_interrupt_fp}|#{@code_notify_interrupt_since}|#{@code_notify_delegated}|#{@code_notify_settle_badge_only}|#{@code_notify_orig_name}' 2>/dev/null)
     if [[ "$live" -eq 1 ]]; then
         tmux_agent_exit_schedule_sweep
     fi
@@ -2272,24 +2279,59 @@ tmux_running_spinner_enabled() {
     [[ -f "$TMUX_SPINNER_ENABLED_FILE" ]]
 }
 
+# Keep the persisted delegated animation preference available to tmux's status
+# format when delegated work begins or the user changes the setting.
+tmux_spinner_sync_delegated_preference() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local current
+    current=$(tmux show-options -gqv @code_notify_delegated_spinner_disabled 2>/dev/null)
+    if [[ -f "$TMUX_DELEGATED_SPINNER_DISABLED_FILE" ]]; then
+        [[ "$current" == "1" ]] || tmux set-option -g @code_notify_delegated_spinner_disabled 1 2>/dev/null
+    elif [[ -n "$current" ]]; then
+        tmux set-option -gu @code_notify_delegated_spinner_disabled 2>/dev/null
+    fi
+}
+
+# Select the delegated-work animation for the hook's window. The running
+# epoch still controls whether either animation is visible.
+tmux_spinner_delegated_set_current() {
+    tmux_focus_available || return 0
+    local target session_id window_id pane_id
+    target=$(tmux_focus_capture_target) || return 0
+    read -r session_id window_id pane_id <<< "$target"
+    [[ "$window_id" =~ ^@[0-9]+$ ]] || return 0
+    if [[ "$1" == "on" ]]; then
+        tmux set-option -w -t "$window_id" @code_notify_delegated 1 2>/dev/null
+    else
+        tmux set-option -wu -t "$window_id" @code_notify_delegated 2>/dev/null
+    fi
+}
+
 # The status-line snippet: while this window's @code_notify_running epoch is
-# fresher than the TTL, show the moon frame for the current wall-clock second
-# (a trailing space separates it from the theme's own content); otherwise show
-# nothing. An event badge owns @code_notify_orig_name and has higher display
-# priority, so it suppresses the independent spinner until the badge clears.
+# fresher than the TTL, show a moon or delegated-work clock frame for the current
+# wall-clock second, each followed by a separator space;
+# otherwise show nothing. An event badge owns @code_notify_orig_name and has
+# higher display priority, so it suppresses the spinner until the badge clears.
 # Everything is computed by tmux during its normal status redraw — no process
 # is spawned. Frame choice is a nested-conditional table because tmux formats
 # have no array indexing.
 tmux_spinner_build_format() {
     local frames=(🌑 🌒 🌓 🌔 🌕 🌖 🌗 🌘)
+    local delegated_frames=(🕛 🕐 🕑 🕒 🕓 🕔 🕕 🕖 🕗 🕘 🕙 🕚)
     local idx='#{e|m:#{T:@code_notify_clock},8}'
+    local delegated_idx='#{e|m:#{T:@code_notify_clock},12}'
     local frame="${frames[7]}"
+    local delegated_frame="${delegated_frames[11]}"
     local i
     for ((i = 6; i >= 0; i--)); do
         frame="#{?#{e|==:$idx,$i},${frames[$i]},$frame}"
     done
+    for ((i = 10; i >= 0; i--)); do
+        delegated_frame="#{?#{e|==:$delegated_idx,$i},${delegated_frames[$i]},$delegated_frame}"
+    done
+    frame="#{?#{@code_notify_delegated_spinner_disabled},$frame ,#{?#{@code_notify_delegated},$delegated_frame ,$frame }}"
     local age='#{e|-:#{T:@code_notify_clock},#{@code_notify_running}}'
-    printf '%s' "#{?#{!=:#{@code_notify_orig_name},},,#{?#{@code_notify_running},#{?#{e|<:$age,$TMUX_RUNNING_TTL},$frame ,},}}"
+    printf '%s' "#{?#{!=:#{@code_notify_orig_name},},,#{?#{@code_notify_running},#{?#{e|<:$age,$TMUX_RUNNING_TTL},$frame,},}}"
 }
 
 # The global status-interval set in tmux_spinner_arm does not reach sessions
@@ -2385,6 +2427,10 @@ tmux_spinner_arm() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
     local snip interval injected=""
     snip=$(tmux show-options -gqv @code_notify_spinner_snip 2>/dev/null)
+    if [[ -n "$snip" && "$snip" != *'@code_notify_delegated_spinner_disabled'* ]]; then
+        tmux_spinner_disarm
+        snip=""
+    fi
     if [[ -z "$snip" ]]; then
         snip=$(tmux_spinner_build_format)
         # Save before injecting: a snippet in a format that disarm cannot look
@@ -2516,6 +2562,7 @@ tmux_running_start() {
     tmux_running_transition_lock_acquire "$window_id" || return 0
     transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
     transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    tmux set-option -wu -t "$window_id" @code_notify_delegated 2>/dev/null
     if tmux_running_spinner_enabled; then
         spinner=1
         # The spinner is rendered independently from the window name, so it
@@ -2826,6 +2873,7 @@ tmux_prompt_submit() {
     tmux_running_transition_lock_acquire "$window_id" || return 0
     local transition_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
     local transition_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    tmux set-option -wu -t "$window_id" @code_notify_delegated 2>/dev/null
 
     # A submission that arrives while this window's running marker is still
     # up means the ending turn has a queued successor: hook processes run

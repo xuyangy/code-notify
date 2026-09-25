@@ -1365,8 +1365,16 @@ print(state, end="")
 }
 
 mark_delegated_work_running() {
-    local marker_file marker_tmp
+    local marker_file marker_tmp spinner_snip
     marker_file=$(get_delegated_work_marker_file) || return 0
+    if [[ -n "${TMUX:-}" ]] && tmux_running_spinner_enabled; then
+        tmux_spinner_sync_delegated_preference 2>/dev/null || true
+        tmux_spinner_delegated_set_current on 2>/dev/null || true
+        spinner_snip=$(tmux show-options -gqv @code_notify_spinner_snip 2>/dev/null)
+        if [[ "$spinner_snip" != *'@code_notify_delegated_spinner_disabled'* ]]; then
+            tmux_spinner_arm 2>/dev/null || true
+        fi
+    fi
     # Preserve the original observation time: the fail-open TTL counts from
     # the first sighting. An expired marker comes back only when a later Stop
     # still reports running delegated work.
@@ -1382,7 +1390,12 @@ mark_delegated_work_running() {
 clear_delegated_work_marker() {
     local marker_file
     marker_file=$(get_delegated_work_marker_file) || return 0
+    local had_marker=0
+    [[ -f "$marker_file" ]] && had_marker=1
     rm -f "$marker_file" 2>/dev/null || true
+    if (( had_marker )); then
+        tmux_spinner_delegated_set_current off 2>/dev/null || true
+    fi
 }
 
 delegated_work_marker_exists() {

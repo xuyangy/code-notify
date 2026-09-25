@@ -283,19 +283,36 @@ pass "delegated lifecycle alerts preserve the spinner while still notifying"
 
 for delegate in subagent workflow; do
     reset_window
+    touch "$HOME/.claude/notifications/tmux-spinner-enabled"
     date +%s > "$state_dir/@1.@code_notify_running"
     run_stop --hook-data "{\"session_id\":\"sess1\",\"background_tasks\":[{\"type\":\"$delegate\",\"status\":\"running\"}]}" \
         CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0
     [[ -s "$state_dir/@1.@code_notify_running" ]] \
         || fail "Stop with a running $delegate must preserve the spinner"
+    [[ -s "$state_dir/@1.@code_notify_delegated" ]] \
+        || fail "Stop with a running $delegate must select the delegated spinner"
     [[ "$(window_name)" == "proj" && ! -s "$deliver_log" ]] \
         || fail "Stop with a running $delegate must not announce completion"
     run_stop --hook-data '{"session_id":"sess1","background_tasks":[]}' \
         CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0
     [[ ! -s "$state_dir/@1.@code_notify_running" && "$(window_name)" == "🟢 proj" ]] \
         || fail "Stop after $delegate completion must replace the spinner with completion"
+    [[ ! -e "$state_dir/@1.@code_notify_delegated" ]] \
+        || fail "Stop after $delegate completion must clear the delegated spinner"
+    rm -f "$HOME/.claude/notifications/tmux-spinner-enabled"
 done
 pass "delegated Stop preserves the spinner until the registry is clear"
+
+reset_window
+date +%s > "$state_dir/@1.@code_notify_running"
+printf '1' > "$state_dir/@1.@code_notify_delegated"
+printf '%s\n' '{"session_id":"sess1"}' | \
+    CODE_NOTIFY_TAIL_SYNC=1 CODE_NOTIFY_SKIP_USAGE_CHECK=1 \
+    bash "$ROOT_DIR/lib/code-notify/core/notifier.sh" UserPromptSubmit claude proj \
+    >/dev/null 2>&1 || fail "new prompt should exit cleanly"
+[[ ! -e "$state_dir/@1.@code_notify_delegated" ]] \
+    || fail "new prompt must reset the delegated spinner"
+pass "new prompt restores the normal running spinner"
 
 reset_window
 date +%s > "$state_dir/@1.@code_notify_running"

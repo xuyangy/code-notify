@@ -350,9 +350,11 @@ tmux_badge_apply() {
         tmux set-option -w -t "$window_id" @code_notify_orig_name "$orig_name" 2>/dev/null || return 1
         tmux set-option -w -t "$window_id" @code_notify_autorename off 2>/dev/null
     fi
+    tmux_badge_trace "$window_id" apply-before "icon=$icon mode=$clear_mode"
     tmux rename-window -t "$window_id" "$icon $orig_name" 2>/dev/null || return 1
     tmux set-option -w -t "$window_id" @code_notify_badged_name "$icon $orig_name" 2>/dev/null
     tmux set-option -w -t "$window_id" @code_notify_clear_mode "$clear_mode" 2>/dev/null
+    tmux_badge_trace "$window_id" apply-after
     tmux_agent_exit_track "$window_id"
     # A glance badge now exists, so arm the focus hook that clears it on the
     # next visit. Cheap and idempotent, so setting it per badge is fine. Engage
@@ -505,6 +507,7 @@ tmux_badge_clear_locked() {
     autorename=$(tmux show-options -wqv -t "$window_id" @code_notify_autorename 2>/dev/null)
     badged_name=$(tmux show-options -wqv -t "$window_id" @code_notify_badged_name 2>/dev/null)
     current=$(tmux display-message -p -t "$window_id" '#{window_name}' 2>/dev/null)
+    tmux_badge_trace "$window_id" clear-before
     # Restore when the window still looks badged (the exact name written at
     # badge time) or already carries the original name; an empty result means
     # the name query failed, where restoring is the safer default.
@@ -529,6 +532,7 @@ tmux_badge_clear_locked() {
     tmux set-option -wu -t "$window_id" @code_notify_autorename 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_badged_name 2>/dev/null
     tmux set-option -wu -t "$window_id" @code_notify_clear_mode 2>/dev/null
+    tmux_badge_trace "$window_id" clear-after
     # Some state transitions clear the rendering while deliberately keeping a
     # non-rendering watch alive. In that case the existing PID (when one was
     # resolved by the hook process) still belongs to the watch and must not be
@@ -650,6 +654,64 @@ tmux_badge_clear_current() {
 TMUX_RUNNING_TTL="${CODE_NOTIFY_TMUX_RUNNING_TTL:-14400}"
 TMUX_RUNNING_ICON="${CODE_NOTIFY_TMUX_RUNNING_ICON:-🌕}"
 TMUX_SPINNER_ENABLED_FILE="$HOME/.claude/notifications/tmux-spinner-enabled"
+# Opt-in trace of window badge and running-marker transitions, for diagnosing
+# a window whose name and badge state disagree. Off unless the flag file
+# exists; when off it costs one stat per transition. Once the log passes
+# TMUX_BADGE_TRACE_MAX_BYTES it is renamed to "<log>.1" (replacing the older
+# one), so the two files together hold at most about twice that.
+TMUX_BADGE_TRACE_FLAG="$HOME/.claude/notifications/tmux-badge-trace-enabled"
+TMUX_BADGE_TRACE_LOG="$HOME/.claude/logs/tmux-badge-trace.log"
+TMUX_BADGE_TRACE_MAX_BYTES=524288
+
+# Rotate the trace log. Every writer appends with its own open, so the rename
+# itself drops no line: one written while it happens lands in either file.
+# Older lines are still dropped on purpose when a later rotation replaces
+# "<log>.1". The mkdir lock keeps two writers that both saw an oversized log
+# from rotating twice, which would push the just-rotated file out; the size is
+# re-checked under the lock for that reason. A lock left by a killed writer is
+# removed once it is over a minute old. Two writers can both find the same
+# stale lock, and the later one's rmdir can then remove a lock a third writer
+# has just taken. The worst result is one extra rotation, which drops older
+# lines from "<log>.1" early: acceptable for an opt-in debug log.
+tmux_badge_trace_rotate() {
+    local log="$TMUX_BADGE_TRACE_LOG" lock="$TMUX_BADGE_TRACE_LOG.rotating" size
+    if ! mkdir "$lock" 2>/dev/null; then
+        if [[ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+            rmdir "$lock" 2>/dev/null
+        fi
+        return 0
+    fi
+    if size=$(wc -c 2>/dev/null < "$log") &&
+        (( size > TMUX_BADGE_TRACE_MAX_BYTES )); then
+        /bin/mv -f "$log" "$log.1" 2>/dev/null
+    fi
+    rmdir "$lock" 2>/dev/null
+    return 0
+}
+
+# Append one line: time, pid, hook, agent, window, action, the window name at
+# this moment, the saved badge state, and the calling function chain.
+tmux_badge_trace() {
+    [[ -f "$TMUX_BADGE_TRACE_FLAG" ]] || return 0
+    local window_id="$1" action="$2" detail="${3:-}"
+    local name orig badged running size
+    name=$(tmux display-message -p -t "$window_id" '#{window_name}' 2>/dev/null)
+    orig=$(tmux show-options -wqv -t "$window_id" @code_notify_orig_name 2>/dev/null)
+    badged=$(tmux show-options -wqv -t "$window_id" @code_notify_badged_name 2>/dev/null)
+    running=$(tmux show-options -wqv -t "$window_id" @code_notify_running 2>/dev/null)
+    mkdir -p "${TMUX_BADGE_TRACE_LOG%/*}" 2>/dev/null || return 0
+    if size=$(wc -c 2>/dev/null < "$TMUX_BADGE_TRACE_LOG") &&
+        (( size > TMUX_BADGE_TRACE_MAX_BYTES )); then
+        tmux_badge_trace_rotate
+    fi
+    printf '[%s] pid=%s hook=%s agent=%s win=%s %s%s name=[%s] orig=[%s] badged=[%s] run=[%s] via=%s\n' \
+        "$(date '+%F %T')" "$$" "${HOOK_TYPE:-${RAW_ARG1:-?}}" \
+        "${CODE_NOTIFY_TMUX_AGENT_NAME:-?}" "$window_id" "$action" \
+        "${detail:+ $detail}" "$name" "$orig" "$badged" "$running" \
+        "$(IFS=,; printf '%s' "${FUNCNAME[*]:1}")" \
+        >> "$TMUX_BADGE_TRACE_LOG" 2>/dev/null
+    return 0
+}
 # Seconds between exit checks while an agent owns a running marker or event
 # badge. Set to 0 to rely on the TTL safety net only.
 TMUX_AGENT_EXIT_POLL_SECONDS="${CODE_NOTIFY_TMUX_AGENT_EXIT_POLL_SECONDS:-5}"
@@ -2423,11 +2485,13 @@ tmux_running_gen_set() {
     local window_id="$1"
     tmux set-option -w -t "$window_id" @code_notify_run_gen \
         "$$.$(date +%s).${RANDOM:-0}.${RANDOM:-0}" 2>/dev/null
+    tmux_badge_trace "$window_id" running-on
     return 0
 }
 
 tmux_running_gen_clear() {
     tmux set-option -wu -t "$1" @code_notify_run_gen 2>/dev/null
+    tmux_badge_trace "$1" running-off
     return 0
 }
 

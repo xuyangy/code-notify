@@ -349,6 +349,28 @@ Set `CODE_NOTIFY_BANNER_WORDING` or `CODE_NOTIFY_VOICE_WORDING` to `short` or
 `on` or `off`, to override the saved preferences for a single process or
 session.
 
+### Agent Bridge Messages
+
+[agent-bridge-tmux](https://github.com/xuyangy/agent-bridge-tmux) lets two
+agents in separate tmux panes exchange messages. While a delivered message
+waits for its answer, the other agent has the work, so a turn that ends in the
+sending pane asks nothing of you. The completion notification still arrives with its usual banner, sound, voice, and
+badge, and only the wording changes:
+
+- Short: "Claude sent a bridge message"
+- Long: "Claude sent a bridge message to the other agent. No action needed."
+
+The idle reminder is skipped for as long as that holds. Once the bridge is
+closed, completions use the normal wording again. So do a message whose
+delivery could not be confirmed, a turn that ends while the agent still owes
+the other one a reply, and a message the other agent never answered within the
+bridge's time limit, because each of those may need you.
+
+This works for every supported agent running in a tmux pane and needs no
+setup: the bridge publishes its status in the pane option
+`@agent_bridge_status`, which Code-Notify reads when a turn ends. It needs
+tmux 3.0 or newer.
+
 ## How It Works
 
 Code-Notify uses the hook systems built into AI coding tools:

@@ -409,6 +409,13 @@ else
     test_fail "Claude delegated-work parser parity failed"
 fi
 
+test_start "Agent bridge handoff wording"
+if run_test_script tests/test-bridge-handoff.sh; then
+    test_pass
+else
+    test_fail "Agent bridge handoff wording failed"
+fi
+
 test_start "ask_user notification lifecycle"
 if run_test_script tests/test-ask-user-alert.sh; then
     test_pass

@@ -1918,6 +1918,18 @@ if claude_delegated_work_should_suppress; then
     exit 0
 fi
 
+# A turn that ended by sending an agent-bridge-tmux message handed the work to
+# the peer agent. The Stop is still announced, worded as a handoff so the user
+# knows nothing is asked of them, and the idle reminder that would follow it is
+# dropped. Any agent in a tmux pane qualifies.
+BRIDGE_HANDOFF=0
+if [[ "$HOOK_TYPE" == "stop" ]] || [[ "$NOTIFICATION_SUBTYPE" == "idle_prompt" ]]; then
+    if tmux_bridge_handoff_current 2>/dev/null; then
+        [[ "$HOOK_TYPE" == "stop" ]] || exit 0
+        BRIDGE_HANDOFF=1
+    fi
+fi
+
 CLAUDE_TEAMMATE_HOLD=0
 if claude_teammate_hold_spinner 2>/dev/null; then
     CLAUDE_TEAMMATE_HOLD=1
@@ -2253,6 +2265,15 @@ case "$HOOK_TYPE" in
                 "Turn complete! $TOOL_DISPLAY is done, but a teammate is still running" \
                 "$TOOL_DISPLAY finished its turn. A teammate is still working in the background" \
                 "Heads up! $TOOL_DISPLAY is done for now, and a teammate is still busy"
+        fi
+        # The turn ended by handing work to a peer agent over a bridge: same
+        # delivery as any completion, worded so it asks nothing of the user.
+        if [[ "$BRIDGE_HANDOFF" == "1" ]]; then
+            SUBTITLE="Bridge Message Sent"
+            set_event_messages \
+                "$TOOL_DISPLAY sent a bridge message" \
+                -- \
+                "$TOOL_DISPLAY sent a bridge message to the other agent. No action needed."
         fi
         ;;
     "notification")

@@ -2338,6 +2338,22 @@ tmux_teammate_busy_current() {
     [[ "$busy" =~ ^[0-9]+$ ]]
 }
 
+# Succeeds when the hook's pane handed its turn to a peer agent over an
+# agent-bridge-tmux bridge. That helper mirrors its bridge status into the pane
+# option @agent_bridge_status; "pending:<epoch>" means the peer holds the turn
+# until that ack deadline. Every other value fails: an unconfirmed delivery or
+# an owed reply needs the user, a closed bridge is an ordinary completion, and
+# a deadline in the past means the peer never answered.
+tmux_bridge_handoff_current() {
+    tmux_focus_available || return 1
+    local label deadline
+    label=$(tmux show-options -pqv -t "$TMUX_PANE" @agent_bridge_status 2>/dev/null) || return 1
+    [[ "$label" == pending:* ]] || return 1
+    deadline="${label#pending:}"
+    [[ "$deadline" =~ ^[0-9]+$ ]] || return 1
+    (( $(date +%s) < deadline ))
+}
+
 # Keep the running spinner up past a lead Stop while a teammate works, drawn as
 # the delegated-work clock. Succeeds only when the window's running epoch is
 # still live, so the caller skips its teardown and the terminal badge yields to

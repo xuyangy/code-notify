@@ -2273,7 +2273,7 @@ case "$HOOK_TYPE" in
             set_event_messages \
                 "$TOOL_DISPLAY sent a bridge message" \
                 -- \
-                "$TOOL_DISPLAY sent a bridge message to the other agent. No action needed."
+                "Just for your information, $TOOL_DISPLAY sent a bridge message to the other agent."
         fi
         ;;
     "notification")

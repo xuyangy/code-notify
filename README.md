@@ -358,7 +358,7 @@ sending pane asks nothing of you. The completion notification still arrives with
 badge, and only the wording changes:
 
 - Short: "Claude sent a bridge message"
-- Long: "Claude sent a bridge message to the other agent. No action needed."
+- Long: "Just for your information, Claude sent a bridge message to the other agent."
 
 The idle reminder is skipped for as long as that holds. Once the bridge is
 closed, completions use the normal wording again. So do a message whose

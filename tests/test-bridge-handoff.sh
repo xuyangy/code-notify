@@ -102,11 +102,11 @@ run_notifier stop claude "$stop_payload"
     fail "pending bridge Stop should use the handoff subtitle"
 pass "pending bridge Stop is announced as a handoff"
 
-# The long wording says nothing is asked of the user.
+# The long wording presents the handoff as informational.
 CODE_NOTIFY_BANNER_WORDING=long run_notifier stop claude "$stop_payload"
-[[ "$(last_notification)" == *"sent a bridge message to the other agent. No action needed."* ]] ||
-    fail "long handoff wording should say no action is needed"
-pass "long handoff wording says no action is needed"
+[[ "$(last_notification)" == *"Just for your information, Claude sent a bridge message to the other agent."* ]] ||
+    fail "long handoff wording should present the handoff as informational"
+pass "long handoff wording presents the handoff as informational"
 
 # The idle reminder that follows a handoff is dropped.
 lines_before="$(notification_lines)"

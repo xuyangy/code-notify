@@ -104,7 +104,7 @@ pass "pending bridge Stop is announced as a handoff"
 
 # The long wording presents the handoff as informational.
 CODE_NOTIFY_BANNER_WORDING=long run_notifier stop claude "$stop_payload"
-[[ "$(last_notification)" == *"Just for your information, Claude sent a bridge message to the other agent, no action needed."* ]] ||
+[[ "$(last_notification)" == *"Just for your information, Claude sent a bridge message to the other agent, no action needed from you."* ]] ||
     fail "long handoff wording should present the handoff as informational"
 pass "long handoff wording presents the handoff as informational"
 

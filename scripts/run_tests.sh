@@ -338,6 +338,13 @@ else
     test_fail "tmux window badge failed"
 fi
 
+test_start "tmux sessions line"
+if run_test_script tests/test-tmux-sessions-line.sh; then
+    test_pass
+else
+    test_fail "tmux sessions line failed"
+fi
+
 # Test: a stop silenced only by the (process-wide) stop rate limit still badges
 # its window, while hard suppressors withhold the badge along with the alert
 test_start "stop rate-limit badge"

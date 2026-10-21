@@ -70,6 +70,9 @@ handle_global_command() {
         "badge-visible")
             handle_badge_visible_command "$@"
             ;;
+        "sessions-line")
+            handle_sessions_line_command "$@"
+            ;;
         "help")
             show_help
             ;;
@@ -1583,6 +1586,108 @@ handle_badge_visible_command() {
         *)
             error "Unknown badge-visible command: $action"
             echo "Usage: cn badge-visible [on|off|status]"
+            return 1
+            ;;
+    esac
+}
+
+# An extra tmux status line listing the other sessions' windows with their
+# badges and spinners, so agents outside the attached session stay visible.
+# The settings are files so every hook process sees them; the enabled flag
+# also lets the first prompt on a new tmux server install the line.
+handle_sessions_line_command() {
+    local action="${1:-status}"
+    source "$LIB_DIR/utils/tmux.sh"
+
+    case "$action" in
+        "on")
+            mkdir -p "$(dirname "$TMUX_SESSIONS_LINE_ENABLED_FILE")"
+            touch "$TMUX_SESSIONS_LINE_ENABLED_FILE"
+            local shadowed=""
+            if [[ -n "${TMUX:-}" ]]; then
+                if ! tmux_sessions_line_arm 2>/dev/null; then
+                    warning "No room for the line: tmux status is off or already uses 5 lines"
+                fi
+                shadowed=$(tmux_sessions_line_local_overrides | paste -sd ' ' -)
+            fi
+            success "tmux sessions line enabled"
+            echo "  An extra status line lists the other sessions' windows with their badges and spinners."
+            if [[ -n "$shadowed" ]]; then
+                warning "These sessions set their own status or status-format and will not show the line: $shadowed"
+            fi
+            ;;
+        "off")
+            rm -f "$TMUX_SESSIONS_LINE_ENABLED_FILE"
+            if [[ -n "${TMUX:-}" ]]; then
+                tmux_sessions_line_disarm 2>/dev/null || true
+            fi
+            success "tmux sessions line disabled"
+            ;;
+        "view")
+            case "${2:-}" in
+                "priority")
+                    rm -f "$TMUX_SESSIONS_LINE_VIEW_FILE"
+                    ;;
+                "sessions")
+                    mkdir -p "$(dirname "$TMUX_SESSIONS_LINE_VIEW_FILE")"
+                    printf 'sessions\n' > "$TMUX_SESSIONS_LINE_VIEW_FILE"
+                    ;;
+                "")
+                    echo "tmux sessions line view: $(tmux_sessions_line_view)"
+                    return 0
+                    ;;
+                *)
+                    error "Unknown sessions-line view: $2"
+                    echo "Usage: cn sessions-line view [priority|sessions]"
+                    return 1
+                    ;;
+            esac
+            if [[ -n "${TMUX:-}" ]]; then
+                tmux_sessions_line_refresh 2>/dev/null || true
+            fi
+            success "tmux sessions line view: $(tmux_sessions_line_view)"
+            if [[ "$(tmux_sessions_line_view)" == "priority" ]]; then
+                echo "  Windows that need you first, then other badges, then running agents."
+            else
+                echo "  Every window, session by session."
+            fi
+            ;;
+        "current")
+            case "${2:-status}" in
+                "on")
+                    mkdir -p "$(dirname "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE")"
+                    touch "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
+                    ;;
+                "off")
+                    rm -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
+                    ;;
+                "status")
+                    ;;
+                *)
+                    error "Unknown sessions-line current command: $2"
+                    echo "Usage: cn sessions-line current [on|off|status]"
+                    return 1
+                    ;;
+            esac
+            if [[ -n "${TMUX:-}" ]]; then
+                tmux_sessions_line_refresh 2>/dev/null || true
+            fi
+            if tmux_sessions_line_show_current; then
+                echo "tmux sessions line, attached session: ${GREEN}shown${RESET}"
+            else
+                echo "tmux sessions line, attached session: ${DIM}left out${RESET} (your normal status line shows it)"
+            fi
+            ;;
+        "status")
+            if tmux_sessions_line_enabled; then
+                echo "tmux sessions line: ${GREEN}enabled${RESET} (view: $(tmux_sessions_line_view))"
+            else
+                echo "tmux sessions line: ${DIM}disabled${RESET}"
+            fi
+            ;;
+        *)
+            error "Unknown sessions-line command: $action"
+            echo "Usage: cn sessions-line [on|off|status|view priority|sessions|current on|off]"
             return 1
             ;;
     esac

@@ -655,6 +655,13 @@ TMUX_RUNNING_TTL="${CODE_NOTIFY_TMUX_RUNNING_TTL:-14400}"
 TMUX_RUNNING_ICON="${CODE_NOTIFY_TMUX_RUNNING_ICON:-🌕}"
 TMUX_SPINNER_ENABLED_FILE="$HOME/.claude/notifications/tmux-spinner-enabled"
 TMUX_DELEGATED_SPINNER_DISABLED_FILE="$HOME/.claude/notifications/tmux-delegated-spinner-disabled"
+TMUX_SESSIONS_LINE_ENABLED_FILE="$HOME/.claude/notifications/tmux-sessions-line-enabled"
+TMUX_SESSIONS_LINE_VIEW_FILE="$HOME/.claude/notifications/tmux-sessions-line-view"
+TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE="$HOME/.claude/notifications/tmux-sessions-line-show-current"
+# Badge icons the priority view lists first: the window waits on the user
+# (input or approval, a question, an idle prompt, an error, a rate limit, an
+# unclassified notification). Must match the BADGE_ICON values in notifier.sh.
+TMUX_SESSIONS_LINE_ATTENTION_ICONS='💬|🙋|🥱|🧨|⏳|📢'
 # Opt-in trace of window badge and running-marker transitions, for diagnosing
 # a window whose name and badge state disagree. Off unless the flag file
 # exists; when off it costs one stat per transition. Once the log passes
@@ -2608,6 +2615,230 @@ tmux_spinner_disarm_if_idle() {
     return 0
 }
 
+# Opt-in sessions line (cn sessions-line on): one extra status line that lists
+# the windows of the other sessions, so badges and spinners outside the
+# attached session stay visible. tmux expands it during its own redraw with
+# nested #{S:#{W:...}} loops over the live window options — there is no cached
+# summary to keep in sync and no process is spawned. The spinner frame comes
+# from @code_notify_spinner_snip, which is set only while the spinner is
+# armed, so the line follows the spinner's own lifecycle.
+#
+# Two views (cn sessions-line view): "priority" (default) lists only windows
+# with something to show, across all sessions, in three passes — badges that
+# need the user (TMUX_SESSIONS_LINE_ATTENTION_ICONS), then other badges, then
+# running agents. "sessions" lists every window, session by session. The
+# client's own session is left out unless cn sessions-line current on.
+#
+# Bookkeeping: @code_notify_line_index is the status-format index the line
+# occupies (the first one past the user's existing lines) and
+# @code_notify_line_fmt the exact format installed there, so a later version
+# with a different format still recognizes it. The user's previous status
+# value and status-format entry are saved so disarm restores exactly what was
+# there. Only the global options are touched; sessions with their own status
+# or status-format keep their layout (cn sessions-line on lists them).
+tmux_sessions_line_enabled() {
+    [[ -f "$TMUX_SESSIONS_LINE_ENABLED_FILE" ]]
+}
+
+tmux_sessions_line_view() {
+    local view=""
+    [[ -f "$TMUX_SESSIONS_LINE_VIEW_FILE" ]] && view=$(< "$TMUX_SESSIONS_LINE_VIEW_FILE")
+    if [[ "$view" == "sessions" ]]; then
+        printf 'sessions'
+    else
+        printf 'priority'
+    fi
+}
+
+tmux_sessions_line_show_current() {
+    [[ -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE" ]]
+}
+
+# Swap our installed row to the format the current settings build, in place:
+# after an upgrade or a view/current change. A row the user replaced is left
+# alone, and the line's visibility is never changed. A caller that already
+# read @code_notify_line_index passes it to save the tmux round trip.
+tmux_sessions_line_refresh() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local idx="${1:-}" installed fmt cur
+    [[ -n "$idx" ]] || idx=$(tmux show-options -gqv @code_notify_line_index 2>/dev/null)
+    [[ "$idx" =~ ^[1-4]$ ]] || return 0
+    installed=$(tmux show-options -gqv @code_notify_line_fmt 2>/dev/null)
+    fmt=$(tmux_sessions_line_build_format)
+    [[ "$installed" != "$fmt" ]] || return 0
+    cur=$(tmux show-options -gv "status-format[$idx]" 2>/dev/null)
+    if [[ "$cur" == "$installed" ]]; then
+        tmux set-option -g "status-format[$idx]" "$fmt" 2>/dev/null
+        tmux set-option -g @code_notify_line_fmt "$fmt" 2>/dev/null
+    fi
+    return 0
+}
+
+# Called from the prompt paths. Enabled means installed, not forced visible:
+# on a server with no bookkeeping (a new tmux server) the first prompt
+# installs the line, but once installed its visibility belongs to the user. A
+# lowered status (a toggle key, a config reload) or a row the user's config
+# replaced is left alone until an explicit cn sessions-line on. The one
+# automatic change is tmux_sessions_line_refresh of our own row.
+# Costs one stat while disabled and two option reads in the steady state.
+tmux_sessions_line_heal() {
+    tmux_sessions_line_enabled || return 0
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local idx
+    idx=$(tmux show-options -gqv @code_notify_line_index 2>/dev/null)
+    if [[ "$idx" =~ ^[1-4]$ ]]; then
+        tmux_sessions_line_refresh "$idx" 2>/dev/null || true
+    else
+        tmux_sessions_line_arm 2>/dev/null || true
+    fi
+    # cn sessions-line off may have run while this heal was in flight.
+    tmux_sessions_line_enabled || tmux_sessions_line_disarm 2>/dev/null || true
+    return 0
+}
+
+# Print the names of sessions whose own status or status-format shadows the
+# global options, so the line does not show there.
+tmux_sessions_line_local_overrides() {
+    local sid name
+    while IFS='|' read -r sid name; do
+        [[ -n "$sid" ]] || continue
+        if [[ -n "$(tmux show-options -q -t "$sid" status 2>/dev/null)" ]] ||
+            [[ -n "$(tmux show-options -q -t "$sid" status-format 2>/dev/null)" ]]; then
+            printf '%s\n' "$name"
+        fi
+    done < <(tmux list-sessions -F '#{session_id}|#{session_name}' 2>/dev/null)
+    return 0
+}
+
+tmux_sessions_line_build_format() {
+    local spin='#{E:@code_notify_spinner_snip}'
+    # The status line renders per client, so client_session is the session
+    # of the client drawing it. Compared inside the loop rather than through
+    # #{S:...}'s current-session argument, which tmux 3.5 and older lack.
+    local is_current='#{==:#{session_name},#{client_session}}'
+    local show_current=0
+    tmux_sessions_line_show_current && show_current=1
+    if [[ "$(tmux_sessions_line_view)" == "sessions" ]]; then
+        local win="#I ${spin}#W  "
+        local other="#[bold]▸ #{session_name}#[nobold] #{W:$win} "
+        local current=""
+        (( show_current )) &&
+            current="#[bold]#[underscore]▸ #{session_name}#[nobold]#[nounderscore] #{W:$win} "
+        printf '%s' "#[align=left]#{S:#{?$is_current,$current,$other}}"
+        return 0
+    fi
+    # A static running icon is a badge too (clear mode "running"), and the
+    # spinner renders only while no badge holds the window, so each window
+    # falls in at most one pass. 💤 TeammateIdle stays out of the attention
+    # pass: the lead agent picks up a parked teammate, not the user.
+    local badged='#{&&:#{@code_notify_badged_name},#{!=:#{@code_notify_clear_mode},running}}'
+    local attention="#{&&:$badged,#{m/r:^($TMUX_SESSIONS_LINE_ATTENTION_ICONS) ,#{@code_notify_badged_name}}}"
+    local running="#{||:#{==:#{@code_notify_clear_mode},running},#{!=:$spin,}}"
+    local item="#{session_name}:#I ${spin}#W  "
+    local passes=(
+        "#{W:#{?$attention,#[bold]$item#[nobold],}}"
+        "#{W:#{?$attention,,#{?$badged,$item,}}}"
+        "#{W:#{?$running,#[dim]$item#[nodim],}}"
+    )
+    local out="#[align=left]" pass
+    for pass in "${passes[@]}"; do
+        if (( show_current )); then
+            out+="#{S:$pass}"
+        else
+            out+="#{S:#{?$is_current,,$pass}}"
+        fi
+    done
+    printf '%s' "$out"
+}
+
+# Install the line and make it visible: the explicit cn sessions-line on, and
+# the first install on a new server. Returns 1 when there is no room: status
+# is off, or all five status lines are already in use.
+tmux_sessions_line_arm() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local fmt idx installed status lines cur
+    fmt=$(tmux_sessions_line_build_format)
+    idx=$(tmux show-options -gqv @code_notify_line_index 2>/dev/null)
+    installed=$(tmux show-options -gqv @code_notify_line_fmt 2>/dev/null)
+    status=$(tmux show-options -gv status 2>/dev/null)
+    case "$status" in
+        on) lines=1 ;;
+        [2-5]) lines="$status" ;;
+        *) return 1 ;;
+    esac
+    if [[ "$idx" =~ ^[1-4]$ ]]; then
+        cur=$(tmux show-options -gv "status-format[$idx]" 2>/dev/null)
+        if [[ "$cur" == "$fmt" ]] || { [[ -n "$installed" ]] && [[ "$cur" == "$installed" ]]; }; then
+            if [[ "$cur" != "$fmt" ]]; then
+                tmux set-option -g "status-format[$idx]" "$fmt" 2>/dev/null
+            fi
+            [[ "$installed" == "$fmt" ]] || tmux set-option -g @code_notify_line_fmt "$fmt" 2>/dev/null
+            if (( lines <= idx )); then
+                tmux set-option -g status "$((idx + 1))" 2>/dev/null
+            fi
+            return 0
+        fi
+        # The row no longer holds our line: a config reload brought a new
+        # layout. Never overwrite that row; install afresh past the layout as
+        # it is now, saving it as the new baseline.
+    fi
+    # A concurrent arm may have installed the line after idx was read above
+    # (status is the last thing it sets). Adopt that row rather than stacking
+    # a second line or saving our own format as the user's baseline.
+    if (( lines >= 2 )); then
+        cur=$(tmux show-options -gv "status-format[$((lines - 1))]" 2>/dev/null)
+        if [[ "$cur" == "$fmt" ]]; then
+            tmux set-option -g @code_notify_line_index "$((lines - 1))" 2>/dev/null
+            tmux set-option -g @code_notify_line_fmt "$fmt" 2>/dev/null
+            return 0
+        fi
+    fi
+    (( lines < 5 )) || return 1
+    idx="$lines"
+    cur=$(tmux show-options -gv "status-format[$idx]" 2>/dev/null)
+    # Our format in the row means a concurrent arm installed it after status
+    # was read; that arm already saved the real baseline.
+    if [[ "$cur" != "$fmt" ]]; then
+        tmux set-option -g @code_notify_line_saved_format "$cur" 2>/dev/null || return 0
+        tmux set-option -g @code_notify_line_saved_status "$status" 2>/dev/null
+    fi
+    tmux set-option -g @code_notify_line_fmt "$fmt" 2>/dev/null
+    tmux set-option -g @code_notify_line_index "$idx" 2>/dev/null
+    tmux set-option -g "status-format[$idx]" "$fmt" 2>/dev/null
+    tmux set-option -g status "$((idx + 1))" 2>/dev/null
+    return 0
+}
+
+# Undo tmux_sessions_line_arm. The format entry and the status value are
+# restored only while they still hold what arm wrote, so a value the user
+# changed since wins. No-op when not armed.
+tmux_sessions_line_disarm() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local idx installed cur saved
+    idx=$(tmux show-options -gqv @code_notify_line_index 2>/dev/null)
+    [[ "$idx" =~ ^[1-4]$ ]] || return 0
+    installed=$(tmux show-options -gqv @code_notify_line_fmt 2>/dev/null)
+    cur=$(tmux show-options -gv "status-format[$idx]" 2>/dev/null)
+    if [[ "$cur" == "${installed:-$(tmux_sessions_line_build_format)}" ]]; then
+        saved=$(tmux show-options -gqv @code_notify_line_saved_format 2>/dev/null)
+        if [[ -n "$saved" ]]; then
+            tmux set-option -g "status-format[$idx]" "$saved" 2>/dev/null
+        else
+            tmux set-option -gu "status-format[$idx]" 2>/dev/null
+        fi
+    fi
+    cur=$(tmux show-options -gv status 2>/dev/null)
+    if [[ "$cur" == "$((idx + 1))" ]]; then
+        saved=$(tmux show-options -gqv @code_notify_line_saved_status 2>/dev/null)
+        tmux set-option -g status "${saved:-on}" 2>/dev/null
+    fi
+    tmux set-option -gu @code_notify_line_index 2>/dev/null
+    tmux set-option -gu @code_notify_line_fmt 2>/dev/null
+    tmux set-option -gu @code_notify_line_saved_format 2>/dev/null
+    tmux set-option -gu @code_notify_line_saved_status 2>/dev/null
+    return 0
+}
+
 # A run generation: one value unique to a single turn start. @code_notify_running
 # cannot serve that purpose — its 1-second epoch cannot tell two turns inside
 # the same second apart, and the hooks that light and retire the marker fire
@@ -2634,6 +2865,7 @@ tmux_running_gen_clear() {
 # dispatch; the notifier's prompt intercept uses tmux_prompt_submit below,
 # which folds the engage-clear and this marker into one target capture.
 tmux_running_start() {
+    tmux_sessions_line_heal
     if ! tmux_running_enabled; then
         # Starting or resuming work is still an engage-clear signal when the
         # running indicator is disabled. This is also Antigravity's clear path:
@@ -2940,6 +3172,7 @@ tmux_running_transition_lock_release() {
 # followed by a re-badge, and stale cleanup is left to the scheduled timer.
 tmux_prompt_submit() {
     tmux_focus_available || return 0
+    tmux_sessions_line_heal
     if ! tmux_running_enabled; then
         # Running indicator disabled: just the engage-clear. Intentionally not
         # gated on tmux_badge_enabled — badges left from before the feature

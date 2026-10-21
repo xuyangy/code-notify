@@ -36,6 +36,7 @@ ${BOLD}COMMANDS:${RESET}
     ${GREEN}snooze${RESET} <time>   Pause all notifications (30m, 2h, off, status)
     ${GREEN}spinner${RESET} <cmd>   Animated tmux running indicator (on, off, status, delegated)
     ${GREEN}badge-visible${RESET} <cmd>  Badge the focused tmux window too (on, off, status)
+    ${GREEN}sessions-line${RESET} <cmd>  Extra tmux status line for other sessions (on, off, status, view, current)
     ${GREEN}voice${RESET} <cmd>     Voice notification commands
     ${GREEN}wording${RESET} <cmd>   Banner/voice message wording (banner|voice short|long)
 EOF

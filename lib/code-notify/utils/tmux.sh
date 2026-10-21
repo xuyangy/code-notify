@@ -2718,29 +2718,33 @@ tmux_sessions_line_build_format() {
     local is_current='#{==:#{session_name},#{client_session}}'
     local show_current=0
     tmux_sessions_line_show_current && show_current=1
-    if [[ "$(tmux_sessions_line_view)" == "sessions" ]]; then
-        local win="#I ${spin}#W  "
-        local other="#[bold]▸ #{session_name}#[nobold] #{W:$win} "
-        local current=""
-        (( show_current )) &&
-            current="#[bold]#[underscore]▸ #{session_name}#[nobold]#[nounderscore] #{W:$win} "
-        printf '%s' "#[align=left]#{S:#{?$is_current,$current,$other}}"
-        return 0
-    fi
     # A static running icon is a badge too (clear mode "running"), and the
     # spinner renders only while no badge holds the window, so each window
-    # falls in at most one pass. 💤 TeammateIdle stays out of the attention
-    # pass: the lead agent picks up a parked teammate, not the user.
+    # falls in at most one priority pass. 💤 TeammateIdle stays out of the
+    # attention pass: the lead agent picks up a parked teammate, not the user.
     local badged='#{&&:#{@code_notify_badged_name},#{!=:#{@code_notify_clear_mode},running}}'
     local attention="#{&&:$badged,#{m/r:^($TMUX_SESSIONS_LINE_ATTENTION_ICONS) ,#{@code_notify_badged_name}}}"
     local running="#{||:#{==:#{@code_notify_clear_mode},running},#{!=:$spin,}}"
-    local item="#{session_name}:#I ${spin}#W  "
+    # A window that waits on the user is drawn in bold; running agents are
+    # dimmed so they recede.
+    local attn_on='#[bold]'
+    local attn_off='#[nobold]'
+    if [[ "$(tmux_sessions_line_view)" == "sessions" ]]; then
+        local win=" #{?$attention,$attn_on#I ${spin}#W$attn_off,#I ${spin}#W} "
+        local other="#[bold]#{session_name}#[nobold]:#{W:$win}  "
+        local current=""
+        (( show_current )) &&
+            current="#[bold]#[underscore]#{session_name}#[nobold]#[nounderscore]:#{W:$win}  "
+        printf '%s' "#[align=left] #{S:#{?$is_current,$current,$other}}"
+        return 0
+    fi
+    local item="#{session_name}:#I ${spin}#W"
     local passes=(
-        "#{W:#{?$attention,#[bold]$item#[nobold],}}"
-        "#{W:#{?$attention,,#{?$badged,$item,}}}"
-        "#{W:#{?$running,#[dim]$item#[nodim],}}"
+        "#{W:#{?$attention,$attn_on$item$attn_off  ,}}"
+        "#{W:#{?$attention,,#{?$badged,$item  ,}}}"
+        "#{W:#{?$running,#[dim]$item  #[nodim],}}"
     )
-    local out="#[align=left]" pass
+    local out="#[align=left] " pass
     for pass in "${passes[@]}"; do
         if (( show_current )); then
             out+="#{S:$pass}"

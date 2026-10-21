@@ -160,25 +160,27 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 [[ -n "$client" ]] || fail "control-mode client did not attach"
 # Spinner frames follow the clock; normalize the one fresh spinner item.
+expect_render() {
+    local got
+    got="$(render)"
+    [[ "$got" == "$2" ]] || fail "$1 (got: $got)"
+    pass "$1"
+}
 render() {
     tmux display-message -p -c "$client" "$(tmux_sessions_line_build_format)" |
         sed -E 's/beta:2 [^ ]+ b2/beta:2 SPIN b2/; s/ 2 [^ ]+ b2/ 2 SPIN b2/'
 }
 
-check "priority view: attention, other badges, running; own session left out" \
-    test "$(render)" == '#[align=left]#[bold]beta:0 💬 b0  #[nobold]beta:3 🟢 b3  #[dim]beta:1 🌕 b1  #[nodim]#[dim]beta:2 SPIN b2  #[nodim]'
+expect_render "priority view: attention, other badges, running; own session left out" '#[align=left] #[bold]beta:0 💬 b0#[nobold]  beta:3 🟢 b3  #[dim]beta:1 🌕 b1  #[nodim]#[dim]beta:2 SPIN b2  #[nodim]'
 
 touch "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
-check "priority view with current on adds the attached session" \
-    test "$(render)" == '#[align=left]#[bold]alpha:1 🙋 a1  #[nobold]#[bold]beta:0 💬 b0  #[nobold]alpha:0 🟢 a0  beta:3 🟢 b3  #[dim]beta:1 🌕 b1  #[nodim]#[dim]beta:2 SPIN b2  #[nodim]'
+expect_render "priority view with current on adds the attached session" '#[align=left] #[bold]alpha:1 🙋 a1#[nobold]  #[bold]beta:0 💬 b0#[nobold]  alpha:0 🟢 a0  beta:3 🟢 b3  #[dim]beta:1 🌕 b1  #[nodim]#[dim]beta:2 SPIN b2  #[nodim]'
 rm -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
 
 printf 'sessions\n' > "$TMUX_SESSIONS_LINE_VIEW_FILE"
-check "sessions view lists the other sessions' windows" \
-    test "$(render)" == '#[align=left]#[bold]▸ beta#[nobold] 0 💬 b0  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4   '
+expect_render "sessions view lists the other sessions' windows" '#[align=left] #[bold]beta#[nobold]: #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4   '
 touch "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
-check "sessions view with current on underlines the attached session" \
-    test "$(render)" == '#[align=left]#[bold]#[underscore]▸ alpha#[nobold]#[nounderscore] 0 🟢 a0  1 🙋 a1   #[bold]▸ beta#[nobold] 0 💬 b0  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4   '
+expect_render "sessions view with current on underlines the attached session" '#[align=left] #[bold]#[underscore]alpha#[nobold]#[nounderscore]: 0 🟢 a0  #[bold]1 🙋 a1#[nobold]   #[bold]beta#[nobold]: #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4   '
 rm -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE" "$TMUX_SESSIONS_LINE_VIEW_FILE"
 exec 3>&-
 

@@ -658,6 +658,12 @@ TMUX_DELEGATED_SPINNER_DISABLED_FILE="$HOME/.claude/notifications/tmux-delegated
 TMUX_SESSIONS_LINE_ENABLED_FILE="$HOME/.claude/notifications/tmux-sessions-line-enabled"
 TMUX_SESSIONS_LINE_VIEW_FILE="$HOME/.claude/notifications/tmux-sessions-line-view"
 TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE="$HOME/.claude/notifications/tmux-sessions-line-show-current"
+TMUX_SESSIONS_LINE_AUTO_OFF_FILE="$HOME/.claude/notifications/tmux-sessions-line-auto-off"
+TMUX_SESSIONS_LINE_HOOK_INDEX="${CODE_NOTIFY_TMUX_LINE_HOOK_INDEX:-8472}"
+# How long installing or removing the auto-mode monitors waits for another
+# run to finish. Longer than the per-window lock budget: these runs are rare
+# and a removal that gave up would leave monitors behind.
+TMUX_SESSIONS_LINE_LOCK_TIMEOUT_MS="${CODE_NOTIFY_TMUX_LINE_LOCK_TIMEOUT_MS:-10000}"
 # Badge icons the priority view lists first: the window waits on the user
 # (input or approval, a question, an idle prompt, an error, a rate limit, an
 # unclassified notification). Must match the BADGE_ICON values in notifier.sh.
@@ -2636,6 +2642,9 @@ tmux_spinner_disarm_if_idle() {
 # value and status-format entry are saved so disarm restores exactly what was
 # there. Only the global options are touched; sessions with their own status
 # or status-format keep their layout (cn sessions-line on lists them).
+#
+# Auto mode (default; cn sessions-line auto off disables it) hides the row
+# while it has nothing to list. See tmux_sessions_line_watch_all.
 tmux_sessions_line_enabled() {
     [[ -f "$TMUX_SESSIONS_LINE_ENABLED_FILE" ]]
 }
@@ -2697,16 +2706,17 @@ tmux_sessions_line_heal() {
 }
 
 # Print the names of sessions whose own status or status-format shadows the
-# global options, so the line does not show there.
+# global options, so the line does not show there. A local status that auto
+# mode owns (@code_notify_line_auto) is ours, not an override.
 tmux_sessions_line_local_overrides() {
-    local sid name
-    while IFS='|' read -r sid name; do
+    local sid mine name
+    while IFS='|' read -r sid mine name; do
         [[ -n "$sid" ]] || continue
-        if [[ -n "$(tmux show-options -q -t "$sid" status 2>/dev/null)" ]] ||
-            [[ -n "$(tmux show-options -q -t "$sid" status-format 2>/dev/null)" ]]; then
+        if [[ -n "$(tmux show-options -q -t "$sid" status-format 2>/dev/null)" ]] ||
+            { [[ -z "$mine" ]] && [[ -n "$(tmux show-options -q -t "$sid" status 2>/dev/null)" ]]; }; then
             printf '%s\n' "$name"
         fi
-    done < <(tmux list-sessions -F '#{session_id}|#{session_name}' 2>/dev/null)
+    done < <(tmux list-sessions -F '#{session_id}|#{@code_notify_line_auto}|#{session_name}' 2>/dev/null)
     return 0
 }
 
@@ -2755,9 +2765,145 @@ tmux_sessions_line_build_format() {
     printf '%s' "$out"
 }
 
+tmux_sessions_line_auto_enabled() {
+    [[ ! -f "$TMUX_SESSIONS_LINE_AUTO_OFF_FILE" ]]
+}
+
+# set-hook -B (a format monitor) arrived in tmux 3.8.
+tmux_sessions_line_auto_supported() {
+    [[ "$(tmux list-commands set-hook 2>/dev/null)" == *"-B "* ]]
+}
+
+# The format that is 1 while the line has something to show for session
+# $1: a window in another session (any session with current on) that carries
+# a badge or a live spinner, which is what the priority view lists. The
+# session is a literal ID because a monitor has no client, so client_session
+# is empty there.
+tmux_sessions_line_has_content_format() {
+    local sid="$1" spin='#{E:@code_notify_spinner_snip}'
+    local badged='#{&&:#{@code_notify_badged_name},#{!=:#{@code_notify_clear_mode},running}}'
+    local running="#{||:#{==:#{@code_notify_clear_mode},running},#{!=:$spin,}}"
+    local windows="#{W:#{?#{||:$badged,$running},1,}}"
+    if tmux_sessions_line_show_current; then
+        printf '%s' "#{?#{S:$windows},1,0}"
+    else
+        printf '%s' "#{?#{S:#{?#{==:#{session_id},$sid},,$windows}},1,0}"
+    fi
+}
+
+# Auto mode: give each session a session-local status that shows the row only
+# while tmux_sessions_line_has_content_format is 1. A tmux 3.8 format monitor
+# (set-hook -B) re-evaluates it about once a second inside tmux and rewrites
+# the status when it flips, so no process runs per check and a spinner that
+# expires without any event is caught too. A monitor does not fire when it is
+# installed, so the current value is written here first. Sessions created
+# later get theirs from a session-created hook. A session with its own
+# status from before (not marked @code_notify_line_auto) is left alone, and
+# so is one with its own status-format, whose row is not ours to show; a
+# session that gains one after it was marked is released. With the line off,
+# auto off, or on an older tmux, the monitors are removed and the line
+# follows the global status again.
+#
+# Installing and removing run under one server-wide lock (the running
+# transition lock, keyed "sessions-line"), so a session-created hook, an
+# explicit command and cn sessions-line off never interleave; each run reads
+# the settings fresh inside the lock. The lock is taken only here, never on a
+# monitor sample. Returns 1 when the lock stays busy past
+# TMUX_SESSIONS_LINE_LOCK_TIMEOUT_MS, so a command can say nothing changed.
+tmux_sessions_line_watch_all() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local lock token
+    TMUX_RUNNING_LOCK_TIMEOUT_MS="$TMUX_SESSIONS_LINE_LOCK_TIMEOUT_MS" \
+        tmux_running_transition_lock_acquire sessions-line || return 1
+    lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    tmux_sessions_line_watch_locked
+    tmux_running_transition_lock_release "$lock" "$token"
+    return 0
+}
+
+tmux_sessions_line_watch_locked() {
+    local idx shown hidden sid mine has guard cmd q_lib inner
+    idx=$(tmux show-options -gqv @code_notify_line_index 2>/dev/null)
+    if ! [[ "$idx" =~ ^[1-4]$ ]] || ! tmux_sessions_line_enabled ||
+        ! tmux_sessions_line_auto_enabled || ! tmux_sessions_line_auto_supported; then
+        tmux_sessions_line_unwatch_locked
+        return 0
+    fi
+    shown=$((idx + 1))
+    hidden=$(tmux show-options -gqv @code_notify_line_saved_status 2>/dev/null)
+    [[ "$hidden" =~ ^(on|[2-4])$ ]] || hidden=on
+    q_lib=$(tmux_focus_shell_quote "$TMUX_BADGE_LIB_PATH")
+    inner="if [ -f $q_lib ]; then bash $q_lib sessions-line-watch; fi"
+    tmux set-hook -g "session-created[$TMUX_SESSIONS_LINE_HOOK_INDEX]" \
+        "run-shell -b $(tmux_focus_cmd_quote "$inner")" 2>/dev/null
+    while IFS='|' read -r sid mine; do
+        [[ -n "$sid" ]] || continue
+        if [[ -n "$(tmux show-options -q -t "$sid" status-format 2>/dev/null)" ]]; then
+            [[ -z "$mine" ]] || tmux_sessions_line_release "$sid"
+            continue
+        fi
+        if [[ -z "$mine" ]] && [[ -n "$(tmux show-options -qv -t "$sid" status 2>/dev/null)" ]]; then
+            continue
+        fi
+        has=$(tmux_sessions_line_has_content_format "$sid")
+        # A delayed re-apply can outlive a release or a move of the line to
+        # another row, so the command checks, when it runs, that the session
+        # is still ours and the line still sits at this row.
+        guard="#{&&:#{@code_notify_line_auto},#{==:#{@code_notify_line_index},$idx}}"
+        # Single quotes keep tmux from expanding the $N session ID as a variable.
+        cmd="if-shell -F -t '$sid' '$guard' { set-option -t '$sid' -F status '#{?$has,$shown,$hidden}' }"
+        tmux set-option -t "$sid" @code_notify_line_auto 1 2>/dev/null
+        tmux set-hook -t "$sid" -B "@code_notify_line::$has" "$cmd" 2>/dev/null
+        tmux set-option -t "$sid" -F status "#{?$has,$shown,$hidden}" 2>/dev/null
+        # The monitor's first sample, about a second from now, is its
+        # baseline: a change before then would never fire it. Re-apply once
+        # after that sample, as a tmux command (-C), so no process runs.
+        # run-shell expands formats when it is called, so every # is doubled
+        # to leave the guard and the status for the delayed run.
+        tmux run-shell -b -d 2 -t "$sid" -C "${cmd//#/##}" 2>/dev/null
+    done < <(tmux list-sessions -F '#{session_id}|#{@code_notify_line_auto}' 2>/dev/null)
+    return 0
+}
+
+# Give up auto mode for one session: the marker first, which voids its
+# monitor and a pending delayed re-apply, then the monitor and the local
+# status it owns.
+tmux_sessions_line_release() {
+    local sid="$1"
+    tmux set-option -t "$sid" -u @code_notify_line_auto 2>/dev/null
+    tmux set-hook -t "$sid" -u @code_notify_line 2>/dev/null
+    tmux set-option -t "$sid" -u status 2>/dev/null
+    return 0
+}
+
+# Remove the auto-mode monitors and the session-local status they own.
+tmux_sessions_line_unwatch_all() {
+    { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
+    local lock token
+    TMUX_RUNNING_LOCK_TIMEOUT_MS="$TMUX_SESSIONS_LINE_LOCK_TIMEOUT_MS" \
+        tmux_running_transition_lock_acquire sessions-line || return 1
+    lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    tmux_sessions_line_unwatch_locked
+    tmux_running_transition_lock_release "$lock" "$token"
+    return 0
+}
+
+tmux_sessions_line_unwatch_locked() {
+    local sid mine
+    tmux set-hook -gu "session-created[$TMUX_SESSIONS_LINE_HOOK_INDEX]" 2>/dev/null
+    while IFS='|' read -r sid mine; do
+        [[ -n "$mine" ]] || continue
+        tmux_sessions_line_release "$sid"
+    done < <(tmux list-sessions -F '#{session_id}|#{@code_notify_line_auto}' 2>/dev/null)
+    return 0
+}
+
 # Install the line and make it visible: the explicit cn sessions-line on, and
-# the first install on a new server. Returns 1 when there is no room: status
-# is off, or all five status lines are already in use.
+# the first install on a new server. In auto mode it then shows only while it
+# has something to list. Returns 1 when there is no room: status is off, or
+# all five status lines are already in use.
 tmux_sessions_line_arm() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
     local fmt idx installed status lines cur
@@ -2780,6 +2926,7 @@ tmux_sessions_line_arm() {
             if (( lines <= idx )); then
                 tmux set-option -g status "$((idx + 1))" 2>/dev/null
             fi
+            tmux_sessions_line_watch_all
             return 0
         fi
         # The row no longer holds our line: a config reload brought a new
@@ -2810,17 +2957,21 @@ tmux_sessions_line_arm() {
     tmux set-option -g @code_notify_line_index "$idx" 2>/dev/null
     tmux set-option -g "status-format[$idx]" "$fmt" 2>/dev/null
     tmux set-option -g status "$((idx + 1))" 2>/dev/null
+    tmux_sessions_line_watch_all
     return 0
 }
 
 # Undo tmux_sessions_line_arm. The format entry and the status value are
 # restored only while they still hold what arm wrote, so a value the user
-# changed since wins. No-op when not armed.
+# changed since wins. Leftover auto-mode monitors are removed even when the
+# line is no longer armed. Returns 1 when they could not be removed (the
+# lock stayed busy); the rest of the line is still taken down.
 tmux_sessions_line_disarm() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
-    local idx installed cur saved
+    local idx installed cur saved unwatched=0
+    tmux_sessions_line_unwatch_all || unwatched=1
     idx=$(tmux show-options -gqv @code_notify_line_index 2>/dev/null)
-    [[ "$idx" =~ ^[1-4]$ ]] || return 0
+    [[ "$idx" =~ ^[1-4]$ ]] || return "$unwatched"
     installed=$(tmux show-options -gqv @code_notify_line_fmt 2>/dev/null)
     cur=$(tmux show-options -gv "status-format[$idx]" 2>/dev/null)
     if [[ "$cur" == "${installed:-$(tmux_sessions_line_build_format)}" ]]; then
@@ -2840,7 +2991,7 @@ tmux_sessions_line_disarm() {
     tmux set-option -gu @code_notify_line_fmt 2>/dev/null
     tmux set-option -gu @code_notify_line_saved_format 2>/dev/null
     tmux set-option -gu @code_notify_line_saved_status 2>/dev/null
-    return 0
+    return "$unwatched"
 }
 
 # A run generation: one value unique to a single turn start. @code_notify_running
@@ -4503,6 +4654,8 @@ tmux_badge_build_clear_command() {
 #   - badge-clear-current: the UserPromptSubmit hook clearing this window's badge
 #   - badge-clear-window: a notification click clearing a resolved window id
 #   - running-sweep: the scheduled stale-marker timer (tmux_running_schedule_sweep)
+#   - sessions-line-watch: the session-created hook giving a new session its
+#     sessions-line monitor
 # Sourcing — the normal path, where BASH_SOURCE[0] differs from $0 — skips this.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     case "${1:-}" in
@@ -4516,5 +4669,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
         agent-exit-sweep) tmux_agent_exit_sweep ;;
         resume-poll) tmux_resume_poll_sweep ;;
         running-sweep) tmux_running_sweep_stale ;;
+        sessions-line-watch) tmux_sessions_line_watch_all ;;
     esac
 fi

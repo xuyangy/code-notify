@@ -1612,14 +1612,17 @@ handle_sessions_line_command() {
             fi
             success "tmux sessions line enabled"
             echo "  An extra status line lists the other sessions' windows with their badges and spinners."
+            if tmux_sessions_line_auto_enabled; then
+                echo "  It shows only while another session has a badge or a running agent (cn sessions-line auto off: always)."
+            fi
             if [[ -n "$shadowed" ]]; then
                 warning "These sessions set their own status or status-format and will not show the line: $shadowed"
             fi
             ;;
         "off")
             rm -f "$TMUX_SESSIONS_LINE_ENABLED_FILE"
-            if [[ -n "${TMUX:-}" ]]; then
-                tmux_sessions_line_disarm 2>/dev/null || true
+            if [[ -n "${TMUX:-}" ]] && ! tmux_sessions_line_disarm 2>/dev/null; then
+                warning "Another sessions-line update was still running, so some sessions may keep their auto-hide. Run 'cn sessions-line off' again."
             fi
             success "tmux sessions line disabled"
             ;;
@@ -1671,11 +1674,40 @@ handle_sessions_line_command() {
             esac
             if [[ -n "${TMUX:-}" ]]; then
                 tmux_sessions_line_refresh 2>/dev/null || true
+                tmux_sessions_line_watch_all 2>/dev/null || true
             fi
             if tmux_sessions_line_show_current; then
                 echo "tmux sessions line, attached session: ${GREEN}shown${RESET}"
             else
                 echo "tmux sessions line, attached session: ${DIM}left out${RESET} (your normal status line shows it)"
+            fi
+            ;;
+        "auto")
+            case "${2:-status}" in
+                "on")
+                    rm -f "$TMUX_SESSIONS_LINE_AUTO_OFF_FILE"
+                    ;;
+                "off")
+                    mkdir -p "$(dirname "$TMUX_SESSIONS_LINE_AUTO_OFF_FILE")"
+                    touch "$TMUX_SESSIONS_LINE_AUTO_OFF_FILE"
+                    ;;
+                "status")
+                    ;;
+                *)
+                    error "Unknown sessions-line auto command: $2"
+                    echo "Usage: cn sessions-line auto [on|off|status]"
+                    return 1
+                    ;;
+            esac
+            if [[ -n "${TMUX:-}" ]] && ! tmux_sessions_line_watch_all 2>/dev/null; then
+                warning "The setting is saved, but another sessions-line update was still running, so tmux is not updated yet. Run 'cn sessions-line auto ${2:-status}' again."
+            fi
+            if ! tmux_sessions_line_auto_enabled; then
+                echo "tmux sessions line, auto hide: ${DIM}off${RESET} (the line follows your status setting)"
+            elif [[ -n "${TMUX:-}" ]] && ! tmux_sessions_line_auto_supported; then
+                echo "tmux sessions line, auto hide: ${YELLOW}on, but needs tmux 3.8${RESET} (the line follows your status setting)"
+            else
+                echo "tmux sessions line, auto hide: ${GREEN}on${RESET} (shown only while another session has a badge or a running agent)"
             fi
             ;;
         "status")
@@ -1687,7 +1719,7 @@ handle_sessions_line_command() {
             ;;
         *)
             error "Unknown sessions-line command: $action"
-            echo "Usage: cn sessions-line [on|off|status|view priority|sessions|current on|off]"
+            echo "Usage: cn sessions-line [on|off|status|view priority|sessions|current on|off|auto on|off]"
             return 1
             ;;
     esac

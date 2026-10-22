@@ -192,6 +192,144 @@ check "refresh swaps the installed row to the new view" \
 rm -f "$TMUX_SESSIONS_LINE_VIEW_FILE"
 tmux_sessions_line_disarm
 
+# --- auto hide: shown only while there is something to list -----------------
+
+if tmux_sessions_line_auto_supported; then
+    touch "$TMUX_SESSIONS_LINE_ENABLED_FILE"
+    lopt() { tmux show-options -qv -t "$1" "$2" 2>/dev/null; }
+    monitor() { tmux show-hooks -t "$1" 2>/dev/null | grep -c '^@code_notify_line ' || true; }
+    # A monitor samples about once a second; give it a few samples.
+    wait_for() {
+        local _
+        for _ in $(seq 1 20); do
+            [[ "$(lopt "$1" status)" == "$2" ]] && return 0
+            sleep 0.3
+        done
+        return 1
+    }
+    unbadge() {
+        tmux set-option -w -t "$1" -u @code_notify_badged_name
+        tmux set-option -w -t "$1" -u @code_notify_orig_name
+        tmux set-option -w -t "$1" -u @code_notify_clear_mode
+        tmux set-option -w -t "$1" -u @code_notify_running
+    }
+
+    tmux_sessions_line_arm
+    check "auto: each session gets a monitor and its own status" \
+        test "$(monitor alpha)" == 1 -a "$(monitor beta)" == 1 -a "$(lopt alpha status)" == 2 -a "$(lopt beta status)" == 2
+
+    unbadge alpha:0
+    unbadge alpha:1
+    check "auto: the line hides once the other sessions have nothing to list" wait_for beta on
+    check "auto: a session whose others still have content keeps it" test "$(lopt alpha status)" == 2
+
+    tmux set-option -w -t alpha:0 @code_notify_running "$(( $(date +%s) - TMUX_RUNNING_TTL + 2 ))"
+    check "auto: a live spinner in another session shows the line" wait_for beta 2
+    check "auto: an expiring spinner hides it again with no event" wait_for beta on
+    unbadge alpha:0
+
+    tmux new-session -d -s gamma
+    check "auto: a new session gets its own monitor" wait_for gamma 2
+    check "auto: ... and it is marked as ours" test "$(lopt gamma @code_notify_line_auto)" == 1
+    tmux kill-session -t gamma
+
+    touch "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
+    tmux_sessions_line_watch_all
+    check "auto with current on counts the session's own windows" \
+        test "$(lopt alpha status)" == 2 -a "$(lopt beta status)" == 2
+    rm -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
+    tmux_sessions_line_watch_all
+
+    tmux_sessions_line_unwatch_all
+    tmux set-option -t beta status 3
+    tmux_sessions_line_watch_all
+    check "auto: a session with its own status from before is left alone" \
+        test "$(lopt beta status)" == 3 -a "$(monitor beta)" == 0
+    tmux set-option -t beta -u status
+    tmux_sessions_line_watch_all
+    check "auto-owned session status is not reported as an override" \
+        test -z "$(tmux_sessions_line_local_overrides)"
+
+    tmux_sessions_line_unwatch_all
+    tmux set-option -t beta 'status-format[1]' CUSTOM
+    tmux_sessions_line_watch_all
+    check "auto: a session with its own status-format is left alone" \
+        test "$(monitor beta)" == 0 -a -z "$(lopt beta status)" -a -z "$(lopt beta @code_notify_line_auto)"
+    check "... and is reported as an override" test "$(tmux_sessions_line_local_overrides)" == beta
+    tmux set-option -t beta -u status-format
+    tmux_sessions_line_watch_all
+
+    tmux set-option -t beta 'status-format[1]' CUSTOM
+    check "a marked session that gains its own status-format is reported" \
+        test "$(tmux_sessions_line_local_overrides)" == beta
+    tmux_sessions_line_watch_all
+    check "auto: ... and is released by the next watch" \
+        test "$(monitor beta)" == 0 -a -z "$(lopt beta status)" -a -z "$(lopt beta @code_notify_line_auto)" -a "$(monitor alpha)" == 1
+    tmux set-option -t beta -u status-format
+    tmux_sessions_line_watch_all
+
+    touch "$TMUX_SESSIONS_LINE_AUTO_OFF_FILE"
+    tmux_sessions_line_watch_all
+    check "auto off removes the monitors and the session status" \
+        test "$(monitor alpha)" == 0 -a -z "$(lopt alpha status)" -a -z "$(lopt alpha @code_notify_line_auto)" -a "$(opt status)" == 2
+    check "auto off removes the session-created hook" \
+        test -z "$(tmux show-hooks -g session-created 2>/dev/null | grep -F "[$TMUX_SESSIONS_LINE_HOOK_INDEX]" || true)"
+    rm -f "$TMUX_SESSIONS_LINE_AUTO_OFF_FILE"
+
+    # A monitor checks, when it fires, that its session is still ours and the
+    # line still sits at its row. alpha is empty here, so beta's line is
+    # hidden until alpha gets a badge.
+    tmux_sessions_line_watch_all
+    check "auto: beta hidden while alpha is empty" wait_for beta on
+    tmux set-option -g @code_notify_line_index 3
+    badge alpha:0 💬 a0
+    sleep 2.5
+    check "auto: a monitor does nothing after the line moved" test "$(lopt beta status)" == on
+    unbadge alpha:0
+    tmux set-option -g @code_notify_line_index 1
+
+    # Installing and removing take turns under one lock.
+    tmux_running_transition_lock_acquire sessions-line
+    held_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    held_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    tmux_sessions_line_unwatch_all &
+    unwatch_pid=$!
+    sleep 0.5
+    check "auto: removal waits while another run holds the lock" test "$(monitor beta)" == 1
+    tmux_running_transition_lock_release "$held_lock" "$held_token"
+    wait "$unwatch_pid"
+    check "auto: ... and runs once the lock is free" test "$(monitor beta)" == 0
+
+    # A removal that cannot get the lock in time reports it instead of
+    # claiming the monitors are gone.
+    tmux_sessions_line_watch_all
+    tmux_running_transition_lock_acquire sessions-line
+    held_lock="$TMUX_RUNNING_TRANSITION_LOCKDIR"
+    held_token="$TMUX_RUNNING_TRANSITION_LOCKTOKEN"
+    unwatch_rc=0
+    TMUX_SESSIONS_LINE_LOCK_TIMEOUT_MS=300 tmux_sessions_line_unwatch_all || unwatch_rc=$?
+    check "auto: a removal that times out returns failure" \
+        test "$unwatch_rc" == 1 -a "$(monitor beta)" == 1
+    tmux_running_transition_lock_release "$held_lock" "$held_token"
+    tmux_sessions_line_unwatch_all
+    check "auto: ... and a retry removes the monitors" test "$(monitor beta)" == 0
+
+    tmux_sessions_line_watch_all
+    tmux_sessions_line_disarm
+    check "disarm removes the monitors and the session status" \
+        test "$(monitor beta)" == 0 -a -z "$(lopt beta status)" -a "$(opt status)" == on
+
+    tmux_sessions_line_arm
+    tmux set-option -gu @code_notify_line_index
+    tmux_sessions_line_disarm
+    check "disarm removes leftover monitors when the line is gone" \
+        test "$(monitor alpha)" == 0 -a "$(monitor beta)" == 0 -a -z "$(lopt beta @code_notify_line_auto)"
+    tmux set-option -g status on
+    rm -f "$TMUX_SESSIONS_LINE_ENABLED_FILE"
+else
+    echo "SKIP: auto hide needs tmux 3.8 (set-hook -B)"
+fi
+
 # --- attention icons match the notifier ---------------------------------------
 
 notifier_icons="$(grep -o 'BADGE_ICON="[^"]*"' "$ROOT_DIR/lib/code-notify/core/notifier.sh" | cut -d'"' -f2)"

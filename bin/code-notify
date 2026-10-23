@@ -42,7 +42,7 @@ show_main_help() {
 case "$COMMAND_NAME" in
     "cn")
         # Called as 'cn' - handle global commands directly
-        case "${1:-status}" in
+        case "${1:-help}" in
             "help"|"-h"|"--help")
                 show_main_help
                 ;;
@@ -72,6 +72,10 @@ case "$COMMAND_NAME" in
     
     "cnp")
         # Called as 'cnp' - handle project commands directly
+        if [[ $# -eq 0 ]]; then
+            show_main_help
+            exit 0
+        fi
         source "$LIB_DIR/commands/project.sh"
         handle_project_command "$@"
         ;;
@@ -102,6 +106,10 @@ case "$COMMAND_NAME" in
                 ;;
             "project")
                 shift
+                if [[ $# -eq 0 ]]; then
+                    show_main_help
+                    exit 0
+                fi
                 source "$LIB_DIR/commands/project.sh"
                 handle_project_command "$@"
                 ;;

@@ -212,17 +212,17 @@ expect_render() {
 }
 render() {
     tmux display-message -p -c "$client" "$(tmux_sessions_line_build_format)" |
-        sed -E 's/ 2 [^ ]+ b2/ 2 SPIN b2/; s/#\[(range=[^]]*|norange)\]//g'
+        sed -E 's/( 2|▸) [^ ]+ b2/\1 SPIN b2/; s/#\[(range=[^]]*|norange)\]//g'
 }
 
-chip() { printf '#[reverse] %s #[noreverse]' "$1"; }
-A="$(chip alpha)"
-B="$(chip beta)"
-expect_render "priority view: attention, other badges, running; own session left out" "#[align=left] #[bold]$B 0 💬 b0#[nobold]  $B 3 🟢 b3  #[dim]$B 1 🌕 b1  #[nodim]#[dim]$B 2 SPIN b2  #[nodim]"
+at() { printf '#[italics]%s#[noitalics] ▸' "$1"; }
+D=' #[fg=brightblack]|#[fg=default] '
+B="$(at beta)"
+expect_render "priority view: attention, other badges, running; own session left out" "#[align=left] #[bold]$(at beta:0) 💬 b0#[nobold]$D$(at beta:3) 🟢 b3$D#[dim]$(at beta:1) 🌕 b1#[nodim]$D#[dim]$(at beta:2) SPIN b2#[nodim]$D"
 
 b0_id="$(tmux display-message -p -t beta:0 '#{session_id}:#{window_id}')"
 check "each priority item is a click range for its session and window" \
-    grep -qF "#[range=user|cn$b0_id]#[reverse] beta #[noreverse] 0 " <<< "$(tmux display-message -p -c "$client" "$(tmux_sessions_line_build_format)")"
+    grep -qF "#[range=user|cn$b0_id]#[italics]beta:0#[noitalics] ▸ 💬 b0" <<< "$(tmux display-message -p -c "$client" "$(tmux_sessions_line_build_format)")"
 
 printf 'right\n' > "$TMUX_SESSIONS_LINE_ALIGN_FILE"
 check "align right" test "$(tmux_sessions_line_build_format | cut -c1-15)" == '#[align=right] '
@@ -233,13 +233,13 @@ check "an unknown alignment falls back to left" test "$(tmux_sessions_line_align
 rm -f "$TMUX_SESSIONS_LINE_ALIGN_FILE"
 
 touch "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
-expect_render "priority view with current on adds the attached session" "#[align=left] #[bold]$A 1 🙋 a1#[nobold]  #[bold]$B 0 💬 b0#[nobold]  $A 0 🟢 a0  $B 3 🟢 b3  #[dim]$B 1 🌕 b1  #[nodim]#[dim]$B 2 SPIN b2  #[nodim]"
+expect_render "priority view with current on adds the attached session" "#[align=left] #[bold]$(at alpha:1) 🙋 a1#[nobold]$D#[bold]$(at beta:0) 💬 b0#[nobold]$D$(at alpha:0) 🟢 a0$D$(at beta:3) 🟢 b3$D#[dim]$(at beta:1) 🌕 b1#[nodim]$D#[dim]$(at beta:2) SPIN b2#[nodim]$D"
 rm -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
 
 printf 'sessions\n' > "$TMUX_SESSIONS_LINE_VIEW_FILE"
-expect_render "sessions view lists the other sessions' windows" "#[align=left] $B #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4   "
+expect_render "sessions view lists the other sessions' windows" "#[align=left] $B #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4$D"
 touch "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
-expect_render "sessions view with current on underlines the attached session" "#[align=left] #[underscore]$A#[nounderscore] 0 🟢 a0  #[bold]1 🙋 a1#[nobold]   $B #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4   "
+expect_render "sessions view with current on underlines the attached session" "#[align=left] #[underscore]#[italics]alpha#[noitalics]#[nounderscore] ▸ 0 🟢 a0  #[bold]1 🙋 a1#[nobold]$D$B #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4$D"
 rm -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE" "$TMUX_SESSIONS_LINE_VIEW_FILE"
 exec 3>&-
 
@@ -397,5 +397,7 @@ for icon in "${attention_icons[@]}"; do
     grep -qxF "$icon" <<< "$notifier_icons" || fail "attention icon $icon is not a notifier badge icon"
 done
 pass "every attention icon is a notifier badge icon"
+check "idle 🥱 is not an attention icon, like 🟢" \
+    test "${TMUX_SESSIONS_LINE_ATTENTION_ICONS//🥱/}" == "$TMUX_SESSIONS_LINE_ATTENTION_ICONS"
 
 echo "All tmux sessions line tests passed"

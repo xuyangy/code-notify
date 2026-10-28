@@ -670,9 +670,10 @@ TMUX_SESSIONS_LINE_HOOK_INDEX="${CODE_NOTIFY_TMUX_LINE_HOOK_INDEX:-8472}"
 # and a removal that gave up would leave monitors behind.
 TMUX_SESSIONS_LINE_LOCK_TIMEOUT_MS="${CODE_NOTIFY_TMUX_LINE_LOCK_TIMEOUT_MS:-10000}"
 # Badge icons the priority view lists first: the window waits on the user
-# (input or approval, a question, an idle prompt, an error, a rate limit, an
-# unclassified notification). Must match the BADGE_ICON values in notifier.sh.
-TMUX_SESSIONS_LINE_ATTENTION_ICONS='💬|🙋|🥱|🧨|⏳|📢'
+# (input or approval, a question, an error, a rate limit, an unclassified
+# notification). 🥱 idle is left out: it is a finished turn, like 🟢, not a
+# request. Must match the BADGE_ICON values in notifier.sh.
+TMUX_SESSIONS_LINE_ATTENTION_ICONS='💬|🙋|🧨|⏳|📢'
 # Opt-in trace of window badge and running-marker transitions, for diagnosing
 # a window whose name and badge state disagree. Off unless the flag file
 # exists; when off it costs one stat per transition. Once the log passes
@@ -2639,13 +2640,18 @@ tmux_spinner_disarm_if_idle() {
 # need the user (TMUX_SESSIONS_LINE_ATTENTION_ICONS), then other badges, then
 # running agents. "sessions" lists every window, session by session. The
 # client's own session is left out unless cn sessions-line current on. The
-# session name is drawn as a reverse-video chip so it stands apart from the
-# window name, and cn sessions-line align places the line left, centre or
-# right.
+# window's place is drawn in italics and followed by "▸" (session:index in
+# the priority view, the session name in the sessions view) so it stands
+# apart from the window name. A "|" follows each item in the priority view
+# and each session in the sessions view, in the terminal theme's muted grey
+# (brightblack): dim alone still shows clearly in terminals that draw it as
+# half opacity. No pass knows whether another item follows it, so the last
+# one is followed by a divider too. cn sessions-line align places the line
+# left, centre or right.
 #
 # Clicking a window item switches to that window in the session it is listed
 # under (see tmux_sessions_line_click_bind); in the sessions view, clicking a
-# session chip switches to that session.
+# session name switches to that session.
 #
 # Bookkeeping: @code_notify_line_index is the status-format index the line
 # occupies (the first one past the user's existing lines) and
@@ -2723,7 +2729,7 @@ tmux_sessions_line_refresh() {
 # switch-client to its target, and any other click runs the binding that was
 # there before, which is saved for tmux_sessions_line_click_unbind. A window
 # item's target names the session too (cn$1:@4), because a window linked into
-# several sessions has one window ID; a session chip's is the session alone
+# several sessions has one window ID; a session name's is the session alone
 # (cn$1). run-shell -C expands the target into the command, since a -t target
 # is not a format, and the target is quoted so tmux does not read $1 as an
 # environment variable. Runs on arm and when our
@@ -2824,7 +2830,8 @@ tmux_sessions_line_build_format() {
     # dimmed so they recede.
     local attn_on='#[bold]'
     local attn_off='#[nobold]'
-    local chip='#[reverse] #{session_name} #[noreverse]'
+    local session='#[italics]#{session_name}#[noitalics] ▸'
+    local div=' #[fg=brightblack]|#[fg=default] '
     local click_on='#[range=user|cn#{session_id}:#{window_id}]'
     local click_off='#[norange]'
     local align
@@ -2832,18 +2839,19 @@ tmux_sessions_line_build_format() {
     if [[ "$(tmux_sessions_line_view)" == "sessions" ]]; then
         local win="$click_on #{?$attention,$attn_on#I ${spin}#W$attn_off,#I ${spin}#W} $click_off"
         local session_on='#[range=user|cn#{session_id}]'
-        local other="$session_on$chip$click_off#{W:$win}  "
+        # Each window already ends with a space.
+        local other="$session_on$session$click_off#{W:$win}${div# }"
         local current=""
         (( show_current )) &&
-            current="$session_on#[underscore]$chip#[nounderscore]$click_off#{W:$win}  "
+            current="$session_on#[underscore]#[italics]#{session_name}#[noitalics]#[nounderscore] ▸$click_off#{W:$win}${div# }"
         printf '%s' "#[align=$align] #{S:#{?$is_current,$current,$other}}"
         return 0
     fi
-    local item="$click_on$chip #I ${spin}#W$click_off"
+    local item="$click_on#[italics]#{session_name}:#I#[noitalics] ▸ ${spin}#W$click_off"
     local passes=(
-        "#{W:#{?$attention,$attn_on$item$attn_off  ,}}"
-        "#{W:#{?$attention,,#{?$badged,$item  ,}}}"
-        "#{W:#{?$running,#[dim]$item  #[nodim],}}"
+        "#{W:#{?$attention,$attn_on$item$attn_off$div,}}"
+        "#{W:#{?$attention,,#{?$badged,$item$div,}}}"
+        "#{W:#{?$running,#[dim]$item#[nodim]$div,}}"
     )
     local out="#[align=$align] " pass
     for pass in "${passes[@]}"; do

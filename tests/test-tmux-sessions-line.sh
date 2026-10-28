@@ -87,6 +87,49 @@ check "arm adopts a line a concurrent arm installed" \
     test "$(opt status)" == 2 -a "$(opt @code_notify_line_index)" == 1 -a "$(opt @code_notify_line_saved_format)" == "$orig_row1"
 tmux_sessions_line_disarm
 
+# --- click binding -------------------------------------------------------------
+
+if tmux list-keys -T root -F '#{key_command}' > /dev/null 2>&1; then
+    key() { tmux list-keys -T root -F '#{key_command}' MouseDown1Status 2>/dev/null; }
+    orig_click="$(key)"
+    tmux_sessions_line_arm
+    wrapped="$(key)"
+    check "arm wraps the click binding" grep -qF "$TMUX_SESSIONS_LINE_CLICK_COND" <<< "$wrapped"
+    check "... keeping the old binding for other clicks" grep -qF "{ $orig_click }" <<< "$wrapped"
+    tmux_sessions_line_arm
+    check "a second arm does not wrap it twice" test "$(key)" == "$wrapped"
+    tmux_sessions_line_disarm
+    check "disarm restores the click binding" test "$(key)" == "$orig_click"
+
+    printf '%s\n' 'bind-key -n MouseDown1Status display-message "a b" \; select-window -t =' | tmux source-file -
+    compound="$(key)"
+    tmux_sessions_line_arm
+    check "a multi-command binding is wrapped" grep -qF '{ display-message "a b" ; select-window -t = }' <<< "$(key)"
+    tmux_sessions_line_disarm
+    check "... and restored intact" test "$(key)" == "$compound"
+
+    tmux unbind-key -n MouseDown1Status
+    tmux_sessions_line_arm
+    tmux_sessions_line_disarm
+    check "with no binding before, disarm leaves none" test -z "$(key)"
+
+    tmux_sessions_line_arm
+    tmux bind-key -n MouseDown1Status select-window -t =
+    tmux_sessions_line_disarm
+    check "disarm keeps a binding the user replaced" test "$(key)" == "select-window -t ="
+
+    # Nested braces, a quoted ";", a quoted "\;" and a quoted format.
+    printf '%s\n' "bind-key -n MouseDown1Status if -F 1 { display a ; display \"b;c\" } \; display 'x \; y' \; display '#{session_name}'" |
+        tmux source-file -
+    compound="$(key)"
+    tmux_sessions_line_arm
+    check "a nested binding is wrapped as one block" \
+        grep -qF '{ if-shell -F 1 { display-message a ; display-message "b;c" } ; display-message "x \\; y" ; display-message "#{session_name}" }' <<< "$(key)"
+    tmux_sessions_line_disarm
+    check "... and restored intact" test "$(key)" == "$compound"
+    printf 'bind-key -n MouseDown1Status %s\n' "$orig_click" | tmux source-file -
+fi
+
 tmux set-option -t beta status on
 check "sessions with their own status are reported" \
     test "$(tmux_sessions_line_local_overrides)" == beta
@@ -160,6 +203,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 [[ -n "$client" ]] || fail "control-mode client did not attach"
 # Spinner frames follow the clock; normalize the one fresh spinner item.
+# Click ranges are checked on their own below, so render drops them.
 expect_render() {
     local got
     got="$(render)"
@@ -168,19 +212,34 @@ expect_render() {
 }
 render() {
     tmux display-message -p -c "$client" "$(tmux_sessions_line_build_format)" |
-        sed -E 's/beta:2 [^ ]+ b2/beta:2 SPIN b2/; s/ 2 [^ ]+ b2/ 2 SPIN b2/'
+        sed -E 's/ 2 [^ ]+ b2/ 2 SPIN b2/; s/#\[(range=[^]]*|norange)\]//g'
 }
 
-expect_render "priority view: attention, other badges, running; own session left out" '#[align=left] #[bold]beta:0 💬 b0#[nobold]  beta:3 🟢 b3  #[dim]beta:1 🌕 b1  #[nodim]#[dim]beta:2 SPIN b2  #[nodim]'
+chip() { printf '#[reverse] %s #[noreverse]' "$1"; }
+A="$(chip alpha)"
+B="$(chip beta)"
+expect_render "priority view: attention, other badges, running; own session left out" "#[align=left] #[bold]$B 0 💬 b0#[nobold]  $B 3 🟢 b3  #[dim]$B 1 🌕 b1  #[nodim]#[dim]$B 2 SPIN b2  #[nodim]"
+
+b0_id="$(tmux display-message -p -t beta:0 '#{session_id}:#{window_id}')"
+check "each priority item is a click range for its session and window" \
+    grep -qF "#[range=user|cn$b0_id]#[reverse] beta #[noreverse] 0 " <<< "$(tmux display-message -p -c "$client" "$(tmux_sessions_line_build_format)")"
+
+printf 'right\n' > "$TMUX_SESSIONS_LINE_ALIGN_FILE"
+check "align right" test "$(tmux_sessions_line_build_format | cut -c1-15)" == '#[align=right] '
+printf 'centre\n' > "$TMUX_SESSIONS_LINE_ALIGN_FILE"
+check "align centre" test "$(tmux_sessions_line_build_format | cut -c1-16)" == '#[align=centre] '
+printf 'bogus\n' > "$TMUX_SESSIONS_LINE_ALIGN_FILE"
+check "an unknown alignment falls back to left" test "$(tmux_sessions_line_align)" == left
+rm -f "$TMUX_SESSIONS_LINE_ALIGN_FILE"
 
 touch "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
-expect_render "priority view with current on adds the attached session" '#[align=left] #[bold]alpha:1 🙋 a1#[nobold]  #[bold]beta:0 💬 b0#[nobold]  alpha:0 🟢 a0  beta:3 🟢 b3  #[dim]beta:1 🌕 b1  #[nodim]#[dim]beta:2 SPIN b2  #[nodim]'
+expect_render "priority view with current on adds the attached session" "#[align=left] #[bold]$A 1 🙋 a1#[nobold]  #[bold]$B 0 💬 b0#[nobold]  $A 0 🟢 a0  $B 3 🟢 b3  #[dim]$B 1 🌕 b1  #[nodim]#[dim]$B 2 SPIN b2  #[nodim]"
 rm -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
 
 printf 'sessions\n' > "$TMUX_SESSIONS_LINE_VIEW_FILE"
-expect_render "sessions view lists the other sessions' windows" '#[align=left] #[bold]beta#[nobold]: #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4   '
+expect_render "sessions view lists the other sessions' windows" "#[align=left] $B #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4   "
 touch "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
-expect_render "sessions view with current on underlines the attached session" '#[align=left] #[bold]#[underscore]alpha#[nobold]#[nounderscore]: 0 🟢 a0  #[bold]1 🙋 a1#[nobold]   #[bold]beta#[nobold]: #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4   '
+expect_render "sessions view with current on underlines the attached session" "#[align=left] #[underscore]$A#[nounderscore] 0 🟢 a0  #[bold]1 🙋 a1#[nobold]   $B #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4   "
 rm -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE" "$TMUX_SESSIONS_LINE_VIEW_FILE"
 exec 3>&-
 

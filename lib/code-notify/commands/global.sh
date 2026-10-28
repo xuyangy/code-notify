@@ -1655,6 +1655,34 @@ handle_sessions_line_command() {
                 echo "  Every window, session by session."
             fi
             ;;
+        "align")
+            case "${2:-}" in
+                "left")
+                    rm -f "$TMUX_SESSIONS_LINE_ALIGN_FILE"
+                    ;;
+                "centre"|"center"|"right")
+                    mkdir -p "$(dirname "$TMUX_SESSIONS_LINE_ALIGN_FILE")"
+                    if [[ "$2" == "right" ]]; then
+                        printf 'right\n' > "$TMUX_SESSIONS_LINE_ALIGN_FILE"
+                    else
+                        printf 'centre\n' > "$TMUX_SESSIONS_LINE_ALIGN_FILE"
+                    fi
+                    ;;
+                "")
+                    echo "tmux sessions line alignment: $(tmux_sessions_line_align)"
+                    return 0
+                    ;;
+                *)
+                    error "Unknown sessions-line alignment: $2"
+                    echo "Usage: cn sessions-line align [left|centre|right]"
+                    return 1
+                    ;;
+            esac
+            if [[ -n "${TMUX:-}" ]]; then
+                tmux_sessions_line_refresh 2>/dev/null || true
+            fi
+            success "tmux sessions line alignment: $(tmux_sessions_line_align)"
+            ;;
         "current")
             case "${2:-status}" in
                 "on")
@@ -1712,14 +1740,14 @@ handle_sessions_line_command() {
             ;;
         "status")
             if tmux_sessions_line_enabled; then
-                echo "tmux sessions line: ${GREEN}enabled${RESET} (view: $(tmux_sessions_line_view))"
+                echo "tmux sessions line: ${GREEN}enabled${RESET} (view: $(tmux_sessions_line_view), align: $(tmux_sessions_line_align))"
             else
                 echo "tmux sessions line: ${DIM}disabled${RESET}"
             fi
             ;;
         *)
             error "Unknown sessions-line command: $action"
-            echo "Usage: cn sessions-line [on|off|status|view priority|sessions|current on|off|auto on|off]"
+            echo "Usage: cn sessions-line [on|off|status|view priority|sessions|align left|centre|right|current on|off|auto on|off]"
             return 1
             ;;
     esac

@@ -659,6 +659,11 @@ TMUX_SESSIONS_LINE_ENABLED_FILE="$HOME/.claude/notifications/tmux-sessions-line-
 TMUX_SESSIONS_LINE_VIEW_FILE="$HOME/.claude/notifications/tmux-sessions-line-view"
 TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE="$HOME/.claude/notifications/tmux-sessions-line-show-current"
 TMUX_SESSIONS_LINE_AUTO_OFF_FILE="$HOME/.claude/notifications/tmux-sessions-line-auto-off"
+TMUX_SESSIONS_LINE_ALIGN_FILE="$HOME/.claude/notifications/tmux-sessions-line-align"
+# The condition of our MouseDown1Status wrapper: the click landed on one of
+# the line's ranges (range=user|cn<session_id>[:<window_id>]). Also how a
+# binding is recognized as ours.
+TMUX_SESSIONS_LINE_CLICK_COND='#{m:cn$*,#{mouse_status_range}}'
 TMUX_SESSIONS_LINE_HOOK_INDEX="${CODE_NOTIFY_TMUX_LINE_HOOK_INDEX:-8472}"
 # How long installing or removing the auto-mode monitors waits for another
 # run to finish. Longer than the per-window lock budget: these runs are rare
@@ -2633,7 +2638,14 @@ tmux_spinner_disarm_if_idle() {
 # with something to show, across all sessions, in three passes — badges that
 # need the user (TMUX_SESSIONS_LINE_ATTENTION_ICONS), then other badges, then
 # running agents. "sessions" lists every window, session by session. The
-# client's own session is left out unless cn sessions-line current on.
+# client's own session is left out unless cn sessions-line current on. The
+# session name is drawn as a reverse-video chip so it stands apart from the
+# window name, and cn sessions-line align places the line left, centre or
+# right.
+#
+# Clicking a window item switches to that window in the session it is listed
+# under (see tmux_sessions_line_click_bind); in the sessions view, clicking a
+# session chip switches to that session.
 #
 # Bookkeeping: @code_notify_line_index is the status-format index the line
 # occupies (the first one past the user's existing lines) and
@@ -2663,6 +2675,27 @@ tmux_sessions_line_show_current() {
     [[ -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE" ]]
 }
 
+# Set the variable named $1 to the configured alignment. No subshell: the
+# format is built on every prompt.
+tmux_sessions_line_align_get() {
+    # Not named "align": printf -v would set this local, not the caller's.
+    local _cn_align=""
+    if [[ -f "$TMUX_SESSIONS_LINE_ALIGN_FILE" ]]; then
+        IFS= read -r _cn_align < "$TMUX_SESSIONS_LINE_ALIGN_FILE" || true
+    fi
+    case "$_cn_align" in
+        centre|right) ;;
+        *) _cn_align=left ;;
+    esac
+    printf -v "$1" '%s' "$_cn_align"
+}
+
+tmux_sessions_line_align() {
+    local align
+    tmux_sessions_line_align_get align
+    printf '%s' "$align"
+}
+
 # Swap our installed row to the format the current settings build, in place:
 # after an upgrade or a view/current change. A row the user replaced is left
 # alone, and the line's visibility is never changed. A caller that already
@@ -2679,7 +2712,59 @@ tmux_sessions_line_refresh() {
     if [[ "$cur" == "$installed" ]]; then
         tmux set-option -g "status-format[$idx]" "$fmt" 2>/dev/null
         tmux set-option -g @code_notify_line_fmt "$fmt" 2>/dev/null
+        tmux_sessions_line_click_bind
     fi
+    return 0
+}
+
+# Make the line's items clickable. tmux has no status range that targets a
+# window in another session, so each item is a user range and the root
+# MouseDown1Status binding is wrapped: a click on one of our ranges runs
+# switch-client to its target, and any other click runs the binding that was
+# there before, which is saved for tmux_sessions_line_click_unbind. A window
+# item's target names the session too (cn$1:@4), because a window linked into
+# several sessions has one window ID; a session chip's is the session alone
+# (cn$1). run-shell -C expands the target into the command, since a -t target
+# is not a format, and the target is quoted so tmux does not read $1 as an
+# environment variable. Runs on arm and when our
+# row is upgraded, never per prompt; a config reload that rebinds the key
+# wins until the next cn sessions-line on. A no-op where list-keys has no -F
+# (older tmux), and the ranges are then inert.
+#
+# key_command prints the binding in config syntax, so it goes back through
+# source-file. Inside a { } block commands are separated by a bare ";", not
+# the top-level "\;"; a backslash inside a quoted argument prints doubled, so
+# a " \; " word is always a separator.
+tmux_sessions_line_click_bind() {
+    local cur line
+    if ! cur=$(tmux list-keys -T root -F '#{key_command}' MouseDown1Status 2>&1); then
+        [[ "$cur" == *"unknown key"* ]] || return 0
+        cur=""
+    fi
+    [[ "$cur" != *"$TMUX_SESSIONS_LINE_CLICK_COND"* ]] || return 0
+    line="bind-key -n MouseDown1Status if-shell -F '$TMUX_SESSIONS_LINE_CLICK_COND'"
+    line+=" { run-shell -C \"switch-client -t '#{s/^cn//:mouse_status_range}'\" }"
+    [[ -z "$cur" ]] || line+=" { ${cur// \\; / ; } }"
+    # The old binding is saved before it is replaced. A failed bind leaves the
+    # option behind, which unbind ignores while the binding is not ours.
+    tmux set-option -g @code_notify_line_saved_click "$cur" 2>/dev/null || return 0
+    printf '%s\n' "$line" | tmux source-file - > /dev/null 2>&1
+    return 0
+}
+
+# Undo tmux_sessions_line_click_bind while the binding is still ours.
+tmux_sessions_line_click_unbind() {
+    local cur saved
+    cur=$(tmux list-keys -T root -F '#{key_command}' MouseDown1Status 2>/dev/null) || cur=""
+    if [[ "$cur" == *"$TMUX_SESSIONS_LINE_CLICK_COND"* ]]; then
+        saved=$(tmux show-options -gqv @code_notify_line_saved_click 2>/dev/null)
+        if [[ -n "$saved" ]]; then
+            printf 'bind-key -n MouseDown1Status %s\n' "$saved" | tmux source-file - > /dev/null 2>&1
+        else
+            tmux unbind-key -n MouseDown1Status 2>/dev/null
+        fi
+    fi
+    tmux set-option -gu @code_notify_line_saved_click 2>/dev/null
     return 0
 }
 
@@ -2739,22 +2824,28 @@ tmux_sessions_line_build_format() {
     # dimmed so they recede.
     local attn_on='#[bold]'
     local attn_off='#[nobold]'
+    local chip='#[reverse] #{session_name} #[noreverse]'
+    local click_on='#[range=user|cn#{session_id}:#{window_id}]'
+    local click_off='#[norange]'
+    local align
+    tmux_sessions_line_align_get align
     if [[ "$(tmux_sessions_line_view)" == "sessions" ]]; then
-        local win=" #{?$attention,$attn_on#I ${spin}#W$attn_off,#I ${spin}#W} "
-        local other="#[bold]#{session_name}#[nobold]:#{W:$win}  "
+        local win="$click_on #{?$attention,$attn_on#I ${spin}#W$attn_off,#I ${spin}#W} $click_off"
+        local session_on='#[range=user|cn#{session_id}]'
+        local other="$session_on$chip$click_off#{W:$win}  "
         local current=""
         (( show_current )) &&
-            current="#[bold]#[underscore]#{session_name}#[nobold]#[nounderscore]:#{W:$win}  "
-        printf '%s' "#[align=left] #{S:#{?$is_current,$current,$other}}"
+            current="$session_on#[underscore]$chip#[nounderscore]$click_off#{W:$win}  "
+        printf '%s' "#[align=$align] #{S:#{?$is_current,$current,$other}}"
         return 0
     fi
-    local item="#{session_name}:#I ${spin}#W"
+    local item="$click_on$chip #I ${spin}#W$click_off"
     local passes=(
         "#{W:#{?$attention,$attn_on$item$attn_off  ,}}"
         "#{W:#{?$attention,,#{?$badged,$item  ,}}}"
         "#{W:#{?$running,#[dim]$item  #[nodim],}}"
     )
-    local out="#[align=left] " pass
+    local out="#[align=$align] " pass
     for pass in "${passes[@]}"; do
         if (( show_current )); then
             out+="#{S:$pass}"
@@ -2926,6 +3017,7 @@ tmux_sessions_line_arm() {
             if (( lines <= idx )); then
                 tmux set-option -g status "$((idx + 1))" 2>/dev/null
             fi
+            tmux_sessions_line_click_bind
             tmux_sessions_line_watch_all
             return 0
         fi
@@ -2941,6 +3033,7 @@ tmux_sessions_line_arm() {
         if [[ "$cur" == "$fmt" ]]; then
             tmux set-option -g @code_notify_line_index "$((lines - 1))" 2>/dev/null
             tmux set-option -g @code_notify_line_fmt "$fmt" 2>/dev/null
+            tmux_sessions_line_click_bind
             return 0
         fi
     fi
@@ -2957,19 +3050,22 @@ tmux_sessions_line_arm() {
     tmux set-option -g @code_notify_line_index "$idx" 2>/dev/null
     tmux set-option -g "status-format[$idx]" "$fmt" 2>/dev/null
     tmux set-option -g status "$((idx + 1))" 2>/dev/null
+    tmux_sessions_line_click_bind
     tmux_sessions_line_watch_all
     return 0
 }
 
 # Undo tmux_sessions_line_arm. The format entry and the status value are
 # restored only while they still hold what arm wrote, so a value the user
-# changed since wins. Leftover auto-mode monitors are removed even when the
-# line is no longer armed. Returns 1 when they could not be removed (the
+# changed since wins, and so does a click binding the user replaced.
+# Leftover auto-mode monitors and our click binding are removed even when
+# the line is no longer armed. Returns 1 when they could not be removed (the
 # lock stayed busy); the rest of the line is still taken down.
 tmux_sessions_line_disarm() {
     { [[ -n "${TMUX:-}" ]] && command -v tmux &> /dev/null; } || return 0
     local idx installed cur saved unwatched=0
     tmux_sessions_line_unwatch_all || unwatched=1
+    tmux_sessions_line_click_unbind
     idx=$(tmux show-options -gqv @code_notify_line_index 2>/dev/null)
     [[ "$idx" =~ ^[1-4]$ ]] || return "$unwatched"
     installed=$(tmux show-options -gqv @code_notify_line_fmt 2>/dev/null)

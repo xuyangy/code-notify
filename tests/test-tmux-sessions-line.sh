@@ -241,6 +241,28 @@ expect_render "sessions view lists the other sessions' windows" "#[align=left] $
 touch "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
 expect_render "sessions view with current on underlines the attached session" "#[align=left] #[underscore]#[italics]alpha#[noitalics]#[nounderscore] ▸ 0 🟢 a0  #[bold]1 🙋 a1#[nobold]$D$B #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4$D"
 rm -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE" "$TMUX_SESSIONS_LINE_VIEW_FILE"
+
+# A session whose agent windows are all 🟢/🥱 is drawn in the done style; a
+# window without agent state does not count; a running one or another badge
+# does.
+tmux new-session -d -s gamma -n g0
+tmux new-window -d -t gamma -n g1
+tmux new-window -d -t gamma -n g2
+badge gamma:0 🟢 g0
+badge gamma:1 🥱 g1
+done_at() { printf '#[%s]#[italics]%s#[noitalics]#[fg=default] ▸' "$TMUX_SESSIONS_LINE_DONE_STYLE" "$1"; }
+expect_render "priority view highlights an all-done session's items" "#[align=left] #[bold]$(at beta:0) 💬 b0#[nobold]$D$(at beta:3) 🟢 b3$D$(done_at gamma:0) 🟢 g0$D$(done_at gamma:1) 🥱 g1$D#[dim]$(at beta:1) 🌕 b1#[nodim]$D#[dim]$(at beta:2) SPIN b2#[nodim]$D"
+printf 'sessions\n' > "$TMUX_SESSIONS_LINE_VIEW_FILE"
+expect_render "sessions view highlights an all-done session's name" "#[align=left] $B #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4$D$(done_at gamma) 0 🟢 g0  1 🥱 g1  2 g2$D"
+tmux set-option -w -t gamma:2 @code_notify_running "$now"
+check "a running window in the session drops the highlight" \
+    test "$(render | grep -cF "$TMUX_SESSIONS_LINE_DONE_STYLE" || true)" == 0
+tmux set-option -w -t gamma:2 -u @code_notify_running
+badge gamma:2 🍃 g2
+check "another badge in the session drops the highlight" \
+    test "$(render | grep -cF "$TMUX_SESSIONS_LINE_DONE_STYLE" || true)" == 0
+rm -f "$TMUX_SESSIONS_LINE_VIEW_FILE"
+tmux kill-session -t gamma
 exec 3>&-
 
 tmux_sessions_line_arm
@@ -397,6 +419,11 @@ for icon in "${attention_icons[@]}"; do
     grep -qxF "$icon" <<< "$notifier_icons" || fail "attention icon $icon is not a notifier badge icon"
 done
 pass "every attention icon is a notifier badge icon"
+IFS='|' read -r -a done_icons <<< "$TMUX_SESSIONS_LINE_DONE_ICONS"
+for icon in "${done_icons[@]}"; do
+    grep -qxF "$icon" <<< "$notifier_icons" || fail "done icon $icon is not a notifier badge icon"
+done
+pass "every done icon is a notifier badge icon"
 check "idle 🥱 is not an attention icon, like 🟢" \
     test "${TMUX_SESSIONS_LINE_ATTENTION_ICONS//🥱/}" == "$TMUX_SESSIONS_LINE_ATTENTION_ICONS"
 

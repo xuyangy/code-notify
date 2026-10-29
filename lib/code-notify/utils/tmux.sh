@@ -674,6 +674,11 @@ TMUX_SESSIONS_LINE_LOCK_TIMEOUT_MS="${CODE_NOTIFY_TMUX_LINE_LOCK_TIMEOUT_MS:-100
 # notification). 🥱 idle is left out: it is a finished turn, like 🟢, not a
 # request. Must match the BADGE_ICON values in notifier.sh.
 TMUX_SESSIONS_LINE_ATTENTION_ICONS='💬|🙋|🧨|⏳|📢'
+# Badge icons of a finished turn. A session whose agent windows all carry one
+# (no other badge, nothing running) has its name drawn in
+# TMUX_SESSIONS_LINE_DONE_STYLE on the sessions line.
+TMUX_SESSIONS_LINE_DONE_ICONS='🟢|🥱'
+TMUX_SESSIONS_LINE_DONE_STYLE='fg=green'
 # Opt-in trace of window badge and running-marker transitions, for diagnosing
 # a window whose name and badge state disagree. Off unless the flag file
 # exists; when off it costs one stat per transition. Once the log passes
@@ -2642,7 +2647,10 @@ tmux_spinner_disarm_if_idle() {
 # client's own session is left out unless cn sessions-line current on. The
 # window's place is drawn in italics and followed by "▸" (session:index in
 # the priority view, the session name in the sessions view) so it stands
-# apart from the window name. A "|" follows each item in the priority view
+# apart from the window name. That name is drawn in
+# TMUX_SESSIONS_LINE_DONE_STYLE while the session is all done: at least one
+# window has a 🟢/🥱 badge and none is running or has another badge; windows
+# without agent state do not count. A "|" follows each item in the priority view
 # and each session in the sessions view, in the terminal theme's muted grey
 # (brightblack): dim alone still shows clearly in terminals that draw it as
 # half opacity. No pass knows whether another item follows it, so the last
@@ -2830,7 +2838,16 @@ tmux_sessions_line_build_format() {
     # dimmed so they recede.
     local attn_on='#[bold]'
     local attn_off='#[nobold]'
-    local session='#[italics]#{session_name}#[noitalics] ▸'
+    # One letter per window, B busy or D done, so the window loop runs once
+    # and a single match covers both "some done" and "none busy".
+    local done_badge="#{m/r:^($TMUX_SESSIONS_LINE_DONE_ICONS) ,#{@code_notify_badged_name}}"
+    local all_done="#{m/r:^D+\$,#{W:#{?$running,B,#{?$badged,#{?$done_badge,D,B},}}}}"
+    local done_on="#[$TMUX_SESSIONS_LINE_DONE_STYLE]"
+    local done_off='#[fg=default]'
+    # Picks between whole spans so the check is expanded once per use.
+    local name='#[italics]#{session_name}#[noitalics]'
+    local done_name="#{?$all_done,$done_on$name$done_off,$name}"
+    local session="$done_name ▸"
     local div=' #[fg=brightblack]|#[fg=default] '
     local click_on='#[range=user|cn#{session_id}:#{window_id}]'
     local click_off='#[norange]'
@@ -2843,14 +2860,18 @@ tmux_sessions_line_build_format() {
         local other="$session_on$session$click_off#{W:$win}${div# }"
         local current=""
         (( show_current )) &&
-            current="$session_on#[underscore]#[italics]#{session_name}#[noitalics]#[nounderscore] ▸$click_off#{W:$win}${div# }"
+            current="$session_on#[underscore]$done_name#[nounderscore] ▸$click_off#{W:$win}${div# }"
         printf '%s' "#[align=$align] #{S:#{?$is_current,$current,$other}}"
         return 0
     fi
-    local item="$click_on#[italics]#{session_name}:#I#[noitalics] ▸ ${spin}#W$click_off"
+    local place='#[italics]#{session_name}:#I#[noitalics]'
+    local item="$click_on$place ▸ ${spin}#W$click_off"
+    # Only an other-badge item can belong to an all-done session, so only
+    # that pass checks, once per session outside its window loop.
+    local done_item="$click_on$done_on$place$done_off ▸ ${spin}#W$click_off"
     local passes=(
         "#{W:#{?$attention,$attn_on$item$attn_off$div,}}"
-        "#{W:#{?$attention,,#{?$badged,$item$div,}}}"
+        "#{?$all_done,#{W:#{?$badged,$done_item$div,}},#{W:#{?$attention,,#{?$badged,$item$div,}}}}"
         "#{W:#{?$running,#[dim]$item#[nodim]$div,}}"
     )
     local out="#[align=$align] " pass

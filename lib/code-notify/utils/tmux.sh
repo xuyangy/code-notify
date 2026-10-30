@@ -683,6 +683,9 @@ TMUX_SESSIONS_LINE_ATTENTION_ICONS='💬|🙋|🧨|⏳|📢'
 TMUX_SESSIONS_LINE_DONE_ICONS='🟢|🥱'
 TMUX_SESSIONS_LINE_DONE_ON='#[fg=#ffbf00]'
 TMUX_SESSIONS_LINE_DONE_OFF='#[fg=default]'
+# A window that waits on the user is drawn between these: orange-red.
+TMUX_SESSIONS_LINE_ATTENTION_ON='#[fg=#ff4500]'
+TMUX_SESSIONS_LINE_ATTENTION_OFF='#[fg=default]'
 # Opt-in trace of window badge and running-marker transitions, for diagnosing
 # a window whose name and badge state disagree. Off unless the flag file
 # exists; when off it costs one stat per transition. Once the log passes
@@ -2838,10 +2841,10 @@ tmux_sessions_line_build_format() {
     local badged='#{&&:#{@code_notify_badged_name},#{!=:#{@code_notify_clear_mode},running}}'
     local attention="#{&&:$badged,#{m/r:^($TMUX_SESSIONS_LINE_ATTENTION_ICONS) ,#{@code_notify_badged_name}}}"
     local running="#{||:#{==:#{@code_notify_clear_mode},running},#{!=:$spin,}}"
-    # A window that waits on the user is drawn in bold; running agents are
-    # dimmed so they recede.
-    local attn_on='#[bold]'
-    local attn_off='#[nobold]'
+    # A window that waits on the user is drawn in orange-red; running agents
+    # are dimmed so they recede.
+    local attn_on="$TMUX_SESSIONS_LINE_ATTENTION_ON"
+    local attn_off="$TMUX_SESSIONS_LINE_ATTENTION_OFF"
     # One letter per window, B busy or D done, so the window loop runs once
     # and a single match covers both "some done" and "none busy".
     local done_badge="#{m/r:^($TMUX_SESSIONS_LINE_DONE_ICONS) ,#{@code_notify_badged_name}}"

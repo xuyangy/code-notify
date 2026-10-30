@@ -217,8 +217,10 @@ render() {
 
 at() { printf '#[italics]%s#[noitalics] ▸' "$1"; }
 D=' #[fg=brightblack]|#[fg=default] '
+A="$TMUX_SESSIONS_LINE_ATTENTION_ON"
+Z="$TMUX_SESSIONS_LINE_ATTENTION_OFF"
 B="$(at beta)"
-expect_render "priority view: attention, other badges, running; own session left out" "#[align=left] #[bold]$(at beta:0) 💬 b0#[nobold]$D$(at beta:3) 🟢 b3$D#[dim]$(at beta:1) 🌕 b1#[nodim]$D#[dim]$(at beta:2) SPIN b2#[nodim]$D"
+expect_render "priority view: attention, other badges, running; own session left out" "#[align=left] ${A}$(at beta:0) 💬 b0${Z}$D$(at beta:3) 🟢 b3$D#[dim]$(at beta:1) 🌕 b1#[nodim]$D#[dim]$(at beta:2) SPIN b2#[nodim]$D"
 
 b0_id="$(tmux display-message -p -t beta:0 '#{session_id}:#{window_id}')"
 check "each priority item is a click range for its session and window" \
@@ -233,13 +235,13 @@ check "an unknown alignment falls back to left" test "$(tmux_sessions_line_align
 rm -f "$TMUX_SESSIONS_LINE_ALIGN_FILE"
 
 touch "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
-expect_render "priority view with current on adds the attached session" "#[align=left] #[bold]$(at alpha:1) 🙋 a1#[nobold]$D#[bold]$(at beta:0) 💬 b0#[nobold]$D$(at alpha:0) 🟢 a0$D$(at beta:3) 🟢 b3$D#[dim]$(at beta:1) 🌕 b1#[nodim]$D#[dim]$(at beta:2) SPIN b2#[nodim]$D"
+expect_render "priority view with current on adds the attached session" "#[align=left] ${A}$(at alpha:1) 🙋 a1${Z}$D${A}$(at beta:0) 💬 b0${Z}$D$(at alpha:0) 🟢 a0$D$(at beta:3) 🟢 b3$D#[dim]$(at beta:1) 🌕 b1#[nodim]$D#[dim]$(at beta:2) SPIN b2#[nodim]$D"
 rm -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
 
 printf 'sessions\n' > "$TMUX_SESSIONS_LINE_VIEW_FILE"
-expect_render "sessions view lists the other sessions' windows" "#[align=left] $B #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4$D"
+expect_render "sessions view lists the other sessions' windows" "#[align=left] $B ${A}0 💬 b0${Z}  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4$D"
 touch "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE"
-expect_render "sessions view with current on underlines the attached session" "#[align=left] #[underscore]#[italics]alpha#[noitalics]#[nounderscore] ▸ 0 🟢 a0  #[bold]1 🙋 a1#[nobold]$D$B #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4$D"
+expect_render "sessions view with current on underlines the attached session" "#[align=left] #[underscore]#[italics]alpha#[noitalics]#[nounderscore] ▸ 0 🟢 a0  ${A}1 🙋 a1${Z}$D$B ${A}0 💬 b0${Z}  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4$D"
 rm -f "$TMUX_SESSIONS_LINE_SHOW_CURRENT_FILE" "$TMUX_SESSIONS_LINE_VIEW_FILE"
 
 # A session whose agent windows are all 🟢/🥱 is drawn in the done style; a
@@ -251,9 +253,9 @@ tmux new-window -d -t gamma -n g2
 badge gamma:0 🟢 g0
 badge gamma:1 🥱 g1
 done_at() { printf '%s#[italics]%s#[noitalics]%s ▸' "$TMUX_SESSIONS_LINE_DONE_ON" "$1" "$TMUX_SESSIONS_LINE_DONE_OFF"; }
-expect_render "priority view highlights an all-done session's items" "#[align=left] #[bold]$(at beta:0) 💬 b0#[nobold]$D$(at beta:3) 🟢 b3$D$(done_at gamma:0) 🟢 g0$D$(done_at gamma:1) 🥱 g1$D#[dim]$(at beta:1) 🌕 b1#[nodim]$D#[dim]$(at beta:2) SPIN b2#[nodim]$D"
+expect_render "priority view highlights an all-done session's items" "#[align=left] ${A}$(at beta:0) 💬 b0${Z}$D$(at beta:3) 🟢 b3$D$(done_at gamma:0) 🟢 g0$D$(done_at gamma:1) 🥱 g1$D#[dim]$(at beta:1) 🌕 b1#[nodim]$D#[dim]$(at beta:2) SPIN b2#[nodim]$D"
 printf 'sessions\n' > "$TMUX_SESSIONS_LINE_VIEW_FILE"
-expect_render "sessions view highlights an all-done session's name" "#[align=left] $B #[bold]0 💬 b0#[nobold]  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4$D$(done_at gamma) 0 🟢 g0  1 🥱 g1  2 g2$D"
+expect_render "sessions view highlights an all-done session's name" "#[align=left] $B ${A}0 💬 b0${Z}  1 🌕 b1  2 SPIN b2  3 🟢 b3  4 b4$D$(done_at gamma) 0 🟢 g0  1 🥱 g1  2 g2$D"
 tmux set-option -w -t gamma:2 @code_notify_running "$now"
 check "a running window in the session drops the highlight" \
     test "$(render | grep -cF "$TMUX_SESSIONS_LINE_DONE_ON" || true)" == 0

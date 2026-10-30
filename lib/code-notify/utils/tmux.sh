@@ -675,10 +675,14 @@ TMUX_SESSIONS_LINE_LOCK_TIMEOUT_MS="${CODE_NOTIFY_TMUX_LINE_LOCK_TIMEOUT_MS:-100
 # request. Must match the BADGE_ICON values in notifier.sh.
 TMUX_SESSIONS_LINE_ATTENTION_ICONS='💬|🙋|🧨|⏳|📢'
 # Badge icons of a finished turn. A session whose agent windows all carry one
-# (no other badge, nothing running) has its name drawn in
-# TMUX_SESSIONS_LINE_DONE_STYLE on the sessions line.
+# (no other badge, nothing running) has its name drawn between
+# TMUX_SESSIONS_LINE_DONE_ON and _OFF on the sessions line: amber,
+# foreground only so it reads on any status bar colour. tmux draws the hex
+# colour exactly on an RGB-capable terminal and the nearest of 256 elsewhere. One attribute per
+# #[...]: a comma would split the #{?...} the name is drawn in.
 TMUX_SESSIONS_LINE_DONE_ICONS='🟢|🥱'
-TMUX_SESSIONS_LINE_DONE_STYLE='fg=green'
+TMUX_SESSIONS_LINE_DONE_ON='#[fg=#ffbf00]'
+TMUX_SESSIONS_LINE_DONE_OFF='#[fg=default]'
 # Opt-in trace of window badge and running-marker transitions, for diagnosing
 # a window whose name and badge state disagree. Off unless the flag file
 # exists; when off it costs one stat per transition. Once the log passes
@@ -2648,7 +2652,7 @@ tmux_spinner_disarm_if_idle() {
 # window's place is drawn in italics and followed by "▸" (session:index in
 # the priority view, the session name in the sessions view) so it stands
 # apart from the window name. That name is drawn in
-# TMUX_SESSIONS_LINE_DONE_STYLE while the session is all done: at least one
+# the done style (TMUX_SESSIONS_LINE_DONE_ON) while the session is all done: at least one
 # window has a 🟢/🥱 badge and none is running or has another badge; windows
 # without agent state do not count. A "|" follows each item in the priority view
 # and each session in the sessions view, in the terminal theme's muted grey
@@ -2842,8 +2846,8 @@ tmux_sessions_line_build_format() {
     # and a single match covers both "some done" and "none busy".
     local done_badge="#{m/r:^($TMUX_SESSIONS_LINE_DONE_ICONS) ,#{@code_notify_badged_name}}"
     local all_done="#{m/r:^D+\$,#{W:#{?$running,B,#{?$badged,#{?$done_badge,D,B},}}}}"
-    local done_on="#[$TMUX_SESSIONS_LINE_DONE_STYLE]"
-    local done_off='#[fg=default]'
+    local done_on="$TMUX_SESSIONS_LINE_DONE_ON"
+    local done_off="$TMUX_SESSIONS_LINE_DONE_OFF"
     # Picks between whole spans so the check is expanded once per use.
     local name='#[italics]#{session_name}#[noitalics]'
     local done_name="#{?$all_done,$done_on$name$done_off,$name}"

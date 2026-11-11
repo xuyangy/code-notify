@@ -1338,6 +1338,15 @@ plan_dialog=$'Would you like to proceed?\n ❯ 1. Yes, and auto-accept edits\n  
 agy_file_dialog=$'Allow creation of this file?\n> 1. Yes, allow creation\n  2. No, deny creation'
 [[ "$(tmux_resume_poll_dialog_flag "$agy_file_dialog")" == "1" ]] \
     || fail "the default should match Antigravity's file-write approval"
+# Antigravity's shell-command approval, as rendered in the pane: a reason and
+# the command above a "Run this command?" question and the numbered selector.
+agy_command_dialog=$'Reason: the auto-run safety check did not reach a decision\nRequesting permission for:\n   /usr/bin/env LANG=en_US.UTF-8 python3 agent_bridge.py reply --body-file reply-2.txt\n\nRun this command?\n> 1. Yes, run command\n  2. No, cancel'
+[[ "$(tmux_resume_poll_dialog_flag "$agy_command_dialog")" == "1" ]] \
+    || fail "the default should match Antigravity's shell-command approval"
+[[ "$(tmux_resume_poll_dialog_flag "Run this command? It prints the version.")" == "0" ]] \
+    || fail "a Run this command question with no selector must not match"
+[[ "$(tmux_resume_poll_dialog_flag "$(printf 'You can run this command to check:\n1. Yes\n2. No')")" == "0" ]] \
+    || fail "mid-line 'run this command' prose must not match"
 # Antigravity's subagent approval renders no question mark and no numbered
 # options — an unanchored "needs approval for" line paired with its
 # keybinding row is the equivalent question + selector pair.

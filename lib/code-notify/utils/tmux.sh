@@ -786,11 +786,12 @@ TMUX_RESUME_POLL_TTL="${CODE_NOTIFY_TMUX_RESUME_POLL_TTL:-900}"
 # …?"), plan-mode approval ("Would you like to proceed?"), Antigravity's
 # file-write approval ("Allow creation of this file?" — anchored like the
 # others but requiring the question mark, since prose opens lines with
-# "Allow" far more often than with "Do you want"), and Antigravity's
-# subagent approval ("research needs approval for Read" — unanchored, the
-# subagent's name precedes it); the selector requirement is what lets the
-# marker set stay this permissive without re-admitting prose false
-# positives. The selector set pairs the numbered Yes/No row with
+# "Allow" far more often than with "Do you want"), Antigravity's shell-command
+# approval ("Run this command?" — same anchoring and question mark), and
+# Antigravity's subagent approval ("research needs approval for Read" —
+# unanchored, the subagent's name precedes it); the selector requirement is
+# what lets the marker set stay this permissive without re-admitting prose
+# false positives. The selector set pairs the numbered Yes/No row with
 # Antigravity's keybinding row ("ctrl+k approve · alt+j manage"), which its
 # subagent dialogs render instead of numbered options. AskUserQuestion
 # needs no coverage here: it pauses via PreToolUse without the watch flag,
@@ -812,7 +813,7 @@ TMUX_RESUME_POLL_TTL="${CODE_NOTIFY_TMUX_RESUME_POLL_TTL:-900}"
 # turns detection off entirely; an empty TMUX_DIALOG_OPTIONS falls back to
 # question-only matching). The `-` (not `:-`) expansion makes an explicit
 # empty value stick instead of reverting to the default.
-TMUX_DIALOG_MARKERS="${CODE_NOTIFY_TMUX_DIALOG_MARKERS-^[^A-Za-z]*(Do you want|Would you like|Allow .*\?)|needs approval for}"
+TMUX_DIALOG_MARKERS="${CODE_NOTIFY_TMUX_DIALOG_MARKERS-^[^A-Za-z]*(Do you want|Would you like|Allow .*\?|Run this command\?)|needs approval for}"
 TMUX_DIALOG_OPTIONS="${CODE_NOTIFY_TMUX_DIALOG_OPTIONS-^[^0-9A-Za-z]*[0-9]+\.[[:space:]]+(Yes|No)([[:space:],.]|$)|ctrl\+k[[:space:]]+approve}"
 # Antigravity emits no lifecycle hook when a user rejects a tool permission.
 # Its TUI does leave this explicit terminal line, however, so the resume poll

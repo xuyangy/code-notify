@@ -113,6 +113,29 @@ case "$cmd" in
         # reads the stateful name (kept current by rename-window); the focus
         # target format (session/window/pane IDs) is a fixture.
         case "${rest[0]}" in
+            # The fast dialog poll's three window-state reads, served from the
+            # stateful options like the real server would.
+            '#{@code_notify_resume_pending}|#{@code_notify_running}')
+                w="${FAKE_TMUX_PANE_WINDOW-@2}"
+                printf '%s|%s\n' \
+                    "$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_resume_pending" 2>/dev/null)" \
+                    "$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_running" 2>/dev/null)"
+                ;;
+            '#{window_id}|#{@code_notify_running}|#{@code_notify_run_gen}|#{@code_notify_dialog_ctx}')
+                w="${FAKE_TMUX_PANE_WINDOW-@2}"
+                printf '%s|%s|%s|%s\n' "$w" \
+                    "$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_running" 2>/dev/null)" \
+                    "$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_run_gen" 2>/dev/null)" \
+                    "$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_dialog_ctx" 2>/dev/null)"
+                ;;
+            '#{window_id}|#{pane_in_mode}|#{@code_notify_running}|#{@code_notify_run_gen}|#{@code_notify_dialog_poll}')
+                w="${FAKE_TMUX_PANE_WINDOW-@2}"
+                mode=$(cat "$FAKE_TMUX_STATE/${target}.pane_in_mode" 2>/dev/null)
+                printf '%s|%s|%s|%s|%s\n' "$w" "${mode:-0}" \
+                    "$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_running" 2>/dev/null)" \
+                    "$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_run_gen" 2>/dev/null)" \
+                    "$(cat "$FAKE_TMUX_STATE/${w}.@code_notify_dialog_poll" 2>/dev/null)"
+                ;;
             '#{window_id}|#{pane_height}')
                 printf '%s|%s\n' "${FAKE_TMUX_PANE_WINDOW-@2}" \
                     "${FAKE_TMUX_PANE_HEIGHT:-24}"
@@ -3182,6 +3205,173 @@ rm -f "$state_dir/%3.pane_content" "$state_dir/@2.@code_notify_dialog_ctx" \
     "$HOME/.claude/notifications/notify-types" \
     "$state_dir/.@code_notify_agent_exit_sweep_scheduled"
 pass "dialog watch goes inert once the running marker is down"
+
+# --- fast dialog poll: eligibility mirrors what the sweep watch needs ---
+# A predicted approval is only deferred to the pane while the sweep's dialog
+# watch can back the poll up, so anything that keeps that watch from arming or
+# ticking must make the caller alert immediately instead.
+CODE_NOTIFY_TMUX_AGENT_NAME=antigravity tmux_dialog_fast_poll_eligible \
+    || fail "antigravity inside tmux should be eligible for the fast dialog poll"
+CODE_NOTIFY_TMUX_AGENT_NAME=claude tmux_dialog_fast_poll_eligible \
+    && fail "an agent outside the dialog watch list must not be eligible"
+( TMUX_DIALOG_FAST_POLL_SECONDS=0
+  CODE_NOTIFY_TMUX_AGENT_NAME=antigravity tmux_dialog_fast_poll_eligible ) \
+    && fail "a zero poll window must disable the fast dialog poll"
+( TMUX_DIALOG_FAST_POLL_INTERVAL="soon"
+  CODE_NOTIFY_TMUX_AGENT_NAME=antigravity tmux_dialog_fast_poll_eligible ) \
+    && fail "an interval sleep cannot take must disable the fast dialog poll"
+( TMUX_DIALOG_NOTIFY_SECONDS=0
+  CODE_NOTIFY_TMUX_AGENT_NAME=antigravity tmux_dialog_fast_poll_eligible ) \
+    && fail "a disabled sweep watch must disable the fast dialog poll"
+( TMUX_AGENT_EXIT_POLL_SECONDS=0
+  CODE_NOTIFY_TMUX_AGENT_NAME=antigravity tmux_dialog_fast_poll_eligible ) \
+    && fail "a sweep that never ticks must disable the fast dialog poll"
+( CODE_NOTIFY_TMUX_RUNNING=false
+  CODE_NOTIFY_TMUX_AGENT_NAME=antigravity tmux_dialog_fast_poll_eligible ) \
+    && fail "a disabled running indicator (which arms the watch) must disable the poll"
+( TMUX=""
+  CODE_NOTIFY_TMUX_AGENT_NAME=antigravity tmux_dialog_fast_poll_eligible ) \
+    && fail "outside tmux the fast dialog poll must not be eligible"
+pass "fast dialog poll is eligible only where the sweep watch can back it up"
+
+# --- fast dialog poll: start needs a live run with the watch armed ---
+printf '%s' "idle_prompt|permission_prompt" > "$HOME/.claude/notifications/notify-types"
+rm -f "$state_dir/@2.@code_notify_running" "$state_dir/@2.@code_notify_dialog_ctx" \
+    "$state_dir/@2.@code_notify_dialog_poll"
+tmux_dialog_fast_poll_start \
+    && fail "a window with no live run must refuse the fast dialog poll"
+CODE_NOTIFY_TMUX_AGENT_NAME=claude tmux_running_start \
+    || fail "claude running-start for the unarmed check should succeed"
+tmux_dialog_fast_poll_start \
+    && fail "a run without the dialog watch armed must refuse the fast dialog poll"
+[[ ! -f "$state_dir/@2.@code_notify_dialog_poll" ]] \
+    || fail "a refused start must not leave a poll token"
+tmux_running_stop || fail "running-stop after the unarmed check should succeed"
+pass "fast dialog poll refuses a window without a live, watched run"
+
+# --- fast dialog poll: a rendered dialog fires the approval once ---
+# The body runs synchronously here with a short window. The alert goes out
+# through the sweep watch's own delivery, so it carries the same identity.
+TMUX_DIALOG_FAST_POLL_SECONDS=1
+TMUX_DIALOG_FAST_POLL_INTERVAL=0.1
+CODE_NOTIFY_TMUX_AGENT_NAME=antigravity tmux_running_start \
+    || fail "antigravity running-start for the fast poll should succeed"
+poll_run="$(cat "$state_dir/@2.@code_notify_running")"
+poll_gen="$(cat "$state_dir/@2.@code_notify_run_gen")"
+printf '%s' "$agy_command_dialog" > "$state_dir/%3.pane_content"
+printf 'tok-1' > "$state_dir/@2.@code_notify_dialog_poll"
+: > "$idle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" \
+    tmux_dialog_fast_poll_run @2 %3 antigravity projPoll "$poll_run" "$poll_gen" tok-1 \
+    || fail "the fast poll body should succeed on a rendered dialog"
+wait_for_idle_log || fail "a rendered dialog should invoke the notifier"
+[[ "$(cat "$idle_notify_log")" == '%3|notification|antigravity|projPoll|{"type":"permission_prompt"}' ]] \
+    || fail "the fast poll alert should carry pane, event, agent, project and payload (got: $(cat "$idle_notify_log"))"
+[[ ! -f "$state_dir/@2.@code_notify_dialog_poll" ]] \
+    || fail "a fired poll should retire its token"
+pass "fast dialog poll alerts as soon as the dialog is rendered"
+
+# --- fast dialog poll: no dialog inside the window stays silent ---
+printf '%s' "generating code ..." > "$state_dir/%3.pane_content"
+printf 'tok-2' > "$state_dir/@2.@code_notify_dialog_poll"
+: > "$idle_notify_log"
+: > "$log_file"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" \
+    tmux_dialog_fast_poll_run @2 %3 antigravity projPoll "$poll_run" "$poll_gen" tok-2 \
+    || fail "the fast poll body should succeed when no dialog appears"
+sleep 0.3
+[[ ! -s "$idle_notify_log" ]] || fail "a pane with no dialog must not notify"
+[[ ! -f "$state_dir/@2.@code_notify_dialog_poll" ]] \
+    || fail "a poll that ran out should retire its token"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "a poll that saw no dialog must leave the running marker alone"
+poll_captures="$(grep -c 'capture-pane ' "$log_file")"
+(( poll_captures >= 1 && poll_captures <= 12 )) \
+    || fail "the poll window should bound its captures (got: $poll_captures)"
+pass "fast dialog poll stays silent and bounded when no dialog appears"
+
+# --- fast dialog poll: a poll that lost its claim never alerts ---
+# Each case shows the dialog, so only the ownership check keeps it silent:
+# a newer poll's token, a successor run generation, and a pane that moved.
+printf '%s' "$agy_command_dialog" > "$state_dir/%3.pane_content"
+: > "$idle_notify_log"
+printf 'tok-newer' > "$state_dir/@2.@code_notify_dialog_poll"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" \
+    tmux_dialog_fast_poll_run @2 %3 antigravity projPoll "$poll_run" "$poll_gen" tok-3 \
+    || fail "a superseded fast poll should exit cleanly"
+[[ "$(cat "$state_dir/@2.@code_notify_dialog_poll")" == "tok-newer" ]] \
+    || fail "a superseded poll must not retire the newer poll's token"
+printf 'tok-4' > "$state_dir/@2.@code_notify_dialog_poll"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" \
+    tmux_dialog_fast_poll_run @2 %3 antigravity projPoll "$poll_run" "stale.gen" tok-4 \
+    || fail "a fast poll from an earlier run should exit cleanly"
+FAKE_TMUX_PANE_WINDOW=@9 CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" \
+    tmux_dialog_fast_poll_run @2 %3 antigravity projPoll "$poll_run" "$poll_gen" tok-4 \
+    || fail "a fast poll whose pane moved should exit cleanly"
+sleep 0.3
+[[ ! -s "$idle_notify_log" ]] \
+    || fail "a poll that lost its claim must not notify (got: $(cat "$idle_notify_log"))"
+pass "fast dialog poll yields to a newer poll, a newer run and a moved pane"
+
+# --- fast dialog poll: a pane in copy-mode is not judged ---
+printf '1' > "$state_dir/%3.pane_in_mode"
+printf 'tok-5' > "$state_dir/@2.@code_notify_dialog_poll"
+: > "$idle_notify_log"
+: > "$log_file"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" \
+    tmux_dialog_fast_poll_run @2 %3 antigravity projPoll "$poll_run" "$poll_gen" tok-5 \
+    || fail "a fast poll over a copy-mode pane should exit cleanly"
+sleep 0.3
+[[ ! -s "$idle_notify_log" ]] || fail "a scrolled view must not be read as a live dialog"
+grep -q 'capture-pane ' "$log_file" \
+    && fail "a pane in copy-mode should not be captured by the fast poll"
+rm -f "$state_dir/%3.pane_in_mode"
+pass "fast dialog poll skips a pane in copy-mode"
+
+# --- fast dialog poll: start hands the live run to a detached poll ---
+printf '%s' "$agy_command_dialog" > "$state_dir/%3.pane_content"
+: > "$idle_notify_log"
+CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/notifier-stub" tmux_dialog_fast_poll_start \
+    || fail "a live watched run should start the fast dialog poll"
+wait_for_idle_log || fail "the detached fast poll should invoke the notifier"
+[[ "$(cat "$idle_notify_log")" == '%3|notification|antigravity|'"$(basename "$PWD")"'|{"type":"permission_prompt"}' ]] \
+    || fail "the detached poll should alert under the watch's recorded identity (got: $(cat "$idle_notify_log"))"
+pass "fast dialog poll start delivers through a detached poll"
+
+# --- an earlier input pause is classified for the deferring hook ---
+# Sibling tool calls queued behind a dialog fire their hooks while it is up
+# (waiting); a call arriving after the answer but before the resume poll
+# relit the run must be told apart from that (answered); and a pause too
+# young to have painted its own dialog, or a pane that cannot be judged, must
+# stay undecided so the hook alerts at once (unknown).
+[[ "$(tmux_dialog_pause_state)" == "none" ]] \
+    || fail "a running window has no pause to settle (got: $(tmux_dialog_pause_state))"
+tmux_running_pause_for_input watch || fail "pause for the pause-state check should succeed"
+[[ "$(tmux_dialog_pause_state)" == "waiting" ]] \
+    || fail "a paused window showing the dialog should read as waiting (got: $(tmux_dialog_pause_state))"
+printf '%s' "generating code ..." > "$state_dir/%3.pane_content"
+[[ "$(tmux_dialog_pause_state)" == "unknown" ]] \
+    || fail "a fresh pause with no dialog rendered yet must stay undecided (got: $(tmux_dialog_pause_state))"
+printf '%s' "$(( $(date +%s) - 10 ))" > "$state_dir/@2.@code_notify_resume_pending"
+[[ "$(tmux_dialog_pause_state)" == "answered" ]] \
+    || fail "an older pause whose dialog is gone should read as answered (got: $(tmux_dialog_pause_state))"
+printf '1' > "$state_dir/%3.pane_in_mode"
+[[ "$(tmux_dialog_pause_state)" == "unknown" ]] \
+    || fail "a scrolled view must not decide a pause (got: $(tmux_dialog_pause_state))"
+rm -f "$state_dir/%3.pane_in_mode" "$state_dir/%3.pane_content"
+[[ "$(tmux_dialog_pause_state)" == "unknown" ]] \
+    || fail "an uncapturable pane must not decide a pause (got: $(tmux_dialog_pause_state))"
+TMUX_DIALOG_FAST_POLL_SECONDS=3
+TMUX_DIALOG_FAST_POLL_INTERVAL=0.5
+tmux_running_stop || fail "running-stop after the waiting check should succeed"
+rm -f "$state_dir/%3.pane_in_mode" "$state_dir/%3.pane_content" \
+    "$state_dir/@2.@code_notify_dialog_ctx" "$state_dir/@2.@code_notify_dialog_poll" \
+    "$state_dir/@2.@code_notify_resume_pending" "$state_dir/@2.@code_notify_pause_fp" \
+    "$HOME/.claude/notifications/notify-types" \
+    "$state_dir/.@code_notify_agent_exit_sweep_scheduled" \
+    "$state_dir/.@code_notify_resume_poll_scheduled"
+tmux_resume_flag_clear @2 2>/dev/null || true
+pass "an earlier input pause reads as waiting, answered or undecided"
 
 # --- every start mints a run generation the epoch cannot provide ---
 # @code_notify_running is a 1-second epoch, so two turns inside one second are

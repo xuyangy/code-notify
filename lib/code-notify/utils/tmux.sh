@@ -892,6 +892,20 @@ TMUX_DIALOG_WATCH_AGENTS="${CODE_NOTIFY_TMUX_DIALOG_WATCH_AGENTS:-antigravity}"
 # before that resets the watch silently — the user was already there.
 # 0 disables the watch.
 TMUX_DIALOG_NOTIFY_SECONDS="${CODE_NOTIFY_TMUX_DIALOG_NOTIFY_SECONDS:-5}"
+# Fast confirmation poll for a PREDICTED approval (see
+# tmux_dialog_fast_poll_start). The notifier reconstructs "this call will
+# prompt" from the agent's permission lists, but a call no rule covers is only
+# a guess: Antigravity's auto mode runs it in the sandbox or clears it through
+# a model review, and no hook reports which. Rather than alert on the guess,
+# the hook leaves the running indicator up and a detached poll captures the
+# pane every TMUX_DIALOG_FAST_POLL_INTERVAL seconds (fractions allowed; passed
+# to sleep) for up to TMUX_DIALOG_FAST_POLL_SECONDS, delivering the approval
+# alert the moment the dialog is actually rendered. A prompt that surfaces
+# after the window closes — a slow review that ends in a question — is left to
+# the sweep's watch above. TMUX_DIALOG_FAST_POLL_SECONDS=0 disables the poll,
+# which restores the immediate alert for every predicted approval.
+TMUX_DIALOG_FAST_POLL_SECONDS="${CODE_NOTIFY_TMUX_DIALOG_FAST_POLL_SECONDS:-3}"
+TMUX_DIALOG_FAST_POLL_INTERVAL="${CODE_NOTIFY_TMUX_DIALOG_FAST_POLL_INTERVAL:-0.5}"
 # Agents whose running marker additionally gets an interrupt watch
 # (pipe-separated names as passed by the hooks). Cancelling a turn with Escape
 # fires no hook at all — Claude Code's Stop is documented not to run when the
@@ -1595,6 +1609,146 @@ tmux_dialog_watch_notify() {
           CODE_NOTIFY_TMUX_GUARD_DIALOG_GRACE="$dialog_grace" \
           bash "$notifier" notification "$agent" "$project" ) >/dev/null 2>&1 &
     disown 2>/dev/null || true
+    return 0
+}
+
+# Whether a predicted approval may be confirmed on the pane instead of alerted
+# at once (see TMUX_DIALOG_FAST_POLL_SECONDS). Deferring is only safe while
+# the sweep's dialog watch stands behind the poll, so every condition that
+# watch needs to arm and tick is required here: inside tmux, the running
+# indicator enabled (its start is what arms the watch), the agent listed in
+# TMUX_DIALOG_WATCH_AGENTS, and a non-zero watch threshold and sweep interval.
+# No tmux round trip — this runs in the hook before anything is decided.
+tmux_dialog_fast_poll_eligible() {
+    local agent="${CODE_NOTIFY_TMUX_AGENT_NAME:-}"
+    tmux_focus_available || return 1
+    tmux_running_enabled || return 1
+    [[ "${TMUX_DIALOG_FAST_POLL_SECONDS:-0}" =~ ^[0-9]+$ ]] || return 1
+    (( TMUX_DIALOG_FAST_POLL_SECONDS > 0 )) || return 1
+    [[ "${TMUX_DIALOG_FAST_POLL_INTERVAL:-}" =~ ^([0-9]+|[0-9]*\.[0-9]+)$ ]] || return 1
+    [[ -n "$agent" ]] && [[ "|$TMUX_DIALOG_WATCH_AGENTS|" == *"|$agent|"* ]] || return 1
+    [[ "${TMUX_DIALOG_NOTIFY_SECONDS:-0}" =~ ^[0-9]+$ ]] || return 1
+    (( TMUX_DIALOG_NOTIFY_SECONDS > 0 )) || return 1
+    [[ "${TMUX_AGENT_EXIT_POLL_SECONDS:-0}" =~ ^[0-9]+$ ]] || return 1
+    (( TMUX_AGENT_EXIT_POLL_SECONDS > 0 )) || return 1
+    return 0
+}
+
+# Where the caller's window stands on an earlier input pause, for a hook that
+# is about to defer a predicted approval to the fast poll. Prints one of:
+#   none     - no pause is pending, or a run is live again: nothing to settle
+#   waiting  - paused with the dialog still rendered. An agent that dispatches
+#              several tool calls at once fires all their hooks while the
+#              first dialog is up; such a hook has nothing to add, and
+#              lighting the running indicator for it would strobe the window
+#              between spinner and waiting badge.
+#   answered - paused, but the dialog is gone: the user has answered and the
+#              agent is issuing tool calls again, only the resume poll has not
+#              caught up yet. The caller relights the run itself; the poll
+#              cannot start on a paused window.
+#   unknown  - paused and undecidable. Either the pane cannot be judged
+#              (copy-mode shows the scrolled view, or the capture failed), or
+#              the pause is under two seconds old with no dialog rendered —
+#              which is also what a pause looks like before its own dialog
+#              has painted, since the hook that raises it runs first. The
+#              caller alerts at once.
+# The capture is paid only for a window that is actually paused.
+tmux_dialog_pause_state() {
+    local state pending run now content
+    if ! tmux_focus_available ||
+        ! state=$(tmux display-message -p -t "$TMUX_PANE" \
+            '#{@code_notify_resume_pending}|#{@code_notify_running}' 2>/dev/null); then
+        printf 'none'
+        return 0
+    fi
+    IFS='|' read -r pending run <<< "$state"
+    now=$(date +%s)
+    if [[ ! "$pending" =~ ^[0-9]+$ ]] ||
+        { [[ "$run" =~ ^[0-9]+$ ]] && (( now - run < TMUX_RUNNING_TTL )); }; then
+        printf 'none'
+        return 0
+    fi
+    if tmux_pane_in_copy_mode "$TMUX_PANE" ||
+        ! content=$(tmux capture-pane -p -t "$TMUX_PANE" 2>/dev/null); then
+        printf 'unknown'
+    elif [[ "$(tmux_resume_poll_dialog_flag "$content")" == "1" ]]; then
+        printf 'waiting'
+    elif (( now - pending >= 2 )); then
+        printf 'answered'
+    else
+        printf 'unknown'
+    fi
+    return 0
+}
+
+# Start the fast confirmation poll for the caller's window (see
+# TMUX_DIALOG_FAST_POLL_SECONDS). Call after the running indicator is up.
+# Returns 1 — the caller must then alert at once, as if the poll did not
+# exist — unless the window has a live run with the dialog watch armed on it:
+# that watch is the poll's backstop, and its recorded pane/agent/project is
+# the identity the alert is delivered under. The run epoch and generation read
+# here travel into the alert's overtake guard, so a poll that outlives its
+# turn can neither pause a successor nor alert twice with the sweep.
+#
+# One poll per window: each start writes a fresh token to
+# @code_notify_dialog_poll and a poll that no longer finds its own token
+# exits, so calls dispatched back to back share the newest poll's window
+# rather than stacking captures.
+tmux_dialog_fast_poll_start() {
+    tmux_focus_available || return 1
+    local state window_id run gen ctx now dpane dagent dproject token
+    state=$(tmux display-message -p -t "$TMUX_PANE" \
+        '#{window_id}|#{@code_notify_running}|#{@code_notify_run_gen}|#{@code_notify_dialog_ctx}' \
+        2>/dev/null) || return 1
+    # The context comes last: it ends in a directory name, which may itself
+    # contain the separator.
+    IFS='|' read -r window_id run gen ctx <<< "$state"
+    [[ "$window_id" =~ ^@[0-9]+$ ]] || return 1
+    now=$(date +%s)
+    [[ "$run" =~ ^[0-9]+$ ]] && (( now - run < TMUX_RUNNING_TTL )) || return 1
+    read -r dpane dagent dproject <<< "$ctx"
+    [[ "$dpane" =~ ^%[0-9]+$ ]] && [[ -n "$dagent" ]] || return 1
+    token="$now.$$.$RANDOM"
+    tmux set-option -w -t "$window_id" @code_notify_dialog_poll "$token" 2>/dev/null || return 1
+    ( tmux_dialog_fast_poll_run "$window_id" "$dpane" "$dagent" "$dproject" \
+        "$run" "$gen" "$token" ) >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    return 0
+}
+
+# Body of the fast confirmation poll. Each round re-reads the window in one
+# round trip and stops silently once the poll is no longer the one to answer
+# for it: a newer poll took the token, the run it was started under ended,
+# paused or was replaced, or the pane left the window. A pane in copy-mode is
+# skipped rather than judged — its capture is the scrolled view, where an
+# answered dialog can scroll in and a live one scroll out. A sighting is
+# delivered through tmux_dialog_watch_notify, the sweep watch's own path, so
+# the alert, its input pause and the duplicate protection are the same.
+tmux_dialog_fast_poll_run() {
+    local window_id="$1" pane_id="$2" agent="$3" project="$4"
+    local run="$5" gen="$6" token="$7"
+    local started="$SECONDS" state cur_window in_mode cur_run cur_gen cur_token content
+    while (( SECONDS - started < TMUX_DIALOG_FAST_POLL_SECONDS )); do
+        sleep "$TMUX_DIALOG_FAST_POLL_INTERVAL" 2>/dev/null || return 0
+        state=$(tmux display-message -p -t "$pane_id" \
+            '#{window_id}|#{pane_in_mode}|#{@code_notify_running}|#{@code_notify_run_gen}|#{@code_notify_dialog_poll}' \
+            2>/dev/null) || return 0
+        IFS='|' read -r cur_window in_mode cur_run cur_gen cur_token <<< "$state"
+        [[ "$cur_window" == "$window_id" ]] && [[ "$cur_token" == "$token" ]] &&
+            [[ "$cur_run" == "$run" ]] && [[ "$cur_gen" == "$gen" ]] || return 0
+        [[ "$in_mode" == "1" ]] && continue
+        content=$(tmux capture-pane -p -t "$pane_id" 2>/dev/null) || continue
+        if [[ "$(tmux_resume_poll_dialog_flag "$content")" == "1" ]]; then
+            tmux set-option -wu -t "$window_id" @code_notify_dialog_poll 2>/dev/null
+            tmux_dialog_watch_notify "$pane_id" "$agent" "$project" \
+                "$window_id" "$run" "$gen"
+            return 0
+        fi
+    done
+    cur_token=$(tmux show-options -wqv -t "$window_id" @code_notify_dialog_poll 2>/dev/null)
+    if [[ "$cur_token" == "$token" ]]; then
+        tmux set-option -wu -t "$window_id" @code_notify_dialog_poll 2>/dev/null
+    fi
     return 0
 }
 

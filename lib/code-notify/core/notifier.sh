@@ -427,13 +427,16 @@ agy_normalize_command_line() {
 # a leading prefix of the command's words, so command(git) covers "git status"
 # but not "git-foo", and command(git add) is checked before command(git).
 # Unreadable/absent settings or no parser -> "ask" (never suppress blindly).
+# $2 (optional) is the word printed when no rule covers the command — settings
+# absent included — instead of "ask", for callers that must tell an explicit
+# ask rule from the default.
 agy_permission_decision() {
-    local cmd="$1" settings out
+    local cmd="$1" dflt="${2:-ask}" settings out
     cmd="$(agy_normalize_command_line "$cmd")"
     settings="$(agy_permissions_file)"
-    [[ -f "$settings" ]] || { printf 'ask'; return 0; }
+    [[ -f "$settings" ]] || { printf '%s' "$dflt"; return 0; }
 
-    # shellcheck disable=SC2016  # $cmd/$ct/$pt are jq variables, not shell
+    # shellcheck disable=SC2016  # $cmd/$dflt/$ct/$pt are jq variables, not shell
     local jq_prog='
 def cmdtoks: ($cmd | split(" ") | map(select(. != "")));
 def pats(l): (.permissions[l] // [])
@@ -446,16 +449,16 @@ if (cmdtoks | length) == 0 then "ask"
 elif anymatch("deny") then "auto"
 elif anymatch("ask") then "ask"
 elif anymatch("allow") then "auto"
-else "ask" end'
+else $dflt end'
 
     if has_jq; then
-        out=$(jq -r --arg cmd "$cmd" "$jq_prog" "$settings" 2>/dev/null)
+        out=$(jq -r --arg cmd "$cmd" --arg dflt "$dflt" "$jq_prog" "$settings" 2>/dev/null)
         [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
     fi
     if has_python3; then
-        out=$(python3 - "$cmd" "$settings" <<'PY' 2>/dev/null
+        out=$(python3 - "$cmd" "$settings" "$dflt" <<'PY' 2>/dev/null
 import json, sys
-cmd, path = sys.argv[1], sys.argv[2]
+cmd, path, dflt = sys.argv[1], sys.argv[2], sys.argv[3]
 def toks(s): return [t for t in s.split(" ") if t]
 try:
     with open(path) as f:
@@ -475,7 +478,7 @@ if not ct: print("ask", end="")
 elif anymatch("deny"): print("auto", end="")
 elif anymatch("ask"): print("ask", end="")
 elif anymatch("allow"): print("auto", end="")
-else: print("ask", end="")
+else: print(dflt, end="")
 PY
 )
         [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
@@ -483,25 +486,37 @@ PY
     printf 'ask'
 }
 
-# Whether a run_command tool event should raise the approval banner: true only
-# when agy will actually pause for the user. agy's PreToolUse payload carries no
-# approval flag (every run_command looks identical), so the decision is
-# reconstructed from agy's own permission lists via agy_permission_decision.
-# Commands with shell chaining/redirection are treated as "ask" — the leading
-# command may auto-run while a chained one prompts, and over-notifying beats
-# swallowing a real prompt.
-agy_command_needs_approval() {
-    local cmd
+# How firmly a run_command tool event is predicted to pause for approval. agy's
+# PreToolUse payload carries no approval flag (every run_command looks
+# identical), so the answer is reconstructed from agy's own permission lists
+# via agy_permission_decision:
+#   none     - agy runs or denies it without asking (no banner)
+#   ask      - an explicit permissions.ask rule covers it: agy prompts
+#   unlisted - no rule decides it. agy's default is to prompt, but its auto
+#              mode instead runs such a command in the sandbox or clears it
+#              through a model review, and the payload reports neither the
+#              mode nor the outcome. The PreToolUse branch confirms these on
+#              the pane where it can and banners them where it cannot.
+# A command with shell chaining/redirection is "unlisted" unless an ask rule
+# covers its leading command: that command may auto-run while a chained one
+# prompts, so the rules cannot clear it. An empty command line, or no parser
+# to read the rules, is "ask" — nothing is known, so the alert stays immediate.
+agy_command_approval_kind() {
+    local cmd decision
     cmd="$(agy_normalize_command_line "$1")"
-    [[ -n "$cmd" ]] || return 0
-    # shellcheck disable=SC2016  # these are literal shell-operator glob patterns
-    case "$cmd" in
-        *';'* | *'|'* | *'&'* | *'`'* | *'$('* | *'>'* | *'<'* | *$'\n'*) return 0 ;;
-    esac
+    [[ -n "$cmd" ]] || { printf 'ask'; return 0; }
     # Pass the raw command: agy_permission_decision normalizes too, and agy
     # strips exactly one wrapper pair, so stripping here and again there would
     # over-normalize (e.g. ""git diff"" -> git diff) and could swallow a prompt.
-    [[ "$(agy_permission_decision "$1")" != "auto" ]]
+    decision="$(agy_permission_decision "$1" unlisted)"
+    # shellcheck disable=SC2016  # these are literal shell-operator glob patterns
+    case "$cmd" in
+        *';'* | *'|'* | *'&'* | *'`'* | *'$('* | *'>'* | *'<'* | *$'\n'*)
+            [[ "$decision" == "ask" ]] || decision="unlisted"
+            ;;
+    esac
+    [[ "$decision" == "auto" ]] && decision="none"
+    printf '%s' "$decision"
 }
 
 # "<ServerName>/<ToolName>" for a call_mcp_tool event (agy's dispatch tool for
@@ -549,12 +564,14 @@ except Exception:
 # eagerly loaded tool's flat name with the mcp_ prefix stripped, where each
 # rule's "/" is flattened to "_" (eager tools register as mcp_<server>_<tool>).
 # Unreadable/absent settings or no parser -> "ask" (never suppress blindly).
+# $3 (optional) is the word printed when no rule covers the tool — settings
+# absent included — instead of "ask", as in agy_permission_decision.
 agy_mcp_permission_decision() {
-    local target="$1" style="${2:-slash}" settings out
+    local target="$1" style="${2:-slash}" dflt="${3:-ask}" settings out
     settings="$(agy_permissions_file)"
-    [[ -f "$settings" ]] || { printf 'ask'; return 0; }
+    [[ -f "$settings" ]] || { printf '%s' "$dflt"; return 0; }
 
-    # shellcheck disable=SC2016  # $target/$style/$g are jq variables, not shell
+    # shellcheck disable=SC2016  # $target/$style/$dflt/$g are jq variables, not shell
     local jq_prog='
 def reesc: gsub("(?<c>[\\\\.\\^\\$\\+\\(\\)\\[\\]\\{\\}\\|\\?])"; "\\" + .c);
 def globre($g): "^" + ($g | split("*") | map(reesc) | join(".*")) + "$";
@@ -567,16 +584,17 @@ if ($target | length) == 0 then "ask"
 elif anymatch("deny") then "auto"
 elif anymatch("ask") then "ask"
 elif anymatch("allow") then "auto"
-else "ask" end'
+else $dflt end'
 
     if has_jq; then
-        out=$(jq -r --arg target "$target" --arg style "$style" "$jq_prog" "$settings" 2>/dev/null)
+        out=$(jq -r --arg target "$target" --arg style "$style" --arg dflt "$dflt" \
+            "$jq_prog" "$settings" 2>/dev/null)
         [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
     fi
     if has_python3; then
-        out=$(python3 - "$target" "$style" "$settings" <<'PY' 2>/dev/null
+        out=$(python3 - "$target" "$style" "$settings" "$dflt" <<'PY' 2>/dev/null
 import json, re, sys
-target, style, path = sys.argv[1], sys.argv[2], sys.argv[3]
+target, style, path, dflt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 try:
     with open(path) as f:
         perms = json.load(f).get("permissions") or {}
@@ -598,7 +616,7 @@ if not target: print("ask", end="")
 elif anymatch("deny"): print("auto", end="")
 elif anymatch("ask"): print("ask", end="")
 elif anymatch("allow"): print("auto", end="")
-else: print("ask", end="")
+else: print(dflt, end="")
 PY
 )
         [[ -n "$out" ]] && { printf '%s' "$out"; return 0; }
@@ -606,25 +624,26 @@ PY
     printf 'ask'
 }
 
-# Whether an MCP tool event should raise the approval banner. agy prompts for
-# every MCP tool call unless an mcp(...) rule lets it auto-run, so this mirrors
-# agy_command_needs_approval: banner unless agy's own lists resolve to "auto"
-# (allowlisted, or auto-denied). $1 is the toolCall name — call_mcp_tool for
-# lazily-loaded tools (server/tool live in the payload args), mcp_<server>_<tool>
-# for eagerly loaded ones (server/tool are baked into the name).
-agy_mcp_needs_approval() {
-    local name="$1" target style
+# agy_command_approval_kind for an MCP tool event: "none", "ask" or "unlisted"
+# with the same meaning. agy prompts for every MCP tool call unless an mcp(...)
+# rule lets it auto-run or auto-denies it. $1 is the toolCall name —
+# call_mcp_tool for lazily-loaded tools (server/tool live in the payload args),
+# mcp_<server>_<tool> for eagerly loaded ones (server/tool are baked into the
+# name). A call_mcp_tool whose server/tool cannot be extracted is "unlisted":
+# nothing clears it, so it is treated like a tool no rule covers.
+agy_mcp_approval_kind() {
+    local name="$1" target style decision
     if [[ "$name" == "call_mcp_tool" ]]; then
         target="$(get_agy_mcp_target)"
         style="slash"
-        # Unextractable server/tool: assume it prompts — over-notifying beats
-        # swallowing a real approval pause.
-        [[ -n "$target" ]] || return 0
+        [[ -n "$target" ]] || { printf 'unlisted'; return 0; }
     else
         target="${name#mcp_}"
         style="underscore"
     fi
-    [[ "$(agy_mcp_permission_decision "$target" "$style")" != "auto" ]]
+    decision="$(agy_mcp_permission_decision "$target" "$style" unlisted)"
+    [[ "$decision" == "auto" ]] && decision="none"
+    printf '%s' "$decision"
 }
 
 # True when permission_prompt alerts are enabled. The notifier does not source
@@ -788,6 +807,15 @@ agy_with_running_lock() {
 
 agy_start_running_locked() {
     cancel_agy_debounced_stop
+    agy_maybe_start_running
+}
+
+# A tool call on a window still parked on an input pause the user has already
+# answered: drop the lit-cache marker so the start reaches tmux and relights
+# the run.
+agy_resume_running_locked() {
+    cancel_agy_debounced_stop
+    agy_clear_running_marker
     agy_maybe_start_running
 }
 
@@ -971,18 +999,59 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
             # call that is about to pause must not light the spinner only for
             # the banner to pause it milliseconds later (see agy_banner_locked).
             agy_tool_name="$(get_agy_tool_name)"
-            agy_needs_banner=""
+            agy_approval_kind="none"
             if agy_permission_prompt_enabled; then
                 case "$agy_tool_name" in
                     run_command)
-                        agy_command_needs_approval "$(get_agy_command_line)" && agy_needs_banner=1
+                        agy_approval_kind="$(agy_command_approval_kind "$(get_agy_command_line)")"
                         ;;
                     call_mcp_tool | mcp_*)
-                        agy_mcp_needs_approval "$agy_tool_name" && agy_needs_banner=1
+                        agy_approval_kind="$(agy_mcp_approval_kind "$agy_tool_name")"
                         ;;
                 esac
             fi
-            if [[ -n "$agy_needs_banner" ]]; then
+            # A call no permission rule decides is only a guess at a prompt
+            # (see agy_command_approval_kind), and in agy's auto mode the
+            # guess is usually wrong: the banner and waiting badge would be
+            # taken back moments later when the call runs unprompted. Where
+            # the tmux dialog watch can stand behind it, confirm on the pane
+            # instead: treat the call as work in progress and let a short
+            # detached poll raise the alert once the dialog is really on
+            # screen (see TMUX_DIALOG_FAST_POLL_SECONDS in tmux.sh). Outside
+            # tmux, or with that watch unavailable, nothing can confirm the
+            # guess and the banner below stays immediate — an early alert
+            # beats a missed one.
+            if [[ "$agy_approval_kind" == "unlisted" ]] &&
+                declare -f tmux_dialog_fast_poll_eligible > /dev/null 2>&1 &&
+                tmux_dialog_fast_poll_eligible 2>/dev/null; then
+                # An earlier approval may have left the window paused (see
+                # tmux_dialog_pause_state for the four answers).
+                case "$(tmux_dialog_pause_state 2>/dev/null)" in
+                    waiting)
+                        # Parked on a dialog the user was alerted to; this is
+                        # a sibling call queued behind it. Still working,
+                        # nothing new to say, and no indicator start that
+                        # would flash over the waiting badge.
+                        agy_with_running_lock cancel_agy_debounced_stop || true
+                        exit 0
+                        ;;
+                    answered)
+                        # The user answered and the agent moved on, but the
+                        # window is still paused. Relight it here: an alert
+                        # raised by a tmux watch leaves the lit-cache marker
+                        # in place, so a plain start would skip the tmux call.
+                        agy_with_running_lock agy_resume_running_locked || true
+                        tmux_dialog_fast_poll_start 2>/dev/null && exit 0
+                        ;;
+                    none)
+                        agy_with_running_lock agy_start_running_locked || true
+                        tmux_dialog_fast_poll_start 2>/dev/null && exit 0
+                        ;;
+                esac
+                # A pause that could not be judged, or no live run with the
+                # watch armed on it: fall through to the immediate banner.
+            fi
+            if [[ "$agy_approval_kind" != "none" ]]; then
                 HOOK_TYPE="notification"
                 AGY_FORCED_SUBTYPE="permission_prompt"
                 # This notification pauses the running indicator further down.

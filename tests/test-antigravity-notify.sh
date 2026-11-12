@@ -5,7 +5,9 @@
 # agy passes no argv to a hook and delivers a JSON payload on stdin; code-notify
 # wraps each lifecycle event as "agy:<Event>" + "antigravity". This exercises the
 # notifier's antigravity branch directly (no agy binary required):
-#   * PreToolUse           -> "Input Required" (permission prompt)
+#   * PreToolUse           -> "Input Required" (permission prompt); inside tmux
+#                              a call no permission rule covers is confirmed
+#                              on the pane first (fast dialog poll)
 #   * PreInvocation        -> silent: running indicator + debounce cancel
 #   * PostToolUse + error  -> "Error" (string OR structured HookErrorMessage)
 #   * PostToolUse, no error -> debounced "Task Complete" (via the watcher),
@@ -42,6 +44,8 @@ if ! command -v jq >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
     exit 0
 fi
 
+# The fast dialog poll is switched off here, so a predicted approval banners
+# at once; the scenarios that confirm on the pane use run_agy_notifier_poll.
 run_agy_notifier() {
     local fake_path="$1"
     local event="$2"
@@ -51,6 +55,7 @@ run_agy_notifier() {
     printf '%s' "$payload" \
     | PATH="$fake_path" \
       CLAUDE_HOOK_TYPE="$hook_type" \
+      CODE_NOTIFY_TMUX_DIALOG_FAST_POLL_SECONDS=0 \
       CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
       CODE_NOTIFY_AGY_DEBOUNCE_SECONDS=1 \
       CODE_NOTIFY_TAIL_SYNC=1 \
@@ -122,7 +127,18 @@ while (( ${#args[@]} )); do
 done
 case "$cmd" in
     display-message)
+        opt() { cat "$FAKE_TMUX_STATE/@2.@code_notify_$1" 2>/dev/null; }
         case "${rest[0]}" in
+            '#{@code_notify_resume_pending}|#{@code_notify_running}')
+                printf '%s|%s\n' "$(opt resume_pending)" "$(opt running)"
+                ;;
+            '#{window_id}|#{@code_notify_running}|#{@code_notify_run_gen}|#{@code_notify_dialog_ctx}')
+                printf '@2|%s|%s|%s\n' "$(opt running)" "$(opt run_gen)" "$(opt dialog_ctx)"
+                ;;
+            '#{window_id}|#{pane_in_mode}|#{@code_notify_running}|#{@code_notify_run_gen}|#{@code_notify_dialog_poll}')
+                printf '@2|0|%s|%s|%s\n' "$(opt running)" "$(opt run_gen)" "$(opt dialog_poll)"
+                ;;
+            '#{pane_in_mode}') printf '0\n' ;;
             '#{session_id} #{window_id} #{pane_id}') printf '%s\n' '$1 @2 %3' ;;
             '#{window_id}') printf '%s\n' '@2' ;;
             *'#{window_id}|#{automatic-rename}|#{&&:#{window_active},#{session_attached}}|#{window_name}'*)
@@ -158,6 +174,9 @@ case "$cmd" in
         ;;
     set-hook)
         printf '%s\n' "$*" >> "$FAKE_TMUX_HOOK_LOG"
+        ;;
+    capture-pane)
+        cat "$FAKE_TMUX_STATE/${target}.pane_content" 2>/dev/null
         ;;
 esac
 exit 0
@@ -424,6 +443,138 @@ tail -n "+$((tmux_lines_before + 1))" "$FAKE_TMUX_LOG" \
     || fail "banner PreToolUse left the running marker set"
 [[ -f "$FAKE_TMUX_STATE/@2.@code_notify_resume_pending" ]] \
     || fail "banner PreToolUse did not install the resume-pending pause"
+
+# 8f-8j) Pane-confirmed approvals. A call no permission rule covers is only a
+#     guess at a prompt — agy's auto mode usually runs it unprompted — so
+#     inside tmux the hook keeps the running indicator up and a detached poll
+#     alerts once the dialog is actually rendered. The synthetic alert takes
+#     its project from the hook's working directory.
+run_agy_notifier_poll() {
+    local dir="$test_dir/work/$1"
+    mkdir -p "$dir"
+    ( cd "$dir" && printf '%s' "$3" \
+      | PATH="$fake_path" \
+        CODE_NOTIFY_TMUX_DIALOG_FAST_POLL_SECONDS=2 \
+        CODE_NOTIFY_TMUX_DIALOG_FAST_POLL_INTERVAL=0.2 \
+        CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 \
+        CODE_NOTIFY_TAIL_SYNC=1 \
+        bash "$NOTIFIER" "agy:$2" "antigravity" )
+}
+reset_poll_window() {
+    rm -f "$FAKE_TMUX_STATE"/@2.@code_notify_running \
+        "$FAKE_TMUX_STATE"/@2.@code_notify_run_gen \
+        "$FAKE_TMUX_STATE"/@2.@code_notify_resume_pending \
+        "$FAKE_TMUX_STATE"/@2.@code_notify_dialog_* \
+        "$FAKE_TMUX_STATE"/%3.pane_content
+}
+dialog_pane() {
+    printf '%s\n' "  Run this command?" "" "  1. Yes" "  2. No" \
+        > "$FAKE_TMUX_STATE/%3.pane_content"
+}
+
+# 8f) No dialog ever appears (the call ran unprompted): the indicator is lit,
+#     nothing is delivered, and the poll retires its token at the cap.
+reset_poll_window
+printf '%s\n' "agent output" > "$FAKE_TMUX_STATE/%3.pane_content"
+lines_before="$(wc -l < "$notification_log")"
+run_agy_notifier_poll projPollQuiet "PreToolUse" \
+    "{\"conversationId\":\"c-poll-quiet\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"make test | tee out.log\"}},$(ws projPollQuiet)}"
+[[ -f "$FAKE_TMUX_STATE/@2.@code_notify_running" ]] \
+    || fail "unconfirmed approval did not keep the running indicator lit"
+[[ -f "$FAKE_TMUX_STATE/@2.@code_notify_dialog_poll" ]] \
+    || fail "unconfirmed approval did not start the fast dialog poll"
+sleep 3.5
+[[ "$(wc -l < "$notification_log")" == "$lines_before" ]] \
+    || fail "an approval that never showed a dialog was alerted anyway"
+[[ -f "$FAKE_TMUX_STATE/@2.@code_notify_running" ]] \
+    || fail "a poll that saw no dialog took the running indicator down"
+[[ ! -f "$FAKE_TMUX_STATE/@2.@code_notify_dialog_poll" ]] \
+    || fail "the fast dialog poll did not retire its token at the cap"
+
+# 8g) The dialog renders after the hook returned: one alert, and the window
+#     moves from running to the input pause.
+reset_poll_window
+printf '%s\n' "agent output" > "$FAKE_TMUX_STATE/%3.pane_content"
+run_agy_notifier_poll projPollAsk "PreToolUse" \
+    "{\"conversationId\":\"c-poll-ask\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"echo hi\"}},$(ws projPollAsk)}"
+grep -q "projPollAsk" "$notification_log" \
+    && fail "an unconfirmed approval was alerted before any dialog rendered"
+dialog_pane
+wait_for_lines "$notification_log" "$(( lines_before + 1 ))" \
+    || fail "a rendered approval dialog did not deliver the alert"
+grep -q "Input Required - projPollAsk" "$notification_log" \
+    || fail "the pane-confirmed alert was not an input-required notification"
+for _ in $(seq 1 30); do
+    [[ -f "$FAKE_TMUX_STATE/@2.@code_notify_resume_pending" ]] && break
+    sleep 0.1
+done
+[[ -f "$FAKE_TMUX_STATE/@2.@code_notify_resume_pending" ]] \
+    || fail "the pane-confirmed alert did not install the input pause"
+[[ ! -f "$FAKE_TMUX_STATE/@2.@code_notify_running" ]] \
+    || fail "the pane-confirmed alert left the running marker set"
+sleep 2.5
+[[ "$(grep -c "projPollAsk" "$notification_log")" == "1" ]] \
+    || fail "one rendered dialog was alerted more than once"
+
+# 8h) A sibling call queued behind that dialog (window paused, dialog still
+#     up) adds nothing: no alert, and no indicator start over the waiting
+#     state.
+lines_before="$(wc -l < "$notification_log")"
+tmux_lines_before="$(wc -l < "$FAKE_TMUX_LOG")"
+run_agy_notifier_poll projPollSibling "PreToolUse" \
+    "{\"conversationId\":\"c-poll-ask\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"echo again\"}},$(ws projPollSibling)}"
+sleep 1
+[[ "$(wc -l < "$notification_log")" == "$lines_before" ]] \
+    || fail "a call queued behind an alerted dialog was alerted again"
+tail -n "+$((tmux_lines_before + 1))" "$FAKE_TMUX_LOG" \
+    | grep -qE 'set-option -w -t @2 @code_notify_running [0-9]' \
+    && fail "a call queued behind an alerted dialog lit the running indicator"
+[[ -f "$FAKE_TMUX_STATE/@2.@code_notify_resume_pending" ]] \
+    || fail "a call queued behind an alerted dialog dropped the input pause"
+
+# 8h2) The user answered that dialog and the agent moved on, but nothing has
+#     relit the window yet: the next unlisted call must relight it and poll,
+#     not fall back to the banner. The lit-cache marker is still fresh here,
+#     as it is after an alert raised by a tmux watch.
+printf '%s\n' "agent output" > "$FAKE_TMUX_STATE/%3.pane_content"
+printf '%s' "$(( $(date +%s) - 10 ))" > "$FAKE_TMUX_STATE/@2.@code_notify_resume_pending"
+[[ -f "$HOME/.claude/notifications/agy/c-poll-ask.running" ]] \
+    || fail "precondition: the pane-confirmed alert should leave the lit-cache marker"
+lines_before="$(wc -l < "$notification_log")"
+run_agy_notifier_poll projPollAnswered "PreToolUse" \
+    "{\"conversationId\":\"c-poll-ask\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"echo next\"}},$(ws projPollAnswered)}"
+[[ -f "$FAKE_TMUX_STATE/@2.@code_notify_running" ]] \
+    || fail "a call after an answered dialog did not relight the running indicator"
+[[ ! -f "$FAKE_TMUX_STATE/@2.@code_notify_resume_pending" ]] \
+    || fail "a call after an answered dialog left the stale input pause"
+[[ -f "$FAKE_TMUX_STATE/@2.@code_notify_dialog_poll" ]] \
+    || fail "a call after an answered dialog did not start the fast dialog poll"
+sleep 3
+[[ "$(wc -l < "$notification_log")" == "$lines_before" ]] \
+    || fail "a call after an answered dialog was alerted with no dialog on screen"
+
+# 8i) An explicit ask rule is no guess: it banners at once, poll or not, and
+#     without lighting the indicator first.
+reset_poll_window
+tmux_lines_before="$(wc -l < "$FAKE_TMUX_LOG")"
+run_agy_notifier_poll projPollRule "PreToolUse" \
+    "{\"conversationId\":\"c-poll-rule\",\"toolCall\":{\"name\":\"call_mcp_tool\",\"args\":{\"ServerName\":\"chrome-devtools\",\"ToolName\":\"evaluate_script\",\"Arguments\":{}}},$(ws projPollRule)}"
+grep -q "Input Required - projPollRule" "$notification_log" \
+    || fail "an explicit ask rule did not banner immediately"
+tail -n "+$((tmux_lines_before + 1))" "$FAKE_TMUX_LOG" \
+    | grep -qE 'set-option -w -t @2 @code_notify_running [0-9]' \
+    && fail "an explicit ask rule lit the running indicator before its banner"
+
+# 8j) Outside tmux nothing can confirm the guess: the banner stays immediate.
+( cd "$test_dir" && printf '%s' \
+    "{\"conversationId\":\"c-poll-notmux\",\"toolCall\":{\"name\":\"run_command\",\"args\":{\"CommandLine\":\"echo hi\"}},$(ws projPollNoTmux)}" \
+  | PATH="$fake_path" TMUX='' TMUX_PANE='' \
+    CODE_NOTIFY_TMUX_DIALOG_FAST_POLL_SECONDS=2 \
+    CODE_NOTIFY_STOP_RATE_LIMIT_SECONDS=0 CODE_NOTIFY_TAIL_SYNC=1 \
+    bash "$NOTIFIER" "agy:PreToolUse" "antigravity" )
+grep -q "Input Required - projPollNoTmux" "$notification_log" \
+    || fail "an unlisted call outside tmux did not banner immediately"
+reset_poll_window
 
 # 9) Settle gate: inside tmux, a pane still painting after the last step means
 #    the model is generating — the watcher must postpone the completion until

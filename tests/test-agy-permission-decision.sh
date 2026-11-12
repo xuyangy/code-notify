@@ -3,11 +3,12 @@
 # agy's PreToolUse payload carries no approval flag — every run_command looks
 # identical — so the "input needed" banner is gated on whether agy will
 # actually pause, reconstructed from its own permission lists. This exercises
-# agy_permission_decision / agy_command_needs_approval directly (extracted from
+# agy_permission_decision / agy_command_approval_kind directly (extracted from
 # notifier.sh) against a fixture settings.json, on the jq path, the python3
 # path, and the no-parser fallback. Precedence is deny > ask > allow, an
 # unlisted command defaults to a prompt, and command(<prefix>) matches on whole
-# leading words.
+# leading words. The approval kind additionally separates a command an explicit
+# ask rule covers from one no rule decides.
 
 set -e
 
@@ -18,7 +19,7 @@ NOTIFIER="$ROOT_DIR/lib/code-notify/core/notifier.sh"
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; exit 1; }
 
-for name in has_jq has_python3 agy_permissions_file agy_normalize_command_line agy_permission_decision agy_command_needs_approval; do
+for name in has_jq has_python3 agy_permissions_file agy_normalize_command_line agy_permission_decision agy_command_approval_kind; do
     fn="$(sed -n "/^$name()/,/^}/p" "$NOTIFIER")"
     [[ -n "$fn" ]] || fail "could not extract $name from notifier.sh"
     eval "$fn"
@@ -46,10 +47,19 @@ decision() {
     pass "$desc"
 }
 
-# approval: assert agy_command_needs_approval (0 -> notify, 1 -> suppress).
+# approval: assert whether agy_command_approval_kind predicts a pause at all
+# (any kind but "none" -> notify, "none" -> suppress).
 approval() {
     local desc="$1" cmd="$2" expected="$3" got="suppress"
-    agy_command_needs_approval "$cmd" && got="notify"
+    [[ "$(agy_command_approval_kind "$cmd")" != "none" ]] && got="notify"
+    [[ "$got" == "$expected" ]] || fail "$desc (expected '$expected', got '$got')"
+    pass "$desc"
+}
+
+# kind: assert agy_command_approval_kind itself.
+kind() {
+    local desc="$1" cmd="$2" expected="$3" got
+    got="$(agy_command_approval_kind "$cmd")"
     [[ "$got" == "$expected" ]] || fail "$desc (expected '$expected', got '$got')"
     pass "$desc"
 }
@@ -121,5 +131,22 @@ approval "double-quoted command notifies" '""git diff""' "notify"
 approval "ask command notifies" "git add -p" "notify"
 approval "unlisted command notifies" "python3 x.py" "notify"
 approval "empty command notifies" "" "notify"
+
+# Only an explicit ask rule is a firm prediction; everything no rule decides —
+# chained commands included, whatever their leading command — is "unlisted".
+kind "allowlisted command is none" "git status" "none"
+kind "denied command is none" "git push origin" "none"
+kind "explicit ask rule is ask" "git commit -m x" "ask"
+kind "quoted explicit ask rule is ask" '"git add -p"' "ask"
+kind "unlisted command is unlisted" "python3 x.py" "unlisted"
+kind "chained allowlisted command is unlisted" "git status | head" "unlisted"
+kind "chained denied command is unlisted" "git push && echo done" "unlisted"
+kind "chained ask command stays ask" "git commit -m x && git push" "ask"
+kind "empty command is ask" "" "ask"
+[[ "$(agy_permission_decision "python3 x.py" unlisted)" == "unlisted" ]] \
+    || fail "the default word should replace ask for an unlisted command"
+[[ "$(agy_permission_decision "git add -p" unlisted)" == "ask" ]] \
+    || fail "the default word must not replace an explicit ask rule"
+pass "decision default word applies to unlisted commands only"
 
 echo "All agy permission-decision tests passed"

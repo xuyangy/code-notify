@@ -25,7 +25,6 @@ handle_project_command() {
             init_project_interactive "$@"
             ;;
         "voice")
-            shift
             handle_project_voice_command "$@"
             ;;
         *)

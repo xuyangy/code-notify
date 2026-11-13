@@ -186,6 +186,14 @@ else
     test_fail "osascript fallback quoting"
 fi
 
+# cnp voice passes its subcommand through
+test_start "project voice command"
+if run_test_script tests/test-project-voice-command.sh; then
+    test_pass
+else
+    test_fail "project voice command"
+fi
+
 # Test 12: npm launchers can route to the shell runtime
 test_start "npm launcher routing"
 if node ./bin/npm-cn.js version 2>&1 | grep -q "code-notify version"; then

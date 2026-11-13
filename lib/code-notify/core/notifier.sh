@@ -1590,17 +1590,20 @@ get_notification_subtype() {
     # "permission" or "approved" can't misclassify (and bypass rate limiting).
     # Untyped payloads (Claude Code Notification hooks only carry a message)
     # keep the raw substring match.
+    #
+    # idle_prompt and auth_success are matched against the same source, and
+    # after the approval tokens, because they are the two subtypes that can
+    # hide an alert (idle is rate-limited, auth does not pause). An approval
+    # carries arbitrary text — the command, the edit, the working directory —
+    # and that text naming "idle_prompt" must not turn the approval into an
+    # idle reminder: a typed payload is idle only when its type says so, and
+    # an untyped one only when it is not an approval.
     local payload_type permission_source
     payload_type=$(get_payload_type_field "$HOOK_DATA")
     # Lowercase for case-insensitive matching — gemini sends capitalised
     # types like "ToolPermission" (PowerShell's -match is already
     # case-insensitive, keeping the two implementations in parity).
     permission_source=$(printf '%s' "${payload_type:-$HOOK_DATA}" | tr '[:upper:]' '[:lower:]')
-
-    if [[ "$HOOK_DATA" == *"idle_prompt"* ]]; then
-        printf '%s\n' "idle_prompt"
-        return 0
-    fi
 
     if [[ "$permission_source" == *"permission_prompt"* ]] ||
         [[ "$permission_source" == *"request_permissions"* ]] ||
@@ -1612,11 +1615,18 @@ get_notification_subtype() {
         return 0
     fi
 
-    if [[ "$HOOK_DATA" == *"auth_success"* ]]; then
+    if [[ "$permission_source" == *"idle_prompt"* ]]; then
+        printf '%s\n' "idle_prompt"
+        return 0
+    fi
+
+    if [[ "$permission_source" == *"auth_success"* ]]; then
         printf '%s\n' "auth_success"
         return 0
     fi
 
+    # Elicitation keeps the raw match even for a typed payload, for payloads
+    # whose outer type does not identify the dialog.
     if [[ "$HOOK_DATA" == *"elicitation_dialog"* ]] || [[ "$HOOK_DATA" == *"mcp_elicitations"* ]]; then
         printf '%s\n' "elicitation_dialog"
         return 0

@@ -2987,15 +2987,20 @@ function Get-NotificationSubtype {
     }
     $permissionSource = if ($typeField) { $typeField } else { $HookData }
 
-    if ($HookData -match 'idle_prompt') {
-        return "idle_prompt"
-    }
-
+    # idle_prompt and auth_success are matched against the same source, and
+    # after the approval tokens: a typed payload is one of them only when its
+    # type says so, and an untyped one only when it is not an approval. An
+    # approval's command or path text naming "idle_prompt" must not turn it
+    # into an idle reminder.
     if ($permissionSource -match 'permission_prompt|request_permissions|sandbox_approval|approval|approve|permission') {
         return "permission_prompt"
     }
 
-    if ($HookData -match 'auth_success') {
+    if ($permissionSource -match 'idle_prompt') {
+        return "idle_prompt"
+    }
+
+    if ($permissionSource -match 'auth_success') {
         return "auth_success"
     }
 

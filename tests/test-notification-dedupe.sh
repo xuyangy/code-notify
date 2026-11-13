@@ -109,11 +109,28 @@ run_notifier_payload "$fake_path" '{"notification_type":"ToolPermission","messag
 run_notifier_payload "$fake_path" '{"notification_type":"ToolPermission","message":"Tool requires confirmation"}'
 
 wait_for_lines "$notification_log" 7 || fail "expected seven notification deliveries"
-wait_for_lines "$sound_log" 7 || fail "expected seven sound playbacks"
-wait_for_lines "$HOME/.claude/logs/notifications.log" 7 || fail "expected seven notification log entries"
 
-[[ $(wc -l < "$notification_log") -eq 7 ]] || fail "non-approval duplicates should be suppressed"
-[[ $(wc -l < "$sound_log") -eq 7 ]] || fail "non-approval sound playback should be suppressed"
-[[ $(wc -l < "$HOME/.claude/logs/notifications.log") -eq 7 ]] || fail "non-approval log entries should be suppressed"
+# An approval whose free text names "idle_prompt" is still an approval: it is
+# labelled as one and repeats are never rate-limited as idle reminders. Typed
+# payload first (the word sits in cwd), then an untyped PermissionRequest (the
+# word sits in the command).
+typed_idle_text='{"notification_type":"permission_prompt","message":"Claude needs your permission","cwd":"/tmp/fix-idle_prompt-rate"}'
+untyped_idle_text='{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"grep -rn idle_prompt lib/"}}'
+run_notifier_payload "$fake_path" "$typed_idle_text"
+run_notifier_payload "$fake_path" "$typed_idle_text"
+run_notifier_payload "$fake_path" "$untyped_idle_text"
+run_notifier_payload "$fake_path" "$untyped_idle_text"
+
+wait_for_lines "$notification_log" 11 || fail "approvals mentioning idle_prompt should all be delivered"
+wait_for_lines "$sound_log" 11 || fail "expected eleven sound playbacks"
+wait_for_lines "$HOME/.claude/logs/notifications.log" 11 || fail "expected eleven notification log entries"
+
+if sed -n '8,11p' "$notification_log" | grep -q "Idle"; then
+    fail "approval mentioning idle_prompt should not be labeled Idle"
+fi
+
+[[ $(wc -l < "$notification_log") -eq 11 ]] || fail "non-approval duplicates should be suppressed"
+[[ $(wc -l < "$sound_log") -eq 11 ]] || fail "non-approval sound playback should be suppressed"
+[[ $(wc -l < "$HOME/.claude/logs/notifications.log") -eq 11 ]] || fail "non-approval log entries should be suppressed"
 
 pass "notification dedupe suppresses repeated idle_prompt events without blocking approval prompts"

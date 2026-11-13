@@ -210,6 +210,14 @@ else
     test_fail "synthetic hook type"
 fi
 
+# Watch contexts never store the sweep's field separator
+test_start "tmux context separator"
+if run_test_script tests/test-tmux-context-separator.sh; then
+    test_pass
+else
+    test_fail "tmux context separator"
+fi
+
 # Test 12: npm launchers can route to the shell runtime
 test_start "npm launcher routing"
 if node ./bin/npm-cn.js version 2>&1 | grep -q "code-notify version"; then

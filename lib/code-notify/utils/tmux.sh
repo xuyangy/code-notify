@@ -1304,8 +1304,14 @@ tmux_running_dialog_arm() {
         tmux set-option -wu -t "$window_id" @code_notify_dialog_ctx 2>/dev/null
         return 0
     fi
+    # The agent-exit sweep reads this option as one field of a "|"-separated
+    # row, so a "|" in the directory name would shift every later field and
+    # the dialog countdown would never mature. Only this stored copy is
+    # changed; the project itself keeps its name everywhere else.
+    local project
+    project="$(basename "$PWD")"
     tmux set-option -w -t "$window_id" @code_notify_dialog_ctx \
-        "$pane_id $agent $(basename "$PWD")" 2>/dev/null
+        "$pane_id $agent ${project//|/_}" 2>/dev/null
     # The watch rides the agent-exit sweep; make sure it is ticking even
     # when PID resolution failed and nothing else armed it.
     tmux_agent_exit_schedule_sweep
@@ -1445,8 +1451,10 @@ tmux_idle_watch_arm() {
     [[ "$pane_id" =~ $pane_re ]] || return 0
     fp=$(tmux_resume_poll_fingerprint "$pane_id") || return 0
     [[ -n "$fp" ]] || return 0
+    # "|" separates the sweep's fields (see tmux_running_dialog_arm), so it
+    # is replaced in this stored copy of the project name.
     tmux set-option -w -t "$window_id" @code_notify_idle_watch \
-        "$pane_id $(date +%s) $fp settling $agent $project" 2>/dev/null
+        "$pane_id $(date +%s) $fp settling $agent ${project//|/_}" 2>/dev/null
     # Rides the agent-exit sweep; make sure it is ticking even though the
     # stop that led here just retired the turn's PID tracking.
     tmux_agent_exit_schedule_sweep

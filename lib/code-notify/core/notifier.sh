@@ -76,10 +76,14 @@ if [[ "$RAW_ARG1" != agy:* ]] && {
     # learn nothing is pending. Outside tmux, or with no flag for this
     # server's socket, there is nothing to resume. A stale flag only costs
     # the full path below; a lost flag is healed by the resume poll.
-    [[ -n "${TMUX:-}" ]] || exit 0
+    # Flags name the pane that paused, so only this pane's pause counts; a
+    # pause in another window leaves this hook on the fast exit. Without
+    # TMUX_PANE the resume cannot target a window at all
+    # (tmux_focus_available), so there is nothing to do.
+    [[ -n "${TMUX:-}" ]] && [[ -n "${TMUX_PANE:-}" ]] || exit 0
     RESUME_SOCKET_BASE="${TMUX%%,*}"
     RESUME_SOCKET_BASE="${RESUME_SOCKET_BASE##*/}"
-    RESUME_FLAGS=("$HOME/.claude/notifications/state/resume-pending/${RESUME_SOCKET_BASE:-default}".*)
+    RESUME_FLAGS=("$HOME/.claude/notifications/state/resume-pending/${RESUME_SOCKET_BASE:-default}".*."$TMUX_PANE")
     [[ -e "${RESUME_FLAGS[0]}" ]] || exit 0
     source "$NOTIFIER_DIR/../utils/tmux.sh"
     CODE_NOTIFY_TMUX_AGENT_NAME="${RAW_ARG2:-}"

@@ -394,6 +394,12 @@ export FAKE_TMUX_WINDOWS=""
 export FAKE_TMUX_SESSIONS=""
 
 window_name() { cat "$state_dir/@2.window_name" 2>/dev/null; }
+# True when the window has a resume flag, bare or for any pane.
+resume_flag_exists() {
+    local path
+    path="$(tmux_resume_flag_path "$1")"
+    [[ -e "$path" ]] || compgen -G "$path.*" > /dev/null
+}
 orig_option() { cat "$state_dir/@2.@code_notify_orig_name" 2>/dev/null; }
 wait_for_path() {
     local path="$1" i
@@ -1797,7 +1803,7 @@ unset FAKE_TMUX_PANE_HEIGHT
     || fail "a rejected permission should consume the pause marker"
 [[ ! -f "$state_dir/@2.@code_notify_pause_fp" ]] \
     || fail "a rejected permission should consume the dialog snapshot"
-[[ ! -e "$(tmux_resume_flag_path '@2')" ]] \
+! resume_flag_exists '@2' \
     || fail "a rejected permission should remove the mirrored resume flag"
 [[ "$(window_name)" == "zsh" ]] \
     || fail "a rejected permission should clear the waiting badge (got: $(window_name))"
@@ -1954,7 +1960,7 @@ fire_poll_payload || fail "the settled-interrupt tick should run cleanly"
     || fail "a settled interrupt should retire the dead pause"
 [[ ! -f "$state_dir/@2.@code_notify_pause_fp" ]] \
     || fail "a settled interrupt should consume the dialog snapshot"
-[[ ! -e "$(tmux_resume_flag_path '@2')" ]] \
+! resume_flag_exists '@2' \
     || fail "a settled interrupt should remove the mirrored resume flag"
 [[ ! -f "$state_dir/@2.@code_notify_running" ]] \
     || fail "a settled interrupt must not light the running indicator"
@@ -3624,7 +3630,7 @@ FAKE_TMUX_SUCCESSOR_RACE_MARKER="$successor_marker" \
     || fail "REGRESSION: the pause must not arm a resume watch on a live successor turn"
 [[ ! -f "$state_dir/.@code_notify_resume_poll_scheduled" ]] \
     || fail "REGRESSION: an overtaken pause must not schedule the resume poll"
-[[ ! -e "$(tmux_resume_flag_path "@2")" ]] \
+! resume_flag_exists "@2" \
     || fail "REGRESSION: an overtaken pause must not leave a resume flag file"
 # The control: with no successor, the identical call parks the whole pause.
 rm -f "$state_dir/@2.@code_notify_running" "$state_dir/@2.@code_notify_run_gen"
@@ -3636,10 +3642,16 @@ tmux_running_pause_for_input watch || fail "an unraced pause should succeed"
     || fail "an unraced pause should record the watched pane"
 [[ -f "$state_dir/.@code_notify_resume_poll_scheduled" ]] \
     || fail "an unraced watched pause should schedule the resume poll"
+# The resume flag names the pane that paused, so the notifier's fast gate
+# only sends that pane's tool hooks down the slow path.
+[[ -e "$(tmux_resume_flag_path "@2").%3" ]] \
+    || fail "an unraced pause should leave a resume flag for the pausing pane"
 rm -f "$state_dir/@2.@code_notify_resume_pending" "$state_dir/@2.@code_notify_pause_fp" \
     "$state_dir/.@code_notify_resume_poll_scheduled" "$state_dir/%3.pane_content" \
     "$successor_marker"
 tmux_resume_flag_clear "@2"
+! resume_flag_exists "@2" \
+    || fail "clearing a window should remove its pane-keyed resume flag"
 pass "an overtaken input pause leaves the successor turn intact"
 
 # --- a preserved queued-prompt hint self-heals when no successor runs ---

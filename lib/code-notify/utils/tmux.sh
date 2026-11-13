@@ -3859,7 +3859,10 @@ tmux_running_stop() {
 # flag only routes hooks through the full path below (the pre-flag behavior),
 # and a lost flag is healed by the resume poll, which resumes paused windows
 # on its own. Flags are scoped by server socket basename so hooks on one
-# server don't pay for a pause on another.
+# server don't pay for a pause on another, and named
+# "<socket>.<window>.<pane>" after the pane that paused, so a pause in one
+# window does not send every other window's tool hooks down the slow path.
+# Clearing goes by window and takes every pane's flag with it.
 TMUX_RESUME_FLAG_DIR="$HOME/.claude/notifications/state/resume-pending"
 
 tmux_resume_flag_path() {
@@ -3870,7 +3873,8 @@ tmux_resume_flag_path() {
 }
 
 tmux_resume_flag_set() {
-    local window_id="$1"
+    local window_id="$1" pane_id="${2:-}"
+    local pane_re='^%[0-9]+$'
     mkdir -p "$TMUX_RESUME_FLAG_DIR" 2>/dev/null || return 0
     # Orphan GC: a window killed mid-pause takes @code_notify_resume_pending
     # with it, so no clear site ever fires for its flag. Anything older than
@@ -3879,13 +3883,21 @@ tmux_resume_flag_set() {
     # event rather than in the per-tool-call hooks.
     find "$TMUX_RESUME_FLAG_DIR" -type f -mmin +$((TMUX_RUNNING_TTL / 60)) \
         -delete 2>/dev/null
-    : > "$(tmux_resume_flag_path "$window_id")" 2>/dev/null
+    # Without a valid pane id, fall back to the bare window flag. The
+    # notifier's gate looks for pane-named flags only, so tool hooks ignore
+    # it.
+    if [[ "$pane_id" =~ $pane_re ]]; then
+        : > "$(tmux_resume_flag_path "$window_id").$pane_id" 2>/dev/null
+    else
+        : > "$(tmux_resume_flag_path "$window_id")" 2>/dev/null
+    fi
     return 0
 }
 
 tmux_resume_flag_clear() {
-    local window_id="$1"
-    rm -f "$(tmux_resume_flag_path "$window_id")" 2>/dev/null
+    local window_id="$1" path
+    path="$(tmux_resume_flag_path "$window_id")"
+    rm -f "$path" "$path".* 2>/dev/null
     return 0
 }
 
@@ -3962,7 +3974,7 @@ tmux_running_pause_for_input() {
     # this hook already announced.
     tmux set-option -wu -t "$window_id" @code_notify_dialog_grace 2>/dev/null
     tmux set-option -w -t "$window_id" @code_notify_resume_pending "$now" 2>/dev/null
-    tmux_resume_flag_set "$window_id"
+    tmux_resume_flag_set "$window_id" "$pane_id"
     # The answer itself emits no hook (see TMUX_RESUME_POLL_SECONDS), so watch
     # the pane while the dialog is outstanding. The deferred snapshot is the
     # settled dialog as rendered: the poll resumes only when pane CONTENT

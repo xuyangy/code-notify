@@ -202,6 +202,14 @@ else
     test_fail "unconfigured features skip python3"
 fi
 
+# Synthetic notifier runs ignore an inherited CLAUDE_HOOK_TYPE
+test_start "synthetic hook type"
+if run_test_script tests/test-synthetic-hook-type.sh; then
+    test_pass
+else
+    test_fail "synthetic hook type"
+fi
+
 # Test 12: npm launchers can route to the shell runtime
 test_start "npm launcher routing"
 if node ./bin/npm-cn.js version 2>&1 | grep -q "code-notify version"; then

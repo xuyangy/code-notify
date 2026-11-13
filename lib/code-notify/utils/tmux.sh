@@ -1575,8 +1575,12 @@ tmux_idle_watch_notify() {
     tmux_idle_prompt_enabled || return 0
     notifier="${CODE_NOTIFY_NOTIFIER_PATH:-${TMUX_BADGE_LIB_PATH%/*}/../core/notifier.sh}"
     [[ -f "$notifier" ]] || return 0
+    # CLAUDE_HOOK_TYPE='' : an inherited hook type (Antigravity exports one)
+    # would override this child's argv in the notifier. Empty reads as unset
+    # there, without the extra fork of `env -u`. Same at every synthetic
+    # notifier launch below.
     ( printf '%s' '{"type":"idle_prompt"}' \
-        | CODE_NOTIFY_TMUX_BADGE_VISIBLE=true TMUX_PANE="$pane_id" \
+        | CLAUDE_HOOK_TYPE='' CODE_NOTIFY_TMUX_BADGE_VISIBLE=true TMUX_PANE="$pane_id" \
           CODE_NOTIFY_TMUX_GUARD_WINDOW="$window_id" \
           bash "$notifier" notification "$agent" "$project" ) >/dev/null 2>&1 &
     disown 2>/dev/null || true
@@ -1604,7 +1608,7 @@ tmux_dialog_watch_notify() {
     notifier="${CODE_NOTIFY_NOTIFIER_PATH:-${TMUX_BADGE_LIB_PATH%/*}/../core/notifier.sh}"
     [[ -f "$notifier" ]] || return 0
     ( printf '%s' '{"type":"permission_prompt"}' \
-        | TMUX_PANE="$pane_id" CODE_NOTIFY_TMUX_GUARD_WINDOW="$window_id" \
+        | CLAUDE_HOOK_TYPE='' TMUX_PANE="$pane_id" CODE_NOTIFY_TMUX_GUARD_WINDOW="$window_id" \
           CODE_NOTIFY_TMUX_GUARD_RUN="$run" CODE_NOTIFY_TMUX_GUARD_GEN="$gen" \
           CODE_NOTIFY_TMUX_GUARD_DIALOG_GRACE="$dialog_grace" \
           bash "$notifier" notification "$agent" "$project" ) >/dev/null 2>&1 &
@@ -1767,11 +1771,11 @@ tmux_settle_watch_notify() {
     notifier="${CODE_NOTIFY_NOTIFIER_PATH:-${TMUX_BADGE_LIB_PATH%/*}/../core/notifier.sh}"
     [[ -f "$notifier" ]] || return 1
     if [[ "$badge_only" == "1" ]]; then
-        CODE_NOTIFY_BADGE_ONLY=1 CODE_NOTIFY_TMUX_STOP_ALREADY_APPLIED=1 \
+        CLAUDE_HOOK_TYPE='' CODE_NOTIFY_BADGE_ONLY=1 CODE_NOTIFY_TMUX_STOP_ALREADY_APPLIED=1 \
             TMUX_PANE="$pane_id" \
             bash "$notifier" stop "$agent" "$project" >/dev/null 2>&1
     else
-        CODE_NOTIFY_TMUX_STOP_ALREADY_APPLIED=1 TMUX_PANE="$pane_id" \
+        CLAUDE_HOOK_TYPE='' CODE_NOTIFY_TMUX_STOP_ALREADY_APPLIED=1 TMUX_PANE="$pane_id" \
             bash "$notifier" stop "$agent" "$project" >/dev/null 2>&1
     fi
 }

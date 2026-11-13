@@ -224,6 +224,45 @@ try {
         throw "Remove-CodexNotifyConfig kept the legacy code-notify notify assignment"
     }
 
+    # Gemini: the user's own AfterAgent hook and their hooks.enabled survive
+    # enable and disable; only code-notify's hooks are added and removed.
+    $script:GeminiHome = Join-Path $env:USERPROFILE ".gemini"
+    $script:GeminiSettingsFile = Join-Path $script:GeminiHome "settings.json"
+    New-Item -ItemType Directory -Path $script:GeminiHome -Force | Out-Null
+    $userGeminiCommand = 'C:\tools\my-logger.exe'
+    @{
+        theme = "x"
+        hooks = @{
+            enabled = $true
+            AfterAgent = @(@{ matcher = ""; hooks = @(@{ name = "code-notify-complete"; type = "command"; command = $userGeminiCommand }) })
+        }
+    } | ConvertTo-Json -Depth 10 | Set-Content $script:GeminiSettingsFile -Encoding UTF8
+    if (Test-NotificationsEnabled -Tool "gemini") {
+        throw "a user Gemini hook was treated as code-notify's"
+    }
+    Enable-Notifications -Tool "gemini"
+    $gemini = Get-Content $script:GeminiSettingsFile -Raw | ConvertFrom-Json -ErrorAction Stop
+    $geminiStop = Get-GeminiStopCommand -NotifyScript (Get-NotifyScript)
+    if (-not (Test-HookEntriesContainCommand -Entries @($gemini.hooks.AfterAgent) -Matcher "" -Command $userGeminiCommand)) {
+        throw "Gemini enable removed the user's AfterAgent hook"
+    }
+    if (-not (Test-HookEntriesContainCommand -Entries @($gemini.hooks.AfterAgent) -Matcher "" -Command $geminiStop)) {
+        throw "Gemini enable did not add the AfterAgent hook"
+    }
+    if (-not (Test-NotificationsEnabled -Tool "gemini")) {
+        throw "enabled Gemini settings did not read as enabled"
+    }
+    Disable-Notifications -Tool "gemini"
+    $gemini = Get-Content $script:GeminiSettingsFile -Raw | ConvertFrom-Json -ErrorAction Stop
+    if (-not (Test-HookEntriesContainCommand -Entries @($gemini.hooks.AfterAgent) -Matcher "" -Command $userGeminiCommand)) {
+        throw "Gemini disable removed the user's AfterAgent hook"
+    }
+    if (Test-HookEntriesContainCommand -Entries @($gemini.hooks.AfterAgent) -Matcher "" -Command $geminiStop) {
+        throw "Gemini disable kept the code-notify AfterAgent hook"
+    }
+    if ($gemini.hooks.enabled -ne $true -or $gemini.theme -ne "x") {
+        throw "Gemini disable dropped hooks.enabled or other settings while user hooks remain"
+    }
 }
 finally {
     Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue

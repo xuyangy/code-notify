@@ -2839,19 +2839,77 @@ disable_codex_hooks() {
 # ============================================
 
 # Check if Gemini CLI notifications are enabled
+#
+# Gemini settings can hold the user's own Notification/AfterAgent hooks too,
+# so ownership is decided by each hook's command (the notifier path plus the
+# "gemini" argument), never by the event key or by the hook's name, which a
+# user can copy.
+get_managed_gemini_hook_pattern() {
+    printf '%s\n' '(code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*(notification|stop)\s+gemini(?:\s|$)'
+}
+
 is_gemini_enabled() {
     if [[ ! -f "$GEMINI_SETTINGS_FILE" ]]; then
         return 1
     fi
-    # Check for our hooks in Gemini settings
     if has_jq; then
-        jq -e '.hooks.AfterAgent != null or .hooks.Notification != null' "$GEMINI_SETTINGS_FILE" &>/dev/null
+        jq -e --arg pattern "$(get_managed_gemini_hook_pattern)" '
+            [(.hooks.Notification, .hooks.AfterAgent) | arrays | .[]
+             | objects | .hooks? | arrays | .[] | objects | (.command? // "")
+             | strings]
+            | any(test($pattern))
+        ' "$GEMINI_SETTINGS_FILE" &>/dev/null
+    elif has_python3; then
+        python3 - "$GEMINI_SETTINGS_FILE" "$(get_managed_gemini_hook_pattern)" << 'PYTHON' &>/dev/null
+import json
+import re
+import sys
+
+regex = re.compile(sys.argv[2])
+try:
+    with open(sys.argv[1], 'r') as f:
+        hooks = (json.load(f) or {}).get('hooks') or {}
+except Exception:
+    sys.exit(1)
+
+# Hook command strings only, as the jq branch: text quoted in a description
+# or any other field is not ownership.
+for event in ('Notification', 'AfterAgent'):
+    entries = hooks.get(event) if isinstance(hooks, dict) else None
+    for entry in entries if isinstance(entries, list) else []:
+        inner = entry.get('hooks') if isinstance(entry, dict) else None
+        for hook in inner if isinstance(inner, list) else []:
+            command = hook.get('command') if isinstance(hook, dict) else None
+            if isinstance(command, str) and regex.search(command):
+                sys.exit(0)
+sys.exit(1)
+PYTHON
     else
-        grep -qE '"(AfterAgent|Notification)"' "$GEMINI_SETTINGS_FILE" 2>/dev/null
+        # No parser: a whole-file match, which can be fooled by the same text
+        # in a non-command field.
+        grep -qE '(code-notify.*notifier\.sh|\.claude[\\/]+notifications[\\/]+notify\.(ps1|sh)).*(notification|stop) gemini' \
+            "$GEMINI_SETTINGS_FILE" 2>/dev/null
     fi
 }
 
-# Enable Gemini CLI notifications
+# jq definitions shared by enable and disable: strip_managed removes our hook
+# objects from a list of hook entries, dropping only the entries that held one
+# of ours and are left empty. Entries without a managed hook pass through
+# untouched.
+GEMINI_JQ_DEFS='
+def managed: (.command? // "") | (type == "string") and test($pattern);
+def strip_managed:
+    map(
+        if (type == "object") and ((.hooks | type) == "array") and any(.hooks[]; managed)
+        then (.hooks |= map(select(managed | not))) | select((.hooks | length) > 0)
+        else .
+        end
+    );
+'
+
+# Enable Gemini CLI notifications. Our hook entries are replaced (so a re-run
+# or an upgrade writes the current command once); the user's own hooks under
+# the same events are kept.
 enable_gemini_hooks() {
     local notify_script=$(get_notify_script)
 
@@ -2865,10 +2923,10 @@ enable_gemini_hooks() {
 
     if has_jq; then
         # Use safe_jq_update for error checking
-        safe_jq_update "$GEMINI_SETTINGS_FILE" '
+        safe_jq_update "$GEMINI_SETTINGS_FILE" "$GEMINI_JQ_DEFS"'
             .tools.enableHooks = true |
             .hooks.enabled = true |
-            .hooks.Notification = [{
+            .hooks.Notification = (((.hooks.Notification // []) | strip_managed) + [{
                 "matcher": "",
                 "hooks": [{
                     "name": "code-notify-notification",
@@ -2876,8 +2934,8 @@ enable_gemini_hooks() {
                     "command": ($script + " notification gemini"),
                     "description": "Desktop notification when input needed"
                 }]
-            }] |
-            .hooks.AfterAgent = [{
+            }]) |
+            .hooks.AfterAgent = (((.hooks.AfterAgent // []) | strip_managed) + [{
                 "matcher": "",
                 "hooks": [{
                     "name": "code-notify-complete",
@@ -2885,8 +2943,8 @@ enable_gemini_hooks() {
                     "command": ($script + " stop gemini"),
                     "description": "Desktop notification when task complete"
                 }]
-            }]
-        ' --arg script "$notify_script"
+            }])
+        ' --arg script "$notify_script" --arg pattern "$(get_managed_gemini_hook_pattern)"
     elif has_python3; then
         # Use Python fallback - pass JSON via temp file to avoid shell escaping issues
         local settings="{}"
@@ -2899,15 +2957,34 @@ enable_gemini_hooks() {
 
         printf '%s\n' "$settings" > "$tmp_json"
 
-        python3 - "$GEMINI_SETTINGS_FILE" "$notify_script" "$tmp_json" << 'PYTHON'
+        python3 - "$GEMINI_SETTINGS_FILE" "$notify_script" "$tmp_json" \
+            "$(get_managed_gemini_hook_pattern)" << 'PYTHON'
 import sys
 import json
 import tempfile
 import os
+import re
 
 file_path = sys.argv[1]
 script = sys.argv[2]
 json_file = sys.argv[3]
+regex = re.compile(sys.argv[4])
+
+# Same rule as GEMINI_JQ_DEFS' strip_managed.
+def strip_managed(entries):
+    def managed(hook):
+        command = hook.get('command') if isinstance(hook, dict) else None
+        return isinstance(command, str) and regex.search(command) is not None
+    kept = []
+    for entry in entries:
+        hooks = entry.get('hooks') if isinstance(entry, dict) else None
+        if isinstance(hooks, list) and any(managed(h) for h in hooks):
+            remaining = [h for h in hooks if not managed(h)]
+            if remaining:
+                kept.append(dict(entry, hooks=remaining))
+            continue
+        kept.append(entry)
+    return kept
 
 try:
     with open(json_file, 'r') as f:
@@ -2920,8 +2997,9 @@ finally:
         pass
 
 settings.setdefault('tools', {})['enableHooks'] = True
-settings.setdefault('hooks', {})['enabled'] = True
-settings['hooks']['Notification'] = [{
+hooks = settings.setdefault('hooks', {})
+hooks['enabled'] = True
+hooks['Notification'] = strip_managed(hooks.get('Notification') or []) + [{
     'matcher': '',
     'hooks': [{
         'name': 'code-notify-notification',
@@ -2930,7 +3008,7 @@ settings['hooks']['Notification'] = [{
         'description': 'Desktop notification when input needed'
     }]
 }]
-settings['hooks']['AfterAgent'] = [{
+hooks['AfterAgent'] = strip_managed(hooks.get('AfterAgent') or []) + [{
     'matcher': '',
     'hooks': [{
         'name': 'code-notify-complete',
@@ -2962,7 +3040,9 @@ PYTHON
     fi
 }
 
-# Disable Gemini CLI notifications
+# Disable Gemini CLI notifications: remove only our hooks. hooks.enabled is
+# removed only when no other hook remains, since the user's own hooks still
+# need it; tools.enableHooks is left as it is.
 disable_gemini_hooks() {
     if [[ ! -f "$GEMINI_SETTINGS_FILE" ]]; then
         return 0
@@ -2975,40 +3055,76 @@ disable_gemini_hooks() {
         settings=$(cat "$GEMINI_SETTINGS_FILE")
 
         # Remove code-notify specific hooks with error checking
-        if ! new_settings=$(echo "$settings" | jq 'del(.hooks.Notification) | del(.hooks.AfterAgent) | del(.hooks.enabled)' 2>/dev/null); then
+        if ! new_settings=$(echo "$settings" | jq --arg pattern "$(get_managed_gemini_hook_pattern)" "$GEMINI_JQ_DEFS"'
+            if (.hooks | type) == "object" then
+                .hooks |= (
+                    reduce ("Notification", "AfterAgent") as $event (.;
+                        if (.[$event] | type) == "array" then
+                            (.[$event] |= strip_managed)
+                            | if (.[$event] | length) == 0 then del(.[$event]) else . end
+                        else . end
+                    )
+                    | if ((keys - ["enabled"]) | length) == 0 then del(.enabled) else . end
+                )
+                | if .hooks == {} then del(.hooks) else . end
+            else . end
+        ' 2>/dev/null); then
             echo "Error: Failed to parse configuration JSON" >&2
             echo "File unchanged: $GEMINI_SETTINGS_FILE" >&2
             return 1
         fi
 
-        # If hooks object is now empty, remove it entirely
-        if ! new_settings=$(echo "$new_settings" | jq 'if .hooks == {} then del(.hooks) else . end' 2>/dev/null); then
+        if [[ -z "$new_settings" ]]; then
             echo "Error: Failed to process configuration JSON" >&2
             echo "File unchanged: $GEMINI_SETTINGS_FILE" >&2
             return 1
         fi
 
-        if [[ "$new_settings" != "{}" ]]; then
+        if [[ "$(echo "$new_settings" | jq -c . 2>/dev/null)" != "{}" ]]; then
             atomic_write "$GEMINI_SETTINGS_FILE" "$new_settings"
         else
             rm -f "$GEMINI_SETTINGS_FILE"
         fi
     elif has_python3; then
-        python3 - "$GEMINI_SETTINGS_FILE" << 'PYTHON'
+        python3 - "$GEMINI_SETTINGS_FILE" "$(get_managed_gemini_hook_pattern)" << 'PYTHON'
 import sys
 import json
 import os
+import re
 import tempfile
 
 file_path = sys.argv[1]
+regex = re.compile(sys.argv[2])
+
+# Same rule as GEMINI_JQ_DEFS' strip_managed.
+def strip_managed(entries):
+    def managed(hook):
+        command = hook.get('command') if isinstance(hook, dict) else None
+        return isinstance(command, str) and regex.search(command) is not None
+    kept = []
+    for entry in entries:
+        hooks = entry.get('hooks') if isinstance(entry, dict) else None
+        if isinstance(hooks, list) and any(managed(h) for h in hooks):
+            remaining = [h for h in hooks if not managed(h)]
+            if remaining:
+                kept.append(dict(entry, hooks=remaining))
+            continue
+        kept.append(entry)
+    return kept
+
 with open(file_path, 'r') as f:
     settings = json.load(f)
 
-if 'hooks' in settings:
-    settings['hooks'].pop('Notification', None)
-    settings['hooks'].pop('AfterAgent', None)
-    settings['hooks'].pop('enabled', None)
-    if not settings['hooks']:
+hooks = settings.get('hooks')
+if isinstance(hooks, dict):
+    for event in ('Notification', 'AfterAgent'):
+        if isinstance(hooks.get(event), list):
+            hooks[event] = strip_managed(hooks[event])
+            if not hooks[event]:
+                del hooks[event]
+    if not [key for key in hooks if key != 'enabled']:
+        hooks.pop('enabled', None)
+    if not hooks:
         del settings['hooks']
 
 if settings:

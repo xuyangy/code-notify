@@ -1056,6 +1056,20 @@ function Get-CodexPermissionCommand {
     return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" notification codex"
 }
 
+function Get-ManagedGeminiHookPattern {
+    return '(code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*(notification|stop)\s+gemini(?:\s|$)'
+}
+
+function Get-GeminiNotifyCommand {
+    param([string]$NotifyScript)
+    return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" notification gemini"
+}
+
+function Get-GeminiStopCommand {
+    param([string]$NotifyScript)
+    return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" stop gemini"
+}
+
 # Managed-hook command patterns. Besides the current notifier, they match the
 # notify script in its default install location, .claude\notifications\,
 # never by file name alone: a user's own hook that runs some other notify.ps1
@@ -1429,7 +1443,28 @@ function Test-NotificationsEnabled {
             }
 
             $settings = Get-Content $script:GeminiSettingsFile -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
-            return ($settings -and $settings.hooks -and (($null -ne $settings.hooks.Notification) -or ($null -ne $settings.hooks.AfterAgent)))
+            if (-not ($settings -and $settings.hooks)) {
+                return $false
+            }
+            # Ours only: the user's own Notification/AfterAgent hooks do not count.
+            $notifyScript = Get-NotifyScript
+            $pattern = Get-ManagedGeminiHookPattern
+            foreach ($pair in @(
+                @{ Entries = $settings.hooks.Notification; Command = (Get-GeminiNotifyCommand -NotifyScript $notifyScript) },
+                @{ Entries = $settings.hooks.AfterAgent; Command = (Get-GeminiStopCommand -NotifyScript $notifyScript) }
+            )) {
+                foreach ($entry in @($pair.Entries)) {
+                    if ($null -eq $entry -or $null -eq $entry.PSObject.Properties['hooks']) {
+                        continue
+                    }
+                    foreach ($hook in @($entry.hooks)) {
+                        if (Test-ManagedClaudeHookCommand -Hook $hook -ExactCommand $pair.Command -Pattern $pattern) {
+                            return $true
+                        }
+                    }
+                }
+            }
+            return $false
         }
         default {
             if ($Project) {
@@ -1539,32 +1574,37 @@ function Enable-Notifications {
 
             $settings.tools | Add-Member -Force -NotePropertyName enableHooks -NotePropertyValue $true
             $settings.hooks | Add-Member -Force -NotePropertyName enabled -NotePropertyValue $true
-            $settings.hooks | Add-Member -Force -NotePropertyName Notification -NotePropertyValue @(
-                @{
-                    matcher = ""
-                    hooks = @(
-                        @{
-                            name = "code-notify-notification"
-                            type = "command"
-                            command = "powershell -ExecutionPolicy Bypass -File `"$notifyScript`" notification gemini"
-                            description = "Desktop notification when input needed"
-                        }
-                    )
-                }
-            )
-            $settings.hooks | Add-Member -Force -NotePropertyName AfterAgent -NotePropertyValue @(
-                @{
-                    matcher = ""
-                    hooks = @(
-                        @{
-                            name = "code-notify-complete"
-                            type = "command"
-                            command = "powershell -ExecutionPolicy Bypass -File `"$notifyScript`" stop gemini"
-                            description = "Desktop notification when task complete"
-                        }
-                    )
-                }
-            )
+            # Replace only our own entries (so a re-run writes the current
+            # command once); the user's hooks under the same events stay.
+            $geminiPattern = Get-ManagedGeminiHookPattern
+            $geminiNotifyCommand = Get-GeminiNotifyCommand -NotifyScript $notifyScript
+            $geminiStopCommand = Get-GeminiStopCommand -NotifyScript $notifyScript
+            $notificationEntries = Remove-ManagedClaudeHookEntries -Entries @($settings.hooks.Notification) -ExactCommand $geminiNotifyCommand -Pattern $geminiPattern
+            $notificationEntries += [PSCustomObject]@{
+                matcher = ""
+                hooks = @(
+                    [PSCustomObject]@{
+                        name = "code-notify-notification"
+                        type = "command"
+                        command = $geminiNotifyCommand
+                        description = "Desktop notification when input needed"
+                    }
+                )
+            }
+            $afterAgentEntries = Remove-ManagedClaudeHookEntries -Entries @($settings.hooks.AfterAgent) -ExactCommand $geminiStopCommand -Pattern $geminiPattern
+            $afterAgentEntries += [PSCustomObject]@{
+                matcher = ""
+                hooks = @(
+                    [PSCustomObject]@{
+                        name = "code-notify-complete"
+                        type = "command"
+                        command = $geminiStopCommand
+                        description = "Desktop notification when task complete"
+                    }
+                )
+            }
+            $settings.hooks | Add-Member -Force -NotePropertyName Notification -NotePropertyValue $notificationEntries
+            $settings.hooks | Add-Member -Force -NotePropertyName AfterAgent -NotePropertyValue $afterAgentEntries
 
             $settings | ConvertTo-Json -Depth 10 | Set-Content $script:GeminiSettingsFile -Encoding UTF8
             Write-Success "Gemini notifications enabled!"
@@ -1664,9 +1704,30 @@ function Disable-Notifications {
             Backup-ConfigFile $script:GeminiSettingsFile
             $settings = Get-Content $script:GeminiSettingsFile -Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
             if ($settings -and $settings.hooks) {
-                $settings.hooks.PSObject.Properties.Remove("Notification")
-                $settings.hooks.PSObject.Properties.Remove("AfterAgent")
-                $settings.hooks.PSObject.Properties.Remove("enabled")
+                # Remove only our hooks. hooks.enabled goes only when no other
+                # hook remains, since the user's own hooks still need it.
+                $notifyScript = Get-NotifyScript
+                $geminiPattern = Get-ManagedGeminiHookPattern
+                foreach ($pair in @(
+                    @{ Name = "Notification"; Command = (Get-GeminiNotifyCommand -NotifyScript $notifyScript) },
+                    @{ Name = "AfterAgent"; Command = (Get-GeminiStopCommand -NotifyScript $notifyScript) }
+                )) {
+                    if ($null -eq $settings.hooks.PSObject.Properties[$pair.Name]) {
+                        continue
+                    }
+                    $kept = Remove-ManagedClaudeHookEntries -Entries @($settings.hooks.($pair.Name)) -ExactCommand $pair.Command -Pattern $geminiPattern
+                    if ($kept.Count -gt 0) {
+                        $settings.hooks | Add-Member -Force -NotePropertyName $pair.Name -NotePropertyValue $kept
+                    } else {
+                        $settings.hooks.PSObject.Properties.Remove($pair.Name)
+                    }
+                }
+                if (@($settings.hooks.PSObject.Properties | Where-Object { $_.Name -ne "enabled" }).Count -eq 0) {
+                    $settings.hooks.PSObject.Properties.Remove("enabled")
+                }
+                if (@($settings.hooks.PSObject.Properties).Count -eq 0) {
+                    $settings.PSObject.Properties.Remove("hooks")
+                }
                 $settings | ConvertTo-Json -Depth 10 | Set-Content $script:GeminiSettingsFile -Encoding UTF8
                 Write-Success "Gemini notifications disabled!"
             } else {

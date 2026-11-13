@@ -258,6 +258,14 @@ else
     test_fail "user notify.sh hooks"
 fi
 
+# Gemini enable/disable keep the user's own hooks
+test_start "gemini hook preservation"
+if run_test_script tests/test-gemini-hook-preservation.sh; then
+    test_pass
+else
+    test_fail "gemini hook preservation"
+fi
+
 # Test 12: npm launchers can route to the shell runtime
 test_start "npm launcher routing"
 if node ./bin/npm-cn.js version 2>&1 | grep -q "code-notify version"; then

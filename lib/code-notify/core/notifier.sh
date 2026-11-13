@@ -779,11 +779,26 @@ agy_native_stop_markerfile() {
 # after StopFinal checks it but before StopFinal clears the marker/stops tmux.
 # mkdir is atomic, and the pid file lets later hooks recover a lock left by a
 # killed hook process.
+#
+# These hooks run synchronously before every Antigravity model and tool call,
+# so the wait is bounded: after AGY_LOCK_MAX_ATTEMPTS failed tries (about 3s)
+# it returns 1 without running the callback. Running it unlocked could undo a
+# newer run's state (see agy_stop_final_locked); every caller treats a failure
+# as "skip this transition". Every AGY_LOCK_CHECK_EVERY tries it looks at the
+# owner: a dead one is reclaimed at once, a directory that cannot be written
+# ends the wait (the lock can never be taken there), and a lock with no pid
+# file is reclaimed only when it is still pid-less on the next check — a live
+# holder writes its pid right after mkdir, so one sighting may just be that
+# gap.
+AGY_LOCK_MAX_ATTEMPTS=300
+AGY_LOCK_CHECK_EVERY=50
 agy_with_running_lock() {
-    local lockdir owner attempts=0 status
+    local lockdir owner attempts=0 status pidless_seen=""
     lockdir="$(agy_running_markerfile).lock"
     while ! mkdir "$lockdir" 2>/dev/null; do
-        if (( attempts >= 500 )); then
+        attempts=$((attempts + 1))
+        if (( attempts % AGY_LOCK_CHECK_EVERY == 0 )); then
+            [[ -w "${lockdir%/*}" ]] || return 1
             owner=""
             if [[ -r "$lockdir/pid" ]]; then
                 # read exits nonzero on the newline-less pid file even though
@@ -791,18 +806,22 @@ agy_with_running_lock() {
                 read -r owner < "$lockdir/pid" 2>/dev/null || true
             fi
             if [[ "$owner" =~ ^[0-9]+$ ]]; then
+                pidless_seen=""
                 if ! kill -0 "$owner" 2>/dev/null; then
                     rm -f "$lockdir/pid" 2>/dev/null || true
                     rmdir "$lockdir" 2>/dev/null || true
+                    continue
                 fi
-            elif [[ ! -e "$lockdir/pid" ]]; then
-                # The owner may have been killed between mkdir and writing its
-                # pid.  The empty directory is safe to reclaim.
-                rmdir "$lockdir" 2>/dev/null || true
+            elif [[ -d "$lockdir" ]]; then
+                if [[ -n "$pidless_seen" ]]; then
+                    pidless_seen=""
+                    rmdir "$lockdir" 2>/dev/null || true
+                    continue
+                fi
+                pidless_seen=1
             fi
-            attempts=0
         fi
-        ((attempts++))
+        (( attempts < AGY_LOCK_MAX_ATTEMPTS )) || return 1
         sleep 0.01
     done
     printf '%s' "$$" > "$lockdir/pid" 2>/dev/null || true

@@ -162,6 +162,14 @@ else
     test_fail "bulk on/off stopped early under errexit"
 fi
 
+# Only bulk off sets the global kill switch
+test_start "kill switch scope"
+if run_test_script tests/test-kill-switch-scope.sh; then
+    test_pass
+else
+    test_fail "kill switch scope"
+fi
+
 # Test 12: npm launchers can route to the shell runtime
 test_start "npm launcher routing"
 if node ./bin/npm-cn.js version 2>&1 | grep -q "code-notify version"; then

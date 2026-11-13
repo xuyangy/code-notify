@@ -194,6 +194,14 @@ print_update_status() {
     esac
 }
 
+# True for a tool name code-notify manages (after normalize_tool_argument).
+is_known_tool() {
+    case "${1:-}" in
+        claude|codex|gemini|antigravity|opencode|pi|omp) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 normalize_tool_argument() {
     local tool="${1:-}"
 
@@ -349,8 +357,12 @@ enable_notifications_global() {
 
     ensure_config_dir
 
-    # Remove kill switch if present
-    rm -f "$HOME/.claude/notifications/disabled"
+    # Remove the global kill switch if present. A targeted `cn on <tool>`
+    # clears it too, but only for a tool name code-notify knows, so a typo
+    # changes nothing.
+    if [[ -z "$tool" ]] || is_known_tool "$tool"; then
+        rm -f "$HOME/.claude/notifications/disabled"
+    fi
 
     # If specific tool requested
     if [[ -n "$tool" ]]; then
@@ -492,14 +504,17 @@ disable_notifications_global() {
     header "${MUTE} Disabling Notifications"
     echo ""
 
-    # Create kill switch for instant effect on running sessions
-    touch "$HOME/.claude/notifications/disabled"
-
-    # If specific tool requested
+    # If specific tool requested. Only that tool's hooks are removed: the
+    # global kill switch below mutes every tool, so a targeted off leaves it
+    # alone.
     if [[ -n "$tool" ]]; then
         disable_single_tool "$tool"
         return $?
     fi
+
+    # Create the kill switch for instant effect on running sessions
+    mkdir -p "$HOME/.claude/notifications"
+    touch "$HOME/.claude/notifications/disabled"
 
     # No tool specified - disable all enabled tools
     local disabled_count=0

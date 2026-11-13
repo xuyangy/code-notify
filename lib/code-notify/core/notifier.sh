@@ -697,17 +697,27 @@ agy_permission_prompt_enabled() {
 # the old behavior instead of never notifying. Outside tmux there is no pane
 # to observe and the step-quiet heuristic stands alone, as before.
 
+# Per-conversation state lives under AGY_STATE_DIR, keyed by the sanitized
+# conversation id. Both are worked out once per hook run (the agy dispatch
+# calls this right after reading the payload): every silent event asks for
+# two or three of the state paths below, and each used to re-extract the id
+# with jq. The path helpers run in command substitutions, so they call this
+# too; once the parent has set the globals, that call is a plain test.
+agy_state_init() {
+    [[ -n "${AGY_CID_SAFE:-}" ]] && return 0
+    AGY_STATE_DIR="$HOME/.claude/notifications/agy"
+    mkdir -p "$AGY_STATE_DIR"
+    # Inline sanitize: sanitize_rate_limit_key is defined later in this file
+    # than these helpers are invoked, so we can't rely on it here.
+    AGY_CID_SAFE="$(get_agy_conversation_id | tr -c 'A-Za-z0-9._-' '_')"
+}
+
 # Path of the per-conversation debounce token. The token is the single source of
 # truth for "is a completion still pending": a newer step or an error overwrites
 # it, which cancels any watcher still sleeping on the old value.
 agy_debounce_tokenfile() {
-    local state_dir cid_safe
-    state_dir="$HOME/.claude/notifications/agy"
-    mkdir -p "$state_dir"
-    # Inline sanitize: sanitize_rate_limit_key is defined later in this file
-    # than these helpers are invoked, so we can't rely on it here.
-    cid_safe="$(get_agy_conversation_id | tr -c 'A-Za-z0-9._-' '_')"
-    printf '%s/%s.token' "$state_dir" "$cid_safe"
+    agy_state_init
+    printf '%s/%s.token' "$AGY_STATE_DIR" "$AGY_CID_SAFE"
 }
 
 # Per-conversation marker that prevents tmux_running_start from firing on every
@@ -718,11 +728,8 @@ agy_debounce_tokenfile() {
 # and a permission prompt removes it so the first working signal after approval
 # restarts the paused indicator.
 agy_running_markerfile() {
-    local state_dir cid_safe
-    state_dir="$HOME/.claude/notifications/agy"
-    mkdir -p "$state_dir"
-    cid_safe="$(get_agy_conversation_id | tr -c 'A-Za-z0-9._-' '_')"
-    printf '%s/%s.running' "$state_dir" "$cid_safe"
+    agy_state_init
+    printf '%s/%s.running' "$AGY_STATE_DIR" "$AGY_CID_SAFE"
 }
 
 # Start the running indicator if this is the first tool call of the turn.
@@ -763,11 +770,8 @@ agy_clear_running_marker() {
 # broken again simply never writes the marker, and the debounce keeps
 # delivering completions.
 agy_native_stop_markerfile() {
-    local state_dir cid_safe
-    state_dir="$HOME/.claude/notifications/agy"
-    mkdir -p "$state_dir"
-    cid_safe="$(get_agy_conversation_id | tr -c 'A-Za-z0-9._-' '_')"
-    printf '%s/%s.native-stop' "$state_dir" "$cid_safe"
+    agy_state_init
+    printf '%s/%s.native-stop' "$AGY_STATE_DIR" "$AGY_CID_SAFE"
 }
 
 # Serialize the running-indicator transition with a debounce completion.  The
@@ -965,6 +969,11 @@ elif [[ "$RAW_ARG1" == agy:* ]]; then
     if [[ ! -t 0 ]]; then
         HOOK_DATA=$(cat 2>/dev/null || true)
     fi
+    # Once, in this shell, so the state-path helpers below reuse it. Cleared
+    # first so a value in the environment can never stand in for this
+    # payload's conversation.
+    AGY_CID_SAFE=""
+    agy_state_init
     # PROJECT_NAME is resolved after the per-tool-call fast paths below exit:
     # the lookup costs a jq/python spawn plus a git worktree probe, and the
     # silent PreToolUse/PostToolUse events fire before/after every tool call.

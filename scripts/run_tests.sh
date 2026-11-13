@@ -226,6 +226,14 @@ else
     test_fail "resume fast gate"
 fi
 
+# Antigravity extracts the conversation id once per hook run
+test_start "agy conversation id once"
+if run_test_script tests/test-agy-conversation-id-once.sh; then
+    test_pass
+else
+    test_fail "agy conversation id once"
+fi
+
 # Test 12: npm launchers can route to the shell runtime
 test_start "npm launcher routing"
 if node ./bin/npm-cn.js version 2>&1 | grep -q "code-notify version"; then

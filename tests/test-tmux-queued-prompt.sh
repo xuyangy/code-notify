@@ -38,6 +38,22 @@ done
 # list-windows reports nothing so sweeps and disarm checks stay inert.
 cat > "$fake_bin/tmux" <<'EOF'
 #!/bin/bash
+# Run a ";"-chained invocation one command at a time, as tmux does.
+for chain_arg in "$@"; do
+    if [[ "$chain_arg" == ";" ]]; then
+        chain_seg=()
+        for chain_arg in "$@"; do
+            if [[ "$chain_arg" == ";" ]]; then
+                (( ${#chain_seg[@]} == 0 )) || "$0" "${chain_seg[@]}" || exit $?
+                chain_seg=()
+            else
+                chain_seg+=("$chain_arg")
+            fi
+        done
+        (( ${#chain_seg[@]} == 0 )) || exec "$0" "${chain_seg[@]}"
+        exit 0
+    fi
+done
 args=("$@")
 cmd="${args[0]}"
 args=("${args[@]:1}")

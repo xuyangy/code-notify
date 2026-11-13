@@ -1217,11 +1217,9 @@ tmux_running_settle_arm() {
     [[ "$force" == "force" ]] || [[ "|$TMUX_SETTLE_AGENTS|" == *"|$agent|"* ]] || return 0
     local pane_re='^%[0-9]+$'
     [[ "$pane_id" =~ $pane_re ]] || return 0
-    tmux set-option -w -t "$window_id" @code_notify_settle_pane "$pane_id" 2>/dev/null
+    local -a badge_only_op=(set-option -wu -t "$window_id" @code_notify_settle_badge_only)
     if [[ "$force" == "force" ]]; then
-        tmux set-option -w -t "$window_id" @code_notify_settle_badge_only 1 2>/dev/null
-    else
-        tmux set-option -wu -t "$window_id" @code_notify_settle_badge_only 2>/dev/null
+        badge_only_op=(set-option -w -t "$window_id" @code_notify_settle_badge_only 1)
     fi
     # The settle stop synthesizes the missing completion through the notifier,
     # which also arms the post-completion idle watch. Both paths need an agent
@@ -1230,8 +1228,10 @@ tmux_running_settle_arm() {
     # Project is best-effort: hooks run with the agent's working directory
     # as cwd. Agent first, project last, so embedded spaces survive the
     # positional parse.
-    tmux set-option -w -t "$window_id" @code_notify_settle_ctx \
-        "$agent $(basename "$PWD")" 2>/dev/null
+    #
+    # The settle fingerprint and countdown are cleared in the same tmux call
+    # (one round trip, run in order, on the prompt hook's path).
+    #
     # Cleared on a force arm too, so a preserve's first sweep tick can only
     # baseline and its reconcile lands on the second. Seeding the fingerprint
     # from the pane here instead was tried and reverted: this arm runs INSIDE
@@ -1242,8 +1242,11 @@ tmux_running_settle_arm() {
     # the first tick is not reachable from this function in any case: the sweep
     # chain's phase is independent of the Stop, so a preserve that wants a
     # deterministic reconcile needs a one-shot timer of its own.
-    tmux set-option -wu -t "$window_id" @code_notify_settle_fp 2>/dev/null
-    tmux set-option -wu -t "$window_id" @code_notify_settle_since 2>/dev/null
+    tmux set-option -w -t "$window_id" @code_notify_settle_pane "$pane_id" \; \
+        "${badge_only_op[@]}" \; \
+        set-option -w -t "$window_id" @code_notify_settle_ctx "$agent $(basename "$PWD")" \; \
+        set-option -wu -t "$window_id" @code_notify_settle_fp \; \
+        set-option -wu -t "$window_id" @code_notify_settle_since 2>/dev/null
     # The settle check rides the agent-exit sweep; make sure it is ticking
     # even when PID resolution failed and nothing else armed it.
     tmux_agent_exit_schedule_sweep
@@ -1293,15 +1296,16 @@ tmux_running_dialog_arm() {
     local window_id="$1" pane_id="$2"
     local agent="${CODE_NOTIFY_TMUX_AGENT_NAME:-}"
     local pane_re='^%[0-9]+$'
-    # A fresh turn never inherits the previous turn's sighting epoch.
-    tmux set-option -wu -t "$window_id" @code_notify_dialog_since 2>/dev/null
-    tmux set-option -wu -t "$window_id" @code_notify_dialog_grace 2>/dev/null
+    # A fresh turn never inherits the previous turn's sighting epoch. Those
+    # two clears go out in the same tmux call as the context write below.
+    local -a clear_epochs=(set-option -wu -t "$window_id" @code_notify_dialog_since \;
+        set-option -wu -t "$window_id" @code_notify_dialog_grace)
     if [[ -z "$agent" ]] || [[ "|$TMUX_DIALOG_WATCH_AGENTS|" != *"|$agent|"* ]] ||
         [[ ! "${TMUX_DIALOG_NOTIFY_SECONDS:-0}" =~ ^[0-9]+$ ]] ||
         (( TMUX_DIALOG_NOTIFY_SECONDS <= 0 )) ||
         [[ ! "$pane_id" =~ $pane_re ]] ||
         ! tmux_permission_prompt_enabled; then
-        tmux set-option -wu -t "$window_id" @code_notify_dialog_ctx 2>/dev/null
+        tmux "${clear_epochs[@]}" \; set-option -wu -t "$window_id" @code_notify_dialog_ctx 2>/dev/null
         return 0
     fi
     # The agent-exit sweep reads this option as one field of a "|"-separated
@@ -1310,7 +1314,7 @@ tmux_running_dialog_arm() {
     # changed; the project itself keeps its name everywhere else.
     local project
     project="$(basename "$PWD")"
-    tmux set-option -w -t "$window_id" @code_notify_dialog_ctx \
+    tmux "${clear_epochs[@]}" \; set-option -w -t "$window_id" @code_notify_dialog_ctx \
         "$pane_id $agent ${project//|/_}" 2>/dev/null
     # The watch rides the agent-exit sweep; make sure it is ticking even
     # when PID resolution failed and nothing else armed it.
@@ -1342,22 +1346,23 @@ tmux_running_interrupt_arm() {
     local markerfile="${CODE_NOTIFY_TMUX_RUNNING_MARKERFILE:-}"
     local pane_re='^%[0-9]+$'
     # A fresh turn never inherits the previous turn's stillness countdown.
-    tmux set-option -wu -t "$window_id" @code_notify_interrupt_fp 2>/dev/null
-    tmux set-option -wu -t "$window_id" @code_notify_interrupt_since 2>/dev/null
+    # All four writes go out in one tmux call, in this order.
+    local -a ops=(set-option -wu -t "$window_id" @code_notify_interrupt_fp \;
+        set-option -wu -t "$window_id" @code_notify_interrupt_since \;)
     if [[ -n "$markerfile" ]]; then
-        tmux set-option -w -t "$window_id" @code_notify_interrupt_markerfile "$markerfile" 2>/dev/null
+        ops+=(set-option -w -t "$window_id" @code_notify_interrupt_markerfile "$markerfile" \;)
     else
-        tmux set-option -wu -t "$window_id" @code_notify_interrupt_markerfile 2>/dev/null
+        ops+=(set-option -wu -t "$window_id" @code_notify_interrupt_markerfile \;)
     fi
     if [[ -z "$agent" ]] || [[ "|$TMUX_INTERRUPT_WATCH_AGENTS|" != *"|$agent|"* ]] ||
         [[ -z "$TMUX_INTERRUPT_MARKERS" ]] ||
         [[ ! "${TMUX_INTERRUPT_SECONDS:-0}" =~ ^[0-9]+$ ]] ||
         (( TMUX_INTERRUPT_SECONDS <= 0 )) ||
         [[ ! "$pane_id" =~ $pane_re ]]; then
-        tmux set-option -wu -t "$window_id" @code_notify_interrupt_pane 2>/dev/null
+        tmux "${ops[@]}" set-option -wu -t "$window_id" @code_notify_interrupt_pane 2>/dev/null
         return 0
     fi
-    tmux set-option -w -t "$window_id" @code_notify_interrupt_pane "$pane_id" 2>/dev/null
+    tmux "${ops[@]}" set-option -w -t "$window_id" @code_notify_interrupt_pane "$pane_id" 2>/dev/null
     # The watch rides the agent-exit sweep; make sure it is ticking even when
     # PID resolution failed and nothing else armed it.
     tmux_agent_exit_schedule_sweep
@@ -2634,17 +2639,51 @@ tmux_spinner_build_format() {
 # option so disarm can restore it. Sessions already carrying a saved value are
 # skipped: they were adjusted this armed period, and a user who deliberately
 # re-raised their interval since must not be fought on every prompt.
+#
+# This runs on every prompt in spinner mode, so the session-local values are
+# read for all sessions in ONE tmux call (session-scoped show-options: formats
+# would report the inherited global value instead). Each value is preceded by
+# a marker line naming the session and field, because an unset value prints
+# no line at all. Any changes go out in one more call.
 tmux_spinner_sync_session_intervals() {
-    local sid val
+    local sid line field i=-1
+    local -a query=() sids=() saved=() interval=() update=()
+    local session_re='^\$[0-9]+$'
     while read -r sid; do
-        [[ -n "$sid" ]] || continue
-        val=$(tmux show-options -qv -t "$sid" @code_notify_saved_interval 2>/dev/null)
-        [[ -z "$val" ]] || continue
-        val=$(tmux show-options -qv -t "$sid" status-interval 2>/dev/null)
-        { [[ -n "$val" ]] && [[ "$val" != "1" ]]; } || continue
-        tmux set-option -t "$sid" @code_notify_saved_interval "$val" 2>/dev/null
-        tmux set-option -t "$sid" status-interval 1 2>/dev/null
+        [[ "$sid" =~ $session_re ]] || continue
+        (( ${#query[@]} == 0 )) || query+=(\;)
+        query+=(display-message -p "@@ $sid saved" \;
+            show-options -qv -t "$sid" @code_notify_saved_interval \;
+            display-message -p "@@ $sid interval" \;
+            show-options -qv -t "$sid" status-interval)
     done < <(tmux list-sessions -F '#{session_id}' 2>/dev/null)
+    (( ${#query[@]} > 0 )) || return 0
+
+    # The `|| [[ -n ... ]]` keeps a final value that arrives without a newline.
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == "@@ "* ]]; then
+            read -r _ sid field <<< "$line"
+            if [[ "$field" == "saved" ]]; then
+                i=$((i + 1))
+                sids[i]="$sid" saved[i]="" interval[i]=""
+            fi
+            continue
+        fi
+        (( i >= 0 )) || continue
+        case "$field" in
+            saved) saved[i]="$line" ;;
+            interval) interval[i]="$line" ;;
+        esac
+    done < <(tmux "${query[@]}" 2>/dev/null)
+
+    for ((i = 0; i < ${#sids[@]}; i++)); do
+        [[ -z "${saved[i]}" ]] || continue
+        { [[ -n "${interval[i]}" ]] && [[ "${interval[i]}" != "1" ]]; } || continue
+        (( ${#update[@]} == 0 )) || update+=(\;)
+        update+=(set-option -t "${sids[i]}" @code_notify_saved_interval "${interval[i]}" \;
+            set-option -t "${sids[i]}" status-interval 1)
+    done
+    (( ${#update[@]} == 0 )) || tmux "${update[@]}" 2>/dev/null
     return 0
 }
 
@@ -3703,10 +3742,12 @@ tmux_prompt_submit() {
         return 0
     fi
     tmux_running_gen_set "$window_id"
-    tmux set-option -wu -t "$window_id" @code_notify_resume_pending 2>/dev/null
+    # Drop the input pause and the idle watch in one tmux call (the same
+    # clears as tmux_idle_watch_disarm and the pause teardown).
+    tmux set-option -wu -t "$window_id" @code_notify_resume_pending \; \
+        set-option -wu -t "$window_id" @code_notify_pause_fp \; \
+        set-option -wu -t "$window_id" @code_notify_idle_watch 2>/dev/null
     tmux_resume_flag_clear "$window_id"
-    tmux set-option -wu -t "$window_id" @code_notify_pause_fp 2>/dev/null
-    tmux_idle_watch_disarm "$window_id"
     tmux_running_settle_arm "$window_id" "$TMUX_PANE"
     tmux_running_dialog_arm "$window_id" "$TMUX_PANE"
     tmux_running_interrupt_arm "$window_id" "$TMUX_PANE"

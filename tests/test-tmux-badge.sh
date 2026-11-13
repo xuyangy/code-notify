@@ -78,6 +78,22 @@ state_dir="$test_dir/state"
 mkdir -p "$fake_bin" "$state_dir"
 cat > "$fake_bin/tmux" <<'EOF'
 #!/bin/bash
+# Run a ";"-chained invocation one command at a time, as tmux does.
+for chain_arg in "$@"; do
+    if [[ "$chain_arg" == ";" ]]; then
+        chain_seg=()
+        for chain_arg in "$@"; do
+            if [[ "$chain_arg" == ";" ]]; then
+                (( ${#chain_seg[@]} == 0 )) || "$0" "${chain_seg[@]}" || exit $?
+                chain_seg=()
+            else
+                chain_seg+=("$chain_arg")
+            fi
+        done
+        (( ${#chain_seg[@]} == 0 )) || exec "$0" "${chain_seg[@]}"
+        exit 0
+    fi
+done
 echo "$*" >> "$FAKE_TMUX_LOG"
 args=("$@")
 if [[ "${args[0]}" == "-S" ]]; then
@@ -113,6 +129,10 @@ case "$cmd" in
         # reads the stateful name (kept current by rename-window); the focus
         # target format (session/window/pane IDs) is a fixture.
         case "${rest[0]}" in
+            # Literal text (no #{...}) prints as itself, like the real server.
+            '@@ '*)
+                printf '%s\n' "${rest[0]}"
+                ;;
             # The fast dialog poll's three window-state reads, served from the
             # stateful options like the real server would.
             '#{@code_notify_resume_pending}|#{@code_notify_running}')
@@ -287,7 +307,12 @@ case "$cmd" in
             : > "$FAKE_TMUX_BADGE_SET_SIGNAL"
             while [[ ! -e "$FAKE_TMUX_BADGE_SET_RELEASE" ]]; do sleep 0.01; done
         fi
-        cat "$FAKE_TMUX_STATE/${target}.${rest[0]}" 2>/dev/null
+        # Like the real server, a value ends with a newline (it keeps values
+        # apart in a ";"-chained call; $(...) readers strip it anyway).
+        if [[ -f "$FAKE_TMUX_STATE/${target}.${rest[0]}" ]]; then
+            cat "$FAKE_TMUX_STATE/${target}.${rest[0]}" 2>/dev/null
+            echo
+        fi
         ;;
     set-option)
         if (( unset_opt )); then

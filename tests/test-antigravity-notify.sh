@@ -105,6 +105,22 @@ fake_tmux_dir="$test_dir/tmux"
 mkdir -p "$fake_tmux_dir"
 cat > "$fake_bin/tmux" <<'EOF'
 #!/bin/bash
+# Run a ";"-chained invocation one command at a time, as tmux does.
+for chain_arg in "$@"; do
+    if [[ "$chain_arg" == ";" ]]; then
+        chain_seg=()
+        for chain_arg in "$@"; do
+            if [[ "$chain_arg" == ";" ]]; then
+                (( ${#chain_seg[@]} == 0 )) || "$0" "${chain_seg[@]}" || exit $?
+                chain_seg=()
+            else
+                chain_seg+=("$chain_arg")
+            fi
+        done
+        (( ${#chain_seg[@]} == 0 )) || exec "$0" "${chain_seg[@]}"
+        exit 0
+    fi
+done
 echo "$*" >> "$FAKE_TMUX_LOG"
 args=("$@")
 if [[ "${args[0]}" == "-S" ]]; then

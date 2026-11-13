@@ -170,6 +170,14 @@ else
     test_fail "kill switch scope"
 fi
 
+# Codex [tui] header variants are recognised
+test_start "codex tui header"
+if run_test_script tests/test-codex-tui-header.sh; then
+    test_pass
+else
+    test_fail "codex tui header"
+fi
+
 # Test 12: npm launchers can route to the shell runtime
 test_start "npm launcher routing"
 if node ./bin/npm-cn.js version 2>&1 | grep -q "code-notify version"; then

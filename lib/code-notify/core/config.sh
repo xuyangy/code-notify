@@ -2329,7 +2329,10 @@ disable_codex_tui_notifications() {
                 if (in_tui && !wrote) {
                     emit_managed()
                 }
-                in_tui = ($0 ~ /^[[:space:]]*\[tui\][[:space:]]*$/)
+                # TOML allows spaces inside the brackets and a trailing comment
+                # on a table header; missing either would append a second
+                # [tui] table, which makes config.toml invalid.
+                in_tui = ($0 ~ /^[[:space:]]*\[[[:space:]]*tui[[:space:]]*\][[:space:]]*(#.*)?$/)
                 if (in_tui) {
                     saw_tui = 1
                 }

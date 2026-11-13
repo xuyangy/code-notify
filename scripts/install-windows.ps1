@@ -280,7 +280,9 @@ function Disable-CodexTuiNotifications {
                 $result.Add($settingLine)
                 $wrote = $true
             }
-            $inTui = ($line -match '^\s*\[tui\]\s*$')
+            # TOML allows spaces inside the brackets and a trailing comment on
+            # a table header; missing either appends a second [tui] table.
+            $inTui = ($line -match '^\s*\[\s*tui\s*\]\s*(#.*)?$')
             if ($inTui) {
                 $sawTui = $true
             }

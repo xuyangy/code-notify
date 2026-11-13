@@ -1317,9 +1317,19 @@ mark_ask_user_pending() {
 }
 
 consume_recent_ask_user_pending() {
-    local marker_file claim_file marked_at now age window
+    local marker_file claim_file marked_at now age window payload_tool
     marker_file=$(get_ask_user_pending_file) || return 1
     [[ -f "$marker_file" ]] || return 1
+
+    # A PermissionRequest names the tool it is for. One for any tool other
+    # than AskUserQuestion is a real approval, not the question's duplicate:
+    # deliver it and leave the marker for the duplicate that may still come.
+    # A payload with no top-level tool_name (the generic Notification) cannot
+    # be told apart and is treated as the duplicate.
+    payload_tool=$(json_extract_string "$HOOK_DATA" "tool_name")
+    if [[ -n "$payload_tool" ]] && [[ "$payload_tool" != "AskUserQuestion" ]]; then
+        return 1
+    fi
 
     # Claim by rename so concurrent/repeated Notification hooks cannot both
     # consume the same question marker.

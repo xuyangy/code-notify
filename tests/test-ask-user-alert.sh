@@ -213,4 +213,35 @@ run_notifier notification "$(permission_payload session-b)"
 [[ "$(line_count)" == "4" ]] ||
     fail "second question's permission duplicate was delivered"
 
+# An approval for another tool right after a question is a real approval: it
+# is delivered and does not use up the question's marker, so the question's
+# own generic duplicate that follows is still discarded.
+# The command names AskUserQuestion so a raw-substring shortcut would wrongly
+# treat this approval as the question's duplicate.
+bash_permission_payload() {
+    local session_id="$1"
+    printf '{"session_id":"%s","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"grep -rn AskUserQuestion lib/ && rm -rf build"}}' \
+        "$session_id"
+}
+ask_permission_payload() {
+    local session_id="$1"
+    printf '{"session_id":"%s","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{}}' \
+        "$session_id"
+}
+run_notifier PreToolUse "$(question_payload session-d 'Which branch should I use?')"
+[[ "$(line_count)" == "5" ]] || fail "session-d question notification was not delivered"
+run_notifier notification "$(bash_permission_payload session-d)"
+[[ "$(line_count)" == "6" ]] ||
+    fail "a Bash approval right after a question was suppressed"
+run_notifier notification "$(permission_payload session-d)"
+[[ "$(line_count)" == "6" ]] ||
+    fail "the question's generic duplicate was delivered after a Bash approval"
+
+# A PermissionRequest that names AskUserQuestion is the question's duplicate.
+run_notifier PreToolUse "$(question_payload session-e 'Which port should I use?')"
+[[ "$(line_count)" == "7" ]] || fail "session-e question notification was not delivered"
+run_notifier notification "$(ask_permission_payload session-e)"
+[[ "$(line_count)" == "7" ]] ||
+    fail "an AskUserQuestion PermissionRequest duplicate was delivered"
+
 echo "PASS: ask_user alert preserves hooks and suppresses only its duplicate permission notification"

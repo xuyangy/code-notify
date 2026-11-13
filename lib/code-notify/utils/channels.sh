@@ -234,6 +234,10 @@ channels_status() {
 }
 
 channels_emit_entries() {
+    # No config file means the default: no channels, so nothing to emit. This
+    # runs after every notification, and skipping python3 here saves a whole
+    # interpreter start for everyone who has not set up channels.
+    [[ -f "$CHANNELS_FILE" ]] || return 0
     channels_has_python3 || return 0
     CHANNELS_JSON="$(channels_read_json)" python3 - <<'PY'
 import json

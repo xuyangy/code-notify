@@ -289,6 +289,11 @@ usage_reset_state() {
 }
 
 usage_emit_enabled_providers() {
+    # No config file means the default: usage alerts disabled, so no provider
+    # is enabled. The notifier asks this after every Claude/Codex
+    # notification; skipping python3 here saves an interpreter start for
+    # everyone who has not turned usage alerts on.
+    [[ -f "$USAGE_CONFIG_FILE" ]] || return 0
     usage_has_python3 || return 0
     USAGE_JSON="$(usage_read_config_json)" python3 - <<'PY'
 import json

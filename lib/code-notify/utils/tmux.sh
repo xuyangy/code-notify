@@ -2254,13 +2254,20 @@ tmux_agent_exit_sweep() {
                 # an unbounded stretch while the agent works. Same asymmetry
                 # TMUX_BUSY_MARKERS is argued from; it governs the marker-text
                 # path too, whose false-positive direction is the dangerous one.
+                #
+                # An approval dialog on screen vetoes both thresholds too. An
+                # old interrupt line can stay rendered above a new dialog, and
+                # the dialog watch forks its alert on the same tick: a teardown
+                # here would retire the run that alert is guarded on, and the
+                # approval would never be announced.
                 interrupt_needed=0
                 interrupt_seen=$(tmux_interrupt_flag "$interrupt_content")
                 if [[ "$(tmux_busy_flag "$interrupt_content")" != "1" ]]; then
-                    if [[ "$interrupt_seen" == "1" ]]; then
+                    if [[ "$(tmux_resume_poll_dialog_flag "$interrupt_content")" == "1" ]]; then
+                        interrupt_needed=0
+                    elif [[ "$interrupt_seen" == "1" ]]; then
                         interrupt_needed="$TMUX_INTERRUPT_SECONDS"
-                    elif (( TMUX_INTERRUPT_QUIET_SECONDS > 0 )) &&
-                        [[ "$(tmux_resume_poll_dialog_flag "$interrupt_content")" != "1" ]]; then
+                    elif (( TMUX_INTERRUPT_QUIET_SECONDS > 0 )); then
                         interrupt_needed="$TMUX_INTERRUPT_QUIET_SECONDS"
                     fi
                 elif [[ "$interrupt_seen" == "1" ]]; then

@@ -2292,6 +2292,27 @@ CODE_NOTIFY_NOTIFIER_PATH="$fake_bin/settle-notifier-stub" tmux_agent_exit_sweep
     || fail "an interrupt must not notify (got: $(cat "$settle_notify_log"))"
 pass "interrupted claude pane retires running state silently"
 
+# --- an approval dialog under an old interrupt line keeps the run ---
+# The previous turn's interrupt line can stay rendered while a new approval
+# dialog is up. The dialog watch alerts for that dialog on the same tick, and
+# its alert is guarded on this run, so the interrupt watch must not retire it.
+CODE_NOTIFY_TMUX_AGENT_NAME=claude tmux_prompt_submit \
+    || fail "claude prompt-submit for the dialog-under-interrupt flow should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] || fail "precondition: running marker should be set"
+{
+    printf '%s\n' "  ⎿  Interrupted · What should Claude do instead?"
+    printf '%s\n' "● Write(notes.txt)"
+    printf '%s\n' " Allow creation of this file?"
+    printf '%s\n' " ❯ 1. Yes"
+    printf '%s\n' "   2. No"
+} > "$state_dir/%3.pane_content"
+tmux_agent_exit_sweep || fail "first dialog-under-interrupt tick should succeed"
+printf '%s' "$(( $(date +%s) - 60 ))" > "$state_dir/@2.@code_notify_interrupt_since"
+tmux_agent_exit_sweep || fail "aged dialog-under-interrupt tick should succeed"
+[[ -f "$state_dir/@2.@code_notify_running" ]] \
+    || fail "an approval dialog under an old interrupt line must keep the running marker"
+pass "approval dialog vetoes the interrupt teardown"
+
 # --- a cancel that leaves no text behind still retires the marker ---
 # Escape at a permission prompt rejects the tool AND ends the turn, and the only
 # record is "[Request interrupted by user for tool use]" — which Claude Code

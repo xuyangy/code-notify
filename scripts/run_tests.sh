@@ -242,6 +242,14 @@ else
     test_fail "agy running lock"
 fi
 
+# tmux transition lock never switches directories mid-acquire
+test_start "tmux lock namespace"
+if run_test_script tests/test-tmux-lock-namespace.sh; then
+    test_pass
+else
+    test_fail "tmux lock namespace"
+fi
+
 # Test 12: npm launchers can route to the shell runtime
 test_start "npm launcher routing"
 if node ./bin/npm-cn.js version 2>&1 | grep -q "code-notify version"; then

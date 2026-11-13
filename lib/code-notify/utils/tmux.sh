@@ -3528,17 +3528,15 @@ tmux_running_transition_reclaim_gate_acquire() {
 }
 
 tmux_running_transition_lock_acquire() {
-    local window_id="$1" base_dir lockdir reclaimdir fallback_dir
-    local token now attempts=0 using_fallback=0
+    local window_id="$1" base_dir lockdir reclaimdir
+    local token now attempts=0
     local max_attempts=$(( (TMUX_RUNNING_LOCK_TIMEOUT_MS + 9) / 10 ))
 
     base_dir="$TMUX_RUNNING_LOCK_DIR"
     if { [[ ! -d "$base_dir" ]] && ! mkdir -p "$base_dir" 2>/dev/null; } ||
         [[ ! -w "$base_dir" ]]; then
         tmux_running_transition_lock_select_fallback || return 1
-        fallback_dir="$TMUX_RUNNING_FALLBACK_DIR"
-        base_dir="$fallback_dir"
-        using_fallback=1
+        base_dir="$TMUX_RUNNING_FALLBACK_DIR"
     fi
     lockdir="$(tmux_running_transition_lock_path "$window_id" "$base_dir")"
     reclaimdir="${lockdir}.reclaim"
@@ -3568,19 +3566,12 @@ tmux_running_transition_lock_acquire() {
             break
         fi
 
-        # A parent that looked writable may still reject the atomic mkdir due
-        # to ACLs or a concurrent permission change. Fall back only when no
-        # lock exists there; an existing primary lock must remain authoritative.
-        if [[ ! -d "$lockdir" ]] && (( using_fallback == 0 )); then
-            tmux_running_transition_lock_select_fallback || return 1
-            fallback_dir="$TMUX_RUNNING_FALLBACK_DIR"
-            base_dir="$fallback_dir"
-            lockdir="$(tmux_running_transition_lock_path "$window_id" "$base_dir")"
-            reclaimdir="${lockdir}.reclaim"
-            using_fallback=1
-            continue
-        fi
-
+        # The directory was chosen once, above, and is never switched here.
+        # A failed mkdir with no lock left behind looks the same whether the
+        # holder just released or the directory rejects mkdir (ACLs, a
+        # permission change): switching to another directory in the first
+        # case would let two holders run at once. A directory that keeps
+        # rejecting mkdir simply runs out the attempts below.
         attempts=$((attempts + 1))
         if (( attempts % 10 == 0 )) &&
             tmux_running_transition_lock_is_stale "$lockdir"; then

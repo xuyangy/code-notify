@@ -250,6 +250,14 @@ else
     test_fail "tmux lock namespace"
 fi
 
+# A user's own notify.sh hooks are not treated as managed
+test_start "user notify.sh hooks"
+if run_test_script tests/test-user-notify-script-hooks.sh; then
+    test_pass
+else
+    test_fail "user notify.sh hooks"
+fi
+
 # Test 12: npm launchers can route to the shell runtime
 test_start "npm launcher routing"
 if node ./bin/npm-cn.js version 2>&1 | grep -q "code-notify version"; then

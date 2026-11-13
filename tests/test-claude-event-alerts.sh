@@ -13,7 +13,10 @@ mkdir -p "$CLAUDE_HOME/notifications"
 
 source "$ROOT_DIR/lib/code-notify/core/config.sh"
 
-notify_script="$test_dir/notify.sh"
+# Shaped like an installed notifier: managed-hook detection recognises
+# code-notify's notifier.sh (and the legacy .claude/notifications/notify.sh),
+# not any script called notify.sh.
+notify_script="$test_dir/code-notify/notifier.sh"
 get_notify_script() {
     printf '%s\n' "$notify_script"
 }

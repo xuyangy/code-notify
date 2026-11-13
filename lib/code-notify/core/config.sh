@@ -407,44 +407,48 @@ get_global_codex_resume_after_input_command() {
     printf '%s ResumeAfterInput codex\n' "$(get_notify_script)"
 }
 
+# Managed-hook command patterns. Besides the current notifier, they match the
+# legacy scripts by their install location, .claude/notifications/notify.sh
+# (bash) or notify.ps1 (Windows), never by file name alone: a user's own
+# hook that happens to run some other notify.sh must not be removed.
 get_managed_claude_event_pattern() {
-    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(SubagentStart|SubagentStop|TeammateIdle|TaskCreated|TaskCompleted)(?:\s|$)'
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*(SubagentStart|SubagentStop|TeammateIdle|TaskCreated|TaskCompleted)(?:\s|$)'
 }
 
 get_managed_claude_pre_tool_use_pattern() {
-    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*PreToolUse(?:\s|$)'
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*PreToolUse(?:\s|$)'
 }
 
 get_managed_claude_user_prompt_pattern() {
-    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*UserPromptSubmit(?:\s|$)'
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*UserPromptSubmit(?:\s|$)'
 }
 
 get_managed_claude_post_tool_pattern() {
-    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*PostToolUse(?:\s|$)'
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*PostToolUse(?:\s|$)'
 }
 
 get_managed_claude_resume_after_input_pattern() {
-    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*ResumeAfterInput(?:\s|$)'
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*ResumeAfterInput(?:\s|$)'
 }
 
 get_managed_claude_notification_pattern() {
-    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(notification|PreToolUse)(?:\s|$)'
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*(notification|PreToolUse)(?:\s|$)'
 }
 
 get_managed_claude_permission_request_pattern() {
-    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*notification\s+claude(?:\s|$)'
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*notification\s+claude(?:\s|$)'
 }
 
 get_managed_claude_stop_pattern() {
-    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*stop(?:\s|$)'
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*stop(?:\s|$)'
 }
 
 get_managed_claude_stop_failure_pattern() {
-    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*StopFailure(?:\s|$)'
+    printf '%s\n' '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*StopFailure(?:\s|$)'
 }
 
 get_managed_codex_hook_pattern() {
-    printf '%s\n' '(code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(stop|notification|UserPromptSubmit|PostToolUse|ResumeAfterInput)\s+codex(?:\s|$)'
+    printf '%s\n' '(code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*(stop|notification|UserPromptSubmit|PostToolUse|ResumeAfterInput)\s+codex(?:\s|$)'
 }
 
 has_claude_hooks_for_commands() {
@@ -709,7 +713,7 @@ PYTHON
         return $?
     fi
 
-    grep -qE 'claude-notify|code-notify.*notifier\.sh|(^|[\\/])notify\.(ps1|sh)' "$file"
+    grep -qE 'claude-notify|code-notify.*notifier\.sh|\.claude[\\/]+notifications[\\/]+notify\.(ps1|sh)' "$file"
 }
 
 repair_legacy_hooks_command() {
@@ -2221,7 +2225,7 @@ remove_codex_notify_config() {
             buffering = 0
             # Drop only when the whole assignment points at our notifier and
             # passes the codex argument; otherwise restore it untouched.
-            if (block ~ /(code-notify|notifier\.sh|notify\.(sh|ps1))/ && block ~ /codex/) {
+            if (block ~ /(code-notify|notifier\.sh|\.claude[\\\/]+notifications[\\\/]+notify\.(sh|ps1))/ && block ~ /codex/) {
                 return
             }
             print block

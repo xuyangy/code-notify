@@ -173,6 +173,57 @@ try {
             throw "hooks should be removed entirely when only managed Claude hooks existed"
         }
     }
+
+    # A user's own hook that runs some other notify.ps1 / notify.sh is theirs;
+    # only the notify script in the default .claude\notifications location is
+    # code-notify's.
+    $legacyCommand = 'powershell -ExecutionPolicy Bypass -File "C:\Users\old\.claude\notifications\notify.ps1" stop claude'
+    $userPsCommand = 'powershell -File "C:\Users\me\scripts\notify.ps1" stop'
+    $userProjectCommand = 'powershell -File "C:\my-project\notifications\notify.ps1" stop'
+    $userShCommand = '/Users/me/bin/notify.sh stop'
+    @{
+        hooks = @{
+            Stop = @(
+                @{ hooks = @(@{ type = "command"; command = $userPsCommand }) },
+                @{ hooks = @(@{ type = "command"; command = $userProjectCommand }) },
+                @{ hooks = @(@{ type = "command"; command = $userShCommand }) },
+                @{ hooks = @(@{ type = "command"; command = $legacyCommand }) }
+            )
+        }
+    } | ConvertTo-Json -Depth 10 | Set-Content $script:SettingsFile -Encoding UTF8
+
+    Enable-Notifications -Tool "claude"
+    $settings = Get-Content $script:SettingsFile -Raw | ConvertFrom-Json -ErrorAction Stop
+    foreach ($userCommand in @($userPsCommand, $userProjectCommand, $userShCommand)) {
+        if (-not (Test-HookEntriesContainCommand -Entries @($settings.hooks.Stop) -Matcher "" -Command $userCommand)) {
+            throw "enable removed a user Stop hook: $userCommand"
+        }
+    }
+    if (Test-HookEntriesContainCommand -Entries @($settings.hooks.Stop) -Matcher "" -Command $legacyCommand) {
+        throw "enable kept the legacy notifications\notify.ps1 Stop hook"
+    }
+    Disable-Notifications -Tool "claude"
+    $settings = Get-Content $script:SettingsFile -Raw | ConvertFrom-Json -ErrorAction Stop
+    foreach ($userCommand in @($userPsCommand, $userProjectCommand, $userShCommand)) {
+        if (-not (Test-HookEntriesContainCommand -Entries @($settings.hooks.Stop) -Matcher "" -Command $userCommand)) {
+            throw "disable removed a user Stop hook: $userCommand"
+        }
+    }
+
+    # Codex config.toml: a user notify program called notify.sh is kept; the
+    # legacy code-notify assignment (Windows backslash path) is removed.
+    $tomlPath = Join-Path $testRoot "config.toml"
+    @('model = "gpt-5"', 'notify = ["bash", "/Users/me/.codex/notify.sh"]') | Set-Content $tomlPath -Encoding UTF8
+    Remove-CodexNotifyConfig -Path $tomlPath
+    if (-not ((Get-Content $tomlPath -Raw) -match [regex]::Escape('notify = ["bash", "/Users/me/.codex/notify.sh"]'))) {
+        throw "Remove-CodexNotifyConfig removed a user notify program called notify.sh"
+    }
+    @('model = "gpt-5"', 'notify = ["powershell", "C:\\Users\\old\\.claude\\notifications\\notify.ps1", "codex"]') | Set-Content $tomlPath -Encoding UTF8
+    Remove-CodexNotifyConfig -Path $tomlPath
+    if ((Get-Content $tomlPath -Raw) -match '(?m)^\s*notify\s*=') {
+        throw "Remove-CodexNotifyConfig kept the legacy code-notify notify assignment"
+    }
+
 }
 finally {
     Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue

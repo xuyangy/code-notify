@@ -191,7 +191,7 @@ function Remove-CodexNotifyConfig {
         $buffer.Clear()
         # Drop only when the whole assignment points at our notifier and passes
         # the codex argument; otherwise restore it untouched.
-        if ($block -match '(code-notify|notifier\.sh|notify\.(sh|ps1))' -and $block -match 'codex') {
+        if ($block -match '(code-notify|notifier\.sh|\.claude[\\/]+notifications[\\/]+notify\.(sh|ps1))' -and $block -match 'codex') {
             return
         }
         foreach ($l in ($block -split "`n")) { $result.Add($l) }
@@ -1056,24 +1056,29 @@ function Get-CodexPermissionCommand {
     return "powershell -ExecutionPolicy Bypass -File `"$NotifyScript`" notification codex"
 }
 
+# Managed-hook command patterns. Besides the current notifier, they match the
+# notify script in its default install location, .claude\notifications\,
+# never by file name alone: a user's own hook that runs some other notify.ps1
+# or notify.sh must not be removed. A current install under a custom
+# CLAUDE_HOME is still recognised by its exact command.
 function Get-ManagedClaudeNotificationPattern {
-    return '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(notification|PreToolUse)(?:\s|$)'
+    return '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*(notification|PreToolUse)(?:\s|$)'
 }
 
 function Get-ManagedClaudeStopPattern {
-    return '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*stop(?:\s|$)'
+    return '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*stop(?:\s|$)'
 }
 
 function Get-ManagedClaudeStopFailurePattern {
-    return '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*StopFailure(?:\s|$)'
+    return '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*StopFailure(?:\s|$)'
 }
 
 function Get-ManagedClaudeEventPattern {
-    return '(claude-notify|code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(SubagentStart|SubagentStop|TeammateIdle|TaskCreated|TaskCompleted)(?:\s|$)'
+    return '(claude-notify|code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*(SubagentStart|SubagentStop|TeammateIdle|TaskCreated|TaskCompleted)(?:\s|$)'
 }
 
 function Get-ManagedCodexHookPattern {
-    return '(code-notify.*notifier\.sh|(?:^|[\\/])notify\.(?:ps1|sh)).*(stop|notification)\s+codex(?:\s|$)'
+    return '(code-notify.*notifier\.sh|\.claude[\\/]notifications[\\/]notify\.(?:ps1|sh)).*(stop|notification)\s+codex(?:\s|$)'
 }
 
 # Mirror of the bash is_notify_type_enabled: the alert types live in the

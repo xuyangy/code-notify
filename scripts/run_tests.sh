@@ -154,6 +154,14 @@ else
     test_fail "all aliases failed"
 fi
 
+# Bulk on/off survive `set -e` on bash 4.1+
+test_start "bulk on/off under errexit"
+if run_test_script tests/test-bulk-toggle-errexit.sh; then
+    test_pass
+else
+    test_fail "bulk on/off stopped early under errexit"
+fi
+
 # Test 12: npm launchers can route to the shell runtime
 test_start "npm launcher routing"
 if node ./bin/npm-cn.js version 2>&1 | grep -q "code-notify version"; then

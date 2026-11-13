@@ -370,7 +370,10 @@ enable_notifications_global() {
     local enabled_count=0
     for t in $installed_tools; do
         if enable_single_tool "$t" "quiet"; then
-            ((enabled_count++))
+            # Assignment, not ((enabled_count++)): the post-increment returns
+            # status 1 while the counter is 0, and under `set -e` bash 4.1+
+            # exits there, after the first tool.
+            enabled_count=$((enabled_count + 1))
         fi
     done
 
@@ -504,7 +507,8 @@ disable_notifications_global() {
     for t in claude codex gemini antigravity opencode pi omp; do
         if is_tool_disable_needed "$t"; then
             if disable_single_tool "$t" "quiet"; then
-                ((disabled_count++))
+                # Assignment for the same reason as enabled_count above.
+                disabled_count=$((disabled_count + 1))
             fi
         fi
     done

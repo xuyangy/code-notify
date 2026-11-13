@@ -7,6 +7,12 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Config-location overrides take priority over HOME in config.sh. Clear them
+# so an inherited value can never point a case at the user's real config;
+# each case sets HOME (and CLAUDE_HOME / CODEX_HOME where it needs them).
+unset CLAUDE_SETTINGS_HOME CLAUDE_HOME CODEX_HOME GEMINI_HOME XDG_CONFIG_HOME \
+    CODE_NOTIFY_OPENCODE_CONFIG_DIR
+
 # Color output
 RED='\033[0;31m'
 GREEN='\033[0;32m'

@@ -266,6 +266,22 @@ else
     test_fail "gemini hook preservation"
 fi
 
+# Update command method detection and up-to-date checks
+test_start "update command"
+if run_test_script tests/test-update-command.sh; then
+    test_pass
+else
+    test_fail "update command"
+fi
+
+# Config edits preserve user content (about 12s)
+test_start "config preservation"
+if run_test_script tests/test-config-preservation.sh; then
+    test_pass
+else
+    test_fail "config preservation"
+fi
+
 # Test 12: npm launchers can route to the shell runtime
 test_start "npm launcher routing"
 if node ./bin/npm-cn.js version 2>&1 | grep -q "code-notify version"; then

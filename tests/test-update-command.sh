@@ -2,6 +2,10 @@
 
 set -e
 
+# Each check sets these itself where it needs them; an inherited value would
+# change what the local-checkout check sees.
+unset CODE_NOTIFY_INSTALL_METHOD CODE_NOTIFY_LATEST_VERSION
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION="$(awk -F'"' '/^VERSION=/{print $2}' "$SCRIPT_DIR/../bin/code-notify")"
 

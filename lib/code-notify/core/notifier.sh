@@ -2838,7 +2838,16 @@ send_macos_notification() {
     else
         # osascript doesn't support click-to-activate, but we can use a workaround.
         # Keep this silent too so custom/default sound playback stays single-sourced.
-        osascript -e "display notification \"$MESSAGE\" with title \"$TITLE\" subtitle \"$SUBTITLE\"" 2>/dev/null
+        # The text goes in as script arguments, never into the script source:
+        # an AskUserQuestion message or a project name may contain quotes,
+        # which would otherwise break the script or run as AppleScript. The
+        # `--` ends osascript's options, so a message starting with "-" (even
+        # "-e") is still an argument.
+        osascript \
+            -e 'on run argv' \
+            -e 'display notification (item 1 of argv) with title (item 2 of argv) subtitle (item 3 of argv)' \
+            -e 'end run' \
+            -- "$MESSAGE" "$TITLE" "$SUBTITLE" 2>/dev/null
     fi
 }
 

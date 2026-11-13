@@ -301,9 +301,11 @@ channels_send_one() {
         body="$message"
         [[ -n "$context" ]] && body="${body}${body:+
 }$context"
+        # --data-raw, not -d: -d reads a file when the body starts with "@",
+        # and the body is agent-supplied text.
         curl -fsS -m "${CODE_NOTIFY_CHANNEL_TIMEOUT_SECONDS:-5}" \
             -H "Title: ${ntfy_title:-Code-Notify}" \
-            -d "$body" \
+            --data-raw "$body" \
             "$url" >/dev/null 2>&1 || return 0
         return 0
     fi

@@ -69,3 +69,35 @@ PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
 [[ ! -s "$curl_log" ]] || fail "disabled channels should not call webhooks"
 
 pass "channels store redacted Slack/Discord/ntfy endpoints and deliver provider payloads"
+
+# An ntfy body starting with "@" is sent as text. With plain -d, curl would
+# read the named file and post its contents instead.
+args_file="$test_dir/curl.args"
+cat > "$fake_bin/curl" <<EOF
+#!/bin/bash
+printf '%s\0' "\$@" > "$args_file"
+exit 0
+EOF
+chmod +x "$fake_bin/curl"
+(
+    PATH="$fake_bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    source "$ROOT_DIR/lib/code-notify/utils/channels.sh"
+    channels_send_one ntfy "https://ntfy.sh/private-topic" "Title" "@/etc/hosts" ""
+)
+curl_args=()
+while IFS= read -r -d '' arg; do
+    curl_args+=("$arg")
+done < "$args_file"
+body_flag=""
+body_value=""
+for ((i = 0; i < ${#curl_args[@]}; i++)); do
+    case "${curl_args[$i]}" in
+        -d|--data|--data-binary|--data-raw)
+            body_flag="${curl_args[$i]}"
+            body_value="${curl_args[$((i + 1))]:-}"
+            ;;
+    esac
+done
+[[ "$body_flag" == "--data-raw" ]] || fail "ntfy body should be sent with --data-raw, got '${body_flag:-none}'"
+[[ "$body_value" == "@/etc/hosts" ]] || fail "ntfy body should be the literal text, got '$body_value'"
+pass "ntfy sends an @-prefixed body as literal text"

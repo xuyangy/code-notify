@@ -2524,7 +2524,27 @@ for line in \
     [[ "$(LC_ALL=C tmux_busy_flag "$line")" == "1" ]] \
         || fail "a hint pill over a transcript row should read as busy under a C locale (got 0 for: $line)"
 done
+# The hint varies with platform, key bindings, mouse state and pane width
+# (Claude Code's pill component): Linux/WSL default (ctrl+End), a rebound
+# pageDown key, the keyboard hint on the new-messages label, and the bare
+# arrow used when scroll:bottom is unbound or the pane is narrow.
 for line in \
+    "  Jump to bottom (ctrl+End) ↓" \
+    "     xxxxxxxxxxxxxxxxxxxx Jump to bottom (ctrl+End) ↓ xxxxxxxxxxxxxxxxxxxx" \
+    "     xxxxxxxxxxxxxxxxxxxx 3 new messages · fn+↓ to scroll xxxxxxxxxxxxxxxxx" \
+    "  1 new message · fn+↓ to scroll" \
+    "     10                     Jump to bottom · PageDown to scroll" \
+    "     10                     Jump to bottom ↓" \
+    "  xxxxxxxxxxxxxxxxxxxx 3 new messages ↓ xxxxxxxxxxxxxxxxxxxx" \
+    "  Jump to bottom · ÷+↓ to scroll"; do
+    [[ "$(tmux_busy_flag "$line")" == "1" ]] \
+        || fail "a hint pill wording should read as busy (got 0 for: $line)"
+    [[ "$(LC_ALL=C tmux_busy_flag "$line")" == "1" ]] \
+        || fail "a hint pill wording should read as busy under a C locale (got 0 for: $line)"
+done
+for line in \
+    "  I am Waiting for your answer ↓" \
+    "  Jump to bottom of the file to see it" \
     "  Jump to bottom (ctrl+↓) when you are done reading" \
     "  Press Jump to bottom (ctrl+↓) to return" \
     "  Jump to the bottom (ctrl+↓)" \

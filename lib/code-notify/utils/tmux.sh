@@ -1086,26 +1086,39 @@ TMUX_INTERRUPT_QUIET_SECONDS="${CODE_NOTIFY_TMUX_INTERRUPT_QUIET_SECONDS:-20}"
 # view, and a still, scrolled pane then reads as an ended turn and loses a live
 # turn's spinner on the quiet path. What the TUI puts on screen instead is its
 # own floating hint pill, drawn only while the view is scrolled away from the
-# tail. The pill reads "Jump to bottom" plus a scroll hint whose wording varies
-# with the version and the input that scrolled — "Jump to bottom (ctrl+↓) ↓",
-# "Jump to bottom (click) ↓", "Jump to bottom · fn+↓ to scroll" have all been
-# captured — or "3 new messages (click) ↓" once rows have landed below the
-# viewport, which is the shape a scrolled-away LIVE turn actually renders.
+# tail. Its label is "Jump to bottom", or "3 new messages" once rows have
+# landed below the viewport — the shape a scrolled-away LIVE turn actually
+# renders. A scroll hint follows the label, chosen by platform, mouse mode,
+# whether a mouse event has been seen, the scroll:bottom and scroll:pageDown
+# key bindings, and pane width (Claude Code 2.1.326, read from its source):
+#   - macOS, default scroll:bottom, mouse seen:  "<label> (click) ↓"
+#   - macOS, default scroll:bottom, otherwise:   "<label> · fn+↓ to scroll"
+#     (or the rebound pageDown key, e.g. "· PageDown to scroll")
+#   - any other bound scroll:bottom key:          "<label> (<key>) ↓", which is
+#     "(ctrl+End) ↓" by default on Linux and WSL, and "(ctrl+↓) ↓" for a user
+#     who bound Ctrl+Down
+#   - no binding, or too narrow for the above:     "<label> ↓", then "<label>"
+# The askBelow label, "Waiting for your answer", is left out: Claude Code shows
+# it only while a dialog is pending, and tmux_running_pause_for_input has
+# already stopped the run by then, so there is no spinner to protect and only
+# prose surface to add.
 #
 # This is the one alternative that cannot be anchored to the row: the pill is
 # painted OVER a transcript row, not on a row of its own, so a capture reads
 # "…tr 0 x turn Jump to bottom (click) ↓ g the zero-padding…" whenever the row
-# beneath is long, with transcript text on both sides. Anchoring at the row's
-# start and end missed exactly that case and retired a live turn's spinner
-# while the user read a full-width diff. The pill is matched as a token instead:
-# its own padding space (or the row edge) on each side, the literal opener, and
-# a closing shape prose does not produce — the trailing ↓ glyph, or the
-# "· <key>+↓ to scroll" hint, or the end of the row. "Press Jump to bottom
-# (ctrl+↓) to return" still fails, on the word after the paren. The wording is
-# a fixed TUI literal, not a random verb, and a repaint takes the pill back the
-# moment the user returns to the bottom. Same trade as the transcript footer:
-# a cancelled turn parked in a scrolled view keeps its indicator until the view
-# comes back or the next prompt lands.
+# beneath is long, with transcript text on both sides; a row-anchored match
+# misses it. The pill is matched as a token instead, on its structure rather
+# than on key names: its own padding space (or the row edge) on each side, the
+# literal label, and a hint shape prose does not produce — a parenthesised key
+# then the ↓ glyph, "· <key> to scroll", or a bare ↓ — or "(ctrl+↓)" or
+# "(click)" ending the row. "Press Jump to bottom (ctrl+↓) to return" still
+# fails, on the word after the paren. The key in "· <key> to scroll" is matched
+# with `.+` rather than a negated bracket, because under a C locale a bracket
+# holding the multibyte "·" degrades to a byte set and rejects any key whose
+# UTF-8 shares those bytes. The label is a fixed TUI literal, not a random verb,
+# and a repaint takes the pill back the moment the user returns to the bottom.
+# Same trade as the transcript footer: a cancelled turn parked in a scrolled
+# view keeps its indicator until the view comes back or the next prompt lands.
 #
 # The completion line deliberately matches none of them, whatever verb it drew —
 # it has no ellipsis — so a finished turn does not veto its own teardown.
@@ -1123,13 +1136,13 @@ TMUX_INTERRUPT_QUIET_SECONDS="${CODE_NOTIFY_TMUX_INTERRUPT_QUIET_SECONDS:-20}"
 # missing a live turn. The structural anchors above are what make a whole-pane
 # search affordable: they keep the match to lines the TUI draws, which a repaint
 # can take back, rather than to transcript text, which it cannot. One residual
-# case survives on purpose — a pane whose transcript QUOTES a working line
-# verbatim (reviewing this file, say) vetoes its own teardown until that text
-# scrolls off.
+# case survives on purpose — a pane whose transcript QUOTES a working line or a
+# hint pill verbatim (reviewing this file, say) vetoes its own teardown until
+# that text scrolls off.
 #
 # The `-` (not `:-`) expansion makes an explicit empty value stick, which drops
 # the veto.
-TMUX_BUSY_MARKERS="${CODE_NOTIFY_TMUX_BUSY_MARKERS-^[[:space:]]*(✻|✽|✶|✳|✢|∗|·|\*)[[:space:]]+[A-Za-z].*(…|\.\.\.)|^[[:space:]]*⎿.*…[[:space:]]*\([0-9]+[hms]|^[[:space:]]*•[[:space:]]+[A-Za-z].*\([0-9]+[hms][^)]*[Ee]sc to interrupt[^)]*\)[[:space:]]*$|^[[:space:]]*(dialog waiting[[:space:]]+·[[:space:]]+)?Showing .*transcript[[:space:]]+·[[:space:]]+ctrl\+o to toggle([[:space:]]+·.*)?$|(^|[[:space:]])Jump to bottom([[:space:]]*\((ctrl\+↓|click)\)[[:space:]]*(↓([[:space:]]|$)|$)|[[:space:]]+·[[:space:]]+[a-z]+\+↓ to scroll([[:space:]]|$))|(^|[[:space:]])[0-9]+ new messages?[[:space:]]*\(click\)[[:space:]]*(↓([[:space:]]|$)|$)}"
+TMUX_BUSY_MARKERS="${CODE_NOTIFY_TMUX_BUSY_MARKERS-^[[:space:]]*(✻|✽|✶|✳|✢|∗|·|\*)[[:space:]]+[A-Za-z].*(…|\.\.\.)|^[[:space:]]*⎿.*…[[:space:]]*\([0-9]+[hms]|^[[:space:]]*•[[:space:]]+[A-Za-z].*\([0-9]+[hms][^)]*[Ee]sc to interrupt[^)]*\)[[:space:]]*$|^[[:space:]]*(dialog waiting[[:space:]]+·[[:space:]]+)?Showing .*transcript[[:space:]]+·[[:space:]]+ctrl\+o to toggle([[:space:]]+·.*)?$|(^|[[:space:]])(Jump to bottom|[0-9]+ new messages?)[[:space:]]+(\([^()]+\)[[:space:]]+↓|·[[:space:]]+.+ to scroll|↓)([[:space:]]|$)|(^|[[:space:]])(Jump to bottom|[0-9]+ new messages?)[[:space:]]+\((ctrl\+↓|click)\)[[:space:]]*$}"
 
 tmux_running_enabled() {
     [[ "${CODE_NOTIFY_TMUX_RUNNING:-}" != "false" ]] && tmux_badge_enabled

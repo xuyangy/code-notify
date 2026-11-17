@@ -2510,6 +2510,20 @@ done
     || fail "the singular new-message hint row should read as busy"
 [[ "$(LC_ALL=C tmux_busy_flag "  12 new messages (click) ↓")" == "1" ]] \
     || fail "the new-messages hint row should read as busy under a C locale"
+# The pill is painted over a transcript row, so a long row leaves text on both
+# sides of it. These are real captures (mouse wheel and keyboard scrolling).
+for line in \
+    "  ! for i in \$(seq 1 80); do printf \"row%03d %s\\n\" \$i;  Jump to bottom (click) ↓" \
+    "  The row labels came out as rowxx1 and rowx1x because tr 0 x turn Jump to bottom (click) ↓ g the zero-padding and zeros" \
+    "     xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx Jump to bottom (click) ↓ xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+    "     10                                       Jump to bottom · fn+↓ to scroll" \
+    "           +an authorized live re-check. Jump to bottom (ctrl+↓) ↓ and the README's TUI verdict" \
+    "  verified lineages answered than were s 3 new messages (click) ↓ elected, whatever the cause"; do
+    [[ "$(tmux_busy_flag "$line")" == "1" ]] \
+        || fail "a hint pill over a transcript row should read as busy (got 0 for: $line)"
+    [[ "$(LC_ALL=C tmux_busy_flag "$line")" == "1" ]] \
+        || fail "a hint pill over a transcript row should read as busy under a C locale (got 0 for: $line)"
+done
 for line in \
     "  Jump to bottom (ctrl+↓) when you are done reading" \
     "  Press Jump to bottom (ctrl+↓) to return" \
